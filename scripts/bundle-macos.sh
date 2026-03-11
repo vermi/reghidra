@@ -37,6 +37,24 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 # Copy binary
 cp "$BINARY" "$MACOS_DIR/reghidra"
 
+# Generate .icns icon from PNG
+ICON_PNG="$PROJECT_ROOT/assets/reghidra.png"
+if [ -f "$ICON_PNG" ]; then
+    echo "Generating app icon..."
+    ICONSET="$PROJECT_ROOT/target/reghidra.iconset"
+    mkdir -p "$ICONSET"
+    for SIZE in 16 32 64 128 256 512; do
+        sips -z $SIZE $SIZE "$ICON_PNG" --out "$ICONSET/icon_${SIZE}x${SIZE}.png" > /dev/null 2>&1
+        DOUBLE=$((SIZE * 2))
+        if [ $DOUBLE -le 1024 ]; then
+            sips -z $DOUBLE $DOUBLE "$ICON_PNG" --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null 2>&1
+        fi
+    done
+    sips -z 1024 1024 "$ICON_PNG" --out "$ICONSET/icon_512x512@2x.png" > /dev/null 2>&1
+    iconutil -c icns "$ICONSET" -o "$RESOURCES_DIR/reghidra.icns"
+    rm -rf "$ICONSET"
+fi
+
 # Generate Info.plist
 cat > "$CONTENTS/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -61,6 +79,8 @@ cat > "$CONTENTS/Info.plist" << PLIST
     <string>6.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
+    <key>CFBundleIconFile</key>
+    <string>reghidra</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
