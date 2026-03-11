@@ -159,21 +159,42 @@ impl ReghidraApp {
     }
 
     pub fn navigate_to(&mut self, address: u64) {
-        // Snap to the nearest instruction address if the exact address isn't one.
-        // This enables navigating from symbols, imports, strings, etc. in data sections.
         let target = if let Some(ref project) = self.project {
-            if project.instructions.iter().any(|i| i.address == address) {
+            // Check if this is a known instruction address
+            let is_instruction = project
+                .instructions
+                .binary_search_by_key(&address, |i| i.address)
+                .is_ok();
+
+            if is_instruction {
                 address
             } else {
-                // Find the nearest instruction at or before this address
-                project
-                    .instructions
-                    .iter()
-                    .filter(|i| i.address <= address)
-                    .last()
-                    .or_else(|| project.instructions.first())
-                    .map(|i| i.address)
-                    .unwrap_or(address)
+                // Check if the address falls inside any loaded section
+                let in_section = project.binary.section_at_va(address).is_some();
+
+                if in_section {
+                    // Check if it's in a non-executable (data) section
+                    let is_data = project
+                        .binary
+                        .section_at_va(address)
+                        .is_some_and(|s| !s.is_executable);
+
+                    if is_data {
+                        // Switch to hex view for data addresses
+                        self.main_view = MainView::Hex;
+                    }
+                    address
+                } else {
+                    // Not in any section — snap to nearest instruction
+                    project
+                        .instructions
+                        .iter()
+                        .filter(|i| i.address <= address)
+                        .last()
+                        .or_else(|| project.instructions.first())
+                        .map(|i| i.address)
+                        .unwrap_or(address)
+                }
             }
         } else {
             address
@@ -194,14 +215,39 @@ impl ReghidraApp {
     pub fn nav_back(&mut self) {
         if self.nav_position > 0 {
             self.nav_position -= 1;
-            self.selected_address = Some(self.nav_history[self.nav_position]);
+            let addr = self.nav_history[self.nav_position];
+            self.selected_address = Some(addr);
+            self.auto_switch_view(addr);
         }
     }
 
     pub fn nav_forward(&mut self) {
         if self.nav_position + 1 < self.nav_history.len() {
             self.nav_position += 1;
-            self.selected_address = Some(self.nav_history[self.nav_position]);
+            let addr = self.nav_history[self.nav_position];
+            self.selected_address = Some(addr);
+            self.auto_switch_view(addr);
+        }
+    }
+
+    /// Switch between hex and disasm views based on whether the address is code or data.
+    fn auto_switch_view(&mut self, addr: u64) {
+        if let Some(ref project) = self.project {
+            let is_code = project
+                .instructions
+                .binary_search_by_key(&addr, |i| i.address)
+                .is_ok();
+            if is_code && self.main_view == MainView::Hex {
+                self.main_view = MainView::Disassembly;
+            } else if !is_code {
+                let is_data = project
+                    .binary
+                    .section_at_va(addr)
+                    .is_some_and(|s| !s.is_executable);
+                if is_data {
+                    self.main_view = MainView::Hex;
+                }
+            }
         }
     }
 
