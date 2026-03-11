@@ -1,0 +1,873 @@
+use crate::annotations::AnnotationPopup;
+use crate::help::HelpOverlay;
+use crate::palette::{CommandPalette, PaletteAction};
+use crate::theme::{Theme, ThemeMode};
+use crate::undo::{Action, UndoHistory};
+use crate::views;
+use reghidra_core::Project;
+use std::path::PathBuf;
+
+/// Which panel is selected in the sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidePanel {
+    Functions,
+    Symbols,
+    Imports,
+    Exports,
+    Sections,
+    Strings,
+}
+
+/// Which main view is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainView {
+    Disassembly,
+    Decompile,
+    Hex,
+    Cfg,
+    Xrefs,
+    Ir,
+}
+
+/// Keyboard input mode for vim-like navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    /// Normal mode: hjkl navigation, shortcuts active.
+    Normal,
+    /// A text field has focus (search, palette, annotation).
+    #[allow(dead_code)]
+    Insert,
+}
+
+/// Layout mode for the main content area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewLayout {
+    Single,
+    SplitVertical,
+}
+
+pub struct ReghidraApp {
+    pub project: Option<Project>,
+    pub loading_error: Option<String>,
+    pub side_panel: SidePanel,
+    pub main_view: MainView,
+    pub selected_address: Option<u64>,
+    pub search_query: String,
+    pub show_bytes_in_disasm: bool,
+    pub hex_bytes_per_row: usize,
+    pub nav_history: Vec<u64>,
+    pub nav_position: usize,
+
+    // Phase 5: Theme
+    pub theme: Theme,
+
+    // Phase 5: Undo/redo
+    pub undo: UndoHistory,
+
+    // Phase 5: Command palette
+    pub palette: CommandPalette,
+
+    // Phase 5: Annotations popup
+    pub annotation_popup: AnnotationPopup,
+
+    // Phase 5: Vim-like navigation
+    #[allow(dead_code)]
+    pub input_mode: InputMode,
+    /// Tracks if the user typed 'g' once (for gg = go to top).
+    pub g_pending: bool,
+
+    // Phase 5: Split views
+    pub layout: ViewLayout,
+    pub secondary_view: MainView,
+
+    // Phase 5: Context menu state
+    #[allow(dead_code)]
+    pub context_menu_addr: Option<u64>,
+
+    // Phase 5a: Help overlay
+    pub help: HelpOverlay,
+
+    // Mnemonic highlighting (click a mnemonic to highlight all matching)
+    pub highlighted_mnemonic: Option<String>,
+
+    // Tracks the previous selected address to detect navigation changes
+    pub prev_selected_address: Option<u64>,
+
+    // Track whether theme has been applied
+    theme_applied: bool,
+}
+
+impl ReghidraApp {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            project: None,
+            loading_error: None,
+            side_panel: SidePanel::Functions,
+            main_view: MainView::Disassembly,
+            selected_address: None,
+            search_query: String::new(),
+            show_bytes_in_disasm: true,
+            hex_bytes_per_row: 16,
+            nav_history: Vec::new(),
+            nav_position: 0,
+
+            theme: Theme::dark(),
+            undo: UndoHistory::new(),
+            palette: CommandPalette::new(),
+            annotation_popup: AnnotationPopup::new(),
+            input_mode: InputMode::Normal,
+            g_pending: false,
+            layout: ViewLayout::Single,
+            secondary_view: MainView::Decompile,
+            context_menu_addr: None,
+            help: HelpOverlay::new(),
+            highlighted_mnemonic: None,
+            prev_selected_address: None,
+            theme_applied: false,
+        }
+    }
+
+    pub fn open_file(&mut self, path: PathBuf) {
+        match Project::open(&path) {
+            Ok(project) => {
+                self.selected_address = Some(project.binary.info.entry_point);
+                self.nav_history = vec![project.binary.info.entry_point];
+                self.nav_position = 0;
+                self.project = Some(project);
+                self.loading_error = None;
+                self.undo = UndoHistory::new();
+            }
+            Err(e) => {
+                self.loading_error = Some(format!("Failed to load {}: {e}", path.display()));
+                self.project = None;
+            }
+        }
+    }
+
+    pub fn navigate_to(&mut self, address: u64) {
+        if self.selected_address == Some(address) {
+            return;
+        }
+        // Truncate forward history
+        if self.nav_position + 1 < self.nav_history.len() {
+            self.nav_history.truncate(self.nav_position + 1);
+        }
+        self.nav_history.push(address);
+        self.nav_position = self.nav_history.len() - 1;
+        self.selected_address = Some(address);
+    }
+
+    pub fn nav_back(&mut self) {
+        if self.nav_position > 0 {
+            self.nav_position -= 1;
+            self.selected_address = Some(self.nav_history[self.nav_position]);
+        }
+    }
+
+    pub fn nav_forward(&mut self) {
+        if self.nav_position + 1 < self.nav_history.len() {
+            self.nav_position += 1;
+            self.selected_address = Some(self.nav_history[self.nav_position]);
+        }
+    }
+
+    pub fn toggle_theme(&mut self) {
+        self.theme = match self.theme.mode {
+            ThemeMode::Dark => Theme::light(),
+            ThemeMode::Light => Theme::dark(),
+        };
+        self.theme_applied = false;
+    }
+
+    pub fn toggle_bookmark(&mut self) {
+        if let (Some(addr), Some(project)) = (self.selected_address, &mut self.project) {
+            if project.bookmarks.contains(&addr) {
+                let action = Action::RemoveBookmark { address: addr };
+                self.undo.execute(action, project);
+            } else {
+                let action = Action::AddBookmark { address: addr };
+                self.undo.execute(action, project);
+            }
+        }
+    }
+
+    /// Navigate to the next function from the current address.
+    pub fn next_function(&mut self) {
+        if let Some(project) = &self.project {
+            let current = self.selected_address.unwrap_or(0);
+            let funcs = project.functions();
+            if let Some((addr, _)) = funcs.iter().find(|(a, _)| *a > current) {
+                let addr = *addr;
+                self.navigate_to(addr);
+            }
+        }
+    }
+
+    /// Navigate to the previous function from the current address.
+    pub fn prev_function(&mut self) {
+        if let Some(project) = &self.project {
+            let current = self.selected_address.unwrap_or(u64::MAX);
+            let funcs = project.functions();
+            if let Some((addr, _)) = funcs.iter().rev().find(|(a, _)| *a < current) {
+                let addr = *addr;
+                self.navigate_to(addr);
+            }
+        }
+    }
+
+    /// Navigate to the next instruction relative to the current address.
+    pub fn next_instruction(&mut self) {
+        if let Some(project) = &self.project {
+            let current = self.selected_address.unwrap_or(0);
+            if let Some(idx) = project
+                .instructions
+                .iter()
+                .position(|i| i.address == current)
+            {
+                if idx + 1 < project.instructions.len() {
+                    let addr = project.instructions[idx + 1].address;
+                    self.navigate_to(addr);
+                }
+            }
+        }
+    }
+
+    /// Navigate to the previous instruction relative to the current address.
+    pub fn prev_instruction(&mut self) {
+        if let Some(project) = &self.project {
+            let current = self.selected_address.unwrap_or(0);
+            if let Some(idx) = project
+                .instructions
+                .iter()
+                .position(|i| i.address == current)
+            {
+                if idx > 0 {
+                    let addr = project.instructions[idx - 1].address;
+                    self.navigate_to(addr);
+                }
+            }
+        }
+    }
+
+    /// Navigate to the first instruction.
+    pub fn first_instruction(&mut self) {
+        if let Some(project) = &self.project {
+            if let Some(insn) = project.instructions.first() {
+                let addr = insn.address;
+                self.navigate_to(addr);
+            }
+        }
+    }
+
+    /// Navigate to the last instruction.
+    pub fn last_instruction(&mut self) {
+        if let Some(project) = &self.project {
+            if let Some(insn) = project.instructions.last() {
+                let addr = insn.address;
+                self.navigate_to(addr);
+            }
+        }
+    }
+}
+
+impl eframe::App for ReghidraApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply theme
+        if !self.theme_applied {
+            self.theme.apply(ctx);
+            self.theme_applied = true;
+        }
+
+        // Determine input mode: Insert if any text field has focus or modals are open
+        let modals_open = self.palette.open || self.annotation_popup.open || self.help.open;
+
+        // Global keyboard shortcuts (always active)
+        let mut open_comment = false;
+        let mut open_rename = false;
+
+        ctx.input(|i| {
+            // Cmd+O: Open file
+            if i.key_pressed(egui::Key::O) && i.modifiers.command {
+                // handled below — can't borrow self inside closure safely
+            }
+            // Alt+Left/Right: nav back/forward
+            if i.key_pressed(egui::Key::ArrowLeft) && i.modifiers.alt {
+                self.nav_back();
+            }
+            if i.key_pressed(egui::Key::ArrowRight) && i.modifiers.alt {
+                self.nav_forward();
+            }
+            // Cmd+K: Command palette
+            if i.key_pressed(egui::Key::K) && i.modifiers.command {
+                self.palette.toggle();
+            }
+            // Cmd+Z / Cmd+Shift+Z: Undo/redo
+            if i.key_pressed(egui::Key::Z) && i.modifiers.command && !i.modifiers.shift {
+                if let Some(ref mut project) = self.project {
+                    self.undo.undo(project);
+                }
+            }
+            if i.key_pressed(egui::Key::Z) && i.modifiers.command && i.modifiers.shift {
+                if let Some(ref mut project) = self.project {
+                    self.undo.redo(project);
+                }
+            }
+            // Cmd+B: Toggle bookmark
+            if i.key_pressed(egui::Key::B) && i.modifiers.command {
+                // handled after closure
+            }
+            // Cmd+D: Toggle theme
+            if i.key_pressed(egui::Key::D) && i.modifiers.command {
+                // handled after closure
+            }
+        });
+
+        // Handle F1: Toggle help
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.help.toggle();
+        }
+        // Handle Cmd+O
+        if ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.command) {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Open Binary")
+                .pick_file()
+            {
+                self.open_file(path);
+            }
+        }
+        // Handle Cmd+B
+        if ctx.input(|i| i.key_pressed(egui::Key::B) && i.modifiers.command) {
+            self.toggle_bookmark();
+        }
+        // Handle Cmd+D
+        if ctx.input(|i| i.key_pressed(egui::Key::D) && i.modifiers.command) {
+            self.toggle_theme();
+        }
+
+        // Vim-like keys (only in Normal mode, no modals open, no text field focused, project loaded)
+        let text_field_focused = ctx.memory(|m| m.focused().is_some())
+            && !modals_open; // modals handle their own focus
+        if !modals_open && !text_field_focused && self.project.is_some() {
+            ctx.input(|i| {
+                // Check no text edit has focus by seeing if any key produces text
+                // We use explicit key checks for vim bindings
+                if !i.modifiers.command && !i.modifiers.alt && !i.modifiers.ctrl {
+                    // j/k: next/prev instruction
+                    if i.key_pressed(egui::Key::J) {
+                        self.next_instruction();
+                        self.g_pending = false;
+                    }
+                    if i.key_pressed(egui::Key::K) {
+                        self.prev_instruction();
+                        self.g_pending = false;
+                    }
+                    // n/N: next/prev function
+                    if i.key_pressed(egui::Key::N) {
+                        if i.modifiers.shift {
+                            self.prev_function();
+                        } else {
+                            self.next_function();
+                        }
+                        self.g_pending = false;
+                    }
+                    // gg: go to first instruction, G: go to last
+                    if i.key_pressed(egui::Key::G) {
+                        if i.modifiers.shift {
+                            self.last_instruction();
+                            self.g_pending = false;
+                        } else if self.g_pending {
+                            self.first_instruction();
+                            self.g_pending = false;
+                        } else {
+                            self.g_pending = true;
+                        }
+                    }
+                    // Reset g_pending on any other key
+                    if self.g_pending
+                        && !i.key_pressed(egui::Key::G)
+                        && i.events.iter().any(|e| {
+                            matches!(e, egui::Event::Key { pressed: true, .. })
+                        })
+                    {
+                        self.g_pending = false;
+                    }
+
+                    // ;: add comment
+                    if i.key_pressed(egui::Key::Semicolon) {
+                        open_comment = true;
+                    }
+                    // r: rename function
+                    if i.key_pressed(egui::Key::R) {
+                        open_rename = true;
+                    }
+                    // x: switch to xrefs view
+                    if i.key_pressed(egui::Key::X) {
+                        self.main_view = MainView::Xrefs;
+                    }
+                    // d: switch to decompile view (without cmd)
+                    if i.key_pressed(egui::Key::D) {
+                        self.main_view = MainView::Decompile;
+                    }
+                    // Space: toggle split view
+                    if i.key_pressed(egui::Key::Space) {
+                        self.layout = match self.layout {
+                            ViewLayout::Single => ViewLayout::SplitVertical,
+                            ViewLayout::SplitVertical => ViewLayout::Single,
+                        };
+                    }
+                    // 1-6: switch views
+                    if i.key_pressed(egui::Key::Num1) {
+                        self.main_view = MainView::Disassembly;
+                    }
+                    if i.key_pressed(egui::Key::Num2) {
+                        self.main_view = MainView::Decompile;
+                    }
+                    if i.key_pressed(egui::Key::Num3) {
+                        self.main_view = MainView::Hex;
+                    }
+                    if i.key_pressed(egui::Key::Num4) {
+                        self.main_view = MainView::Cfg;
+                    }
+                    if i.key_pressed(egui::Key::Num5) {
+                        self.main_view = MainView::Xrefs;
+                    }
+                    if i.key_pressed(egui::Key::Num6) {
+                        self.main_view = MainView::Ir;
+                    }
+                    // ?: toggle help
+                    if i.key_pressed(egui::Key::Questionmark) {
+                        self.help.toggle();
+                    }
+                }
+            });
+        }
+
+        // Open annotation popups after input processing
+        if open_comment {
+            if let Some(addr) = self.selected_address {
+                let existing = self
+                    .project
+                    .as_ref()
+                    .and_then(|p| p.comments.get(&addr))
+                    .cloned();
+                self.annotation_popup
+                    .open_comment(addr, existing.as_deref());
+            }
+        }
+        if open_rename {
+            if let Some(addr) = self.selected_address {
+                let existing = self
+                    .project
+                    .as_ref()
+                    .and_then(|p| p.renamed_functions.get(&addr))
+                    .cloned();
+                self.annotation_popup
+                    .open_rename(addr, existing.as_deref());
+            }
+        }
+
+        // Top menu bar
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open... (Cmd+O)").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Binary")
+                            .pick_file()
+                        {
+                            self.open_file(path);
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                ui.menu_button("View", |ui| {
+                    if ui
+                        .radio_value(&mut self.main_view, MainView::Disassembly, "Disassembly (1)")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                    if ui
+                        .radio_value(&mut self.main_view, MainView::Decompile, "Decompile (2)")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                    if ui
+                        .radio_value(&mut self.main_view, MainView::Hex, "Hex (3)")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                    if ui
+                        .radio_value(
+                            &mut self.main_view,
+                            MainView::Cfg,
+                            "Control Flow Graph (4)",
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                    if ui
+                        .radio_value(
+                            &mut self.main_view,
+                            MainView::Xrefs,
+                            "Cross-References (5)",
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                    if ui
+                        .radio_value(&mut self.main_view, MainView::Ir, "IR (6)")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut self.show_bytes_in_disasm, "Show bytes in disassembly");
+                    ui.separator();
+                    let layout_label = match self.layout {
+                        ViewLayout::Single => "Split View (Space)",
+                        ViewLayout::SplitVertical => "Single View (Space)",
+                    };
+                    if ui.button(layout_label).clicked() {
+                        self.layout = match self.layout {
+                            ViewLayout::Single => ViewLayout::SplitVertical,
+                            ViewLayout::SplitVertical => ViewLayout::Single,
+                        };
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Navigate", |ui| {
+                    if ui.button("Back (Alt+Left)").clicked() {
+                        self.nav_back();
+                        ui.close_menu();
+                    }
+                    if ui.button("Forward (Alt+Right)").clicked() {
+                        self.nav_forward();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Command Palette (Cmd+K)").clicked() {
+                        self.palette.toggle();
+                        ui.close_menu();
+                    }
+                    if ui.button("Next Function (n)").clicked() {
+                        self.next_function();
+                        ui.close_menu();
+                    }
+                    if ui.button("Prev Function (N)").clicked() {
+                        self.prev_function();
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Edit", |ui| {
+                    let can_undo = self.undo.can_undo();
+                    let can_redo = self.undo.can_redo();
+                    let undo_label = if let Some(desc) = self.undo.undo_description() {
+                        format!("Undo: {desc} (Cmd+Z)")
+                    } else {
+                        "Undo (Cmd+Z)".into()
+                    };
+                    let redo_label = if let Some(desc) = self.undo.redo_description() {
+                        format!("Redo: {desc} (Cmd+Shift+Z)")
+                    } else {
+                        "Redo (Cmd+Shift+Z)".into()
+                    };
+
+                    if ui
+                        .add_enabled(can_undo, egui::Button::new(undo_label))
+                        .clicked()
+                    {
+                        if let Some(ref mut project) = self.project {
+                            self.undo.undo(project);
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(can_redo, egui::Button::new(redo_label))
+                        .clicked()
+                    {
+                        if let Some(ref mut project) = self.project {
+                            self.undo.redo(project);
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Add Comment (;)").clicked() {
+                        if let Some(addr) = self.selected_address {
+                            let existing = self
+                                .project
+                                .as_ref()
+                                .and_then(|p| p.comments.get(&addr))
+                                .cloned();
+                            self.annotation_popup
+                                .open_comment(addr, existing.as_deref());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Rename Function (r)").clicked() {
+                        if let Some(addr) = self.selected_address {
+                            let existing = self
+                                .project
+                                .as_ref()
+                                .and_then(|p| p.renamed_functions.get(&addr))
+                                .cloned();
+                            self.annotation_popup
+                                .open_rename(addr, existing.as_deref());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Toggle Bookmark (Cmd+B)").clicked() {
+                        self.toggle_bookmark();
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Theme", |ui| {
+                    if ui
+                        .radio_value(&mut self.theme.mode, ThemeMode::Dark, "Dark (Cmd+D)")
+                        .clicked()
+                    {
+                        self.theme = Theme::dark();
+                        self.theme_applied = false;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .radio_value(&mut self.theme.mode, ThemeMode::Light, "Light (Cmd+D)")
+                        .clicked()
+                    {
+                        self.theme = Theme::light();
+                        self.theme_applied = false;
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Quick Start Guide (F1)").clicked() {
+                        self.help.toggle();
+                        ui.close_menu();
+                    }
+                    if ui.button("Keyboard Shortcuts").clicked() {
+                        self.help.open = true;
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+
+        // Status bar
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(ref project) = self.project {
+                    let info = &project.binary.info;
+                    ui.label(format!(
+                        "{} | {} | {}",
+                        info.path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        info.format,
+                        info.architecture,
+                    ));
+                    ui.separator();
+                    ui.label(format!(
+                        "{} insns | {} fns | {} xrefs | {} strings",
+                        project.instructions.len(),
+                        project.analysis.functions.len(),
+                        project.analysis.xrefs.total_count(),
+                        project.binary.strings.len(),
+                    ));
+
+                    // Show bookmark indicator
+                    if let Some(addr) = self.selected_address {
+                        if project.bookmarks.contains(&addr) {
+                            ui.separator();
+                            ui.colored_label(self.theme.bookmark, "BOOKMARKED");
+                        }
+                    }
+
+                    // Show vim key hints
+                    ui.separator();
+                    ui.colored_label(
+                        self.theme.text_dim,
+                        "j/k:nav  n/N:fn  ;:comment  r:rename  1-6:views  Space:split  ?:help",
+                    );
+
+                    if let Some(addr) = self.selected_address {
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(format!("0x{addr:08x}"));
+                            },
+                        );
+                    }
+                } else {
+                    ui.label("No binary loaded -- File > Open or Cmd+O");
+                }
+            });
+        });
+
+        if self.project.is_none() {
+            // Welcome screen
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(200.0);
+                    ui.heading("Reghidra");
+                    ui.label("A modern reverse engineering framework");
+                    ui.add_space(20.0);
+                    if ui.button("Open Binary...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Binary")
+                            .pick_file()
+                        {
+                            self.open_file(path);
+                        }
+                    }
+                    ui.add_space(8.0);
+                    if ui.button("Quick Start Guide (F1)").clicked() {
+                        self.help.toggle();
+                    }
+                    if let Some(ref err) = self.loading_error {
+                        ui.add_space(10.0);
+                        ui.colored_label(egui::Color32::RED, err);
+                    }
+                });
+            });
+
+            // Help overlay (available even without a binary loaded)
+            let theme_for_welcome = self.theme.clone();
+            self.help.show(ctx, &theme_for_welcome);
+            return;
+        }
+
+        // Left sidebar: panel selector + content
+        egui::SidePanel::left("side_panel")
+            .default_width(280.0)
+            .min_width(200.0)
+            .show(ctx, |ui| {
+                // Panel selector tabs
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.side_panel, SidePanel::Functions, "Fn");
+                    ui.selectable_value(&mut self.side_panel, SidePanel::Symbols, "Sym");
+                    ui.selectable_value(&mut self.side_panel, SidePanel::Imports, "Imp");
+                    ui.selectable_value(&mut self.side_panel, SidePanel::Exports, "Exp");
+                    ui.selectable_value(&mut self.side_panel, SidePanel::Sections, "Sec");
+                    ui.selectable_value(&mut self.side_panel, SidePanel::Strings, "Str");
+                });
+                ui.separator();
+
+                // Search box
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    ui.text_edit_singleline(&mut self.search_query);
+                });
+                ui.separator();
+
+                views::side_panel::render(self, ui);
+            });
+
+        // Main content area
+        egui::CentralPanel::default().show(ctx, |ui| {
+            match self.layout {
+                ViewLayout::Single => {
+                    render_view_tabs_and_content(self, ui, true);
+                }
+                ViewLayout::SplitVertical => {
+                    // Split the available area in half
+                    let available = ui.available_size();
+                    let half_width = available.x / 2.0 - 4.0;
+
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(available.y);
+
+                        // Left pane (primary)
+                        ui.vertical(|ui| {
+                            ui.set_width(half_width);
+                            ui.set_min_height(available.y);
+                            render_view_tabs_and_content(self, ui, true);
+                        });
+
+                        ui.separator();
+
+                        // Right pane (secondary)
+                        ui.vertical(|ui| {
+                            ui.set_width(half_width);
+                            ui.set_min_height(available.y);
+                            render_view_tabs_and_content(self, ui, false);
+                        });
+                    });
+                }
+            }
+        });
+
+        // Overlays: Command palette and annotation popup
+        // These need mutable access to project, so we handle them carefully
+
+        // Command palette
+        if self.palette.open {
+            if let Some(ref project) = self.project {
+                self.palette.update_entries(project);
+            }
+        }
+        let theme_clone = self.theme.clone();
+        if let Some(action) = self.palette.show(ctx, &theme_clone) {
+            match action {
+                PaletteAction::NavigateTo(addr) => self.navigate_to(addr),
+                PaletteAction::SwitchView(view) => self.main_view = view,
+                PaletteAction::ToggleTheme => self.toggle_theme(),
+                PaletteAction::ShowHelp => self.help.toggle(),
+                PaletteAction::GoToAddress => {}
+            }
+        }
+
+        // Annotation popup
+        if self.annotation_popup.open {
+            if let Some(ref mut project) = self.project {
+                self.annotation_popup
+                    .show(ctx, &theme_clone, project, &mut self.undo);
+            }
+        }
+
+        // Help overlay
+        self.help.show(ctx, &theme_clone);
+    }
+}
+
+/// Render view tabs and the selected view's content.
+fn render_view_tabs_and_content(app: &mut ReghidraApp, ui: &mut egui::Ui, is_primary: bool) {
+    let view = if is_primary {
+        &mut app.main_view
+    } else {
+        &mut app.secondary_view
+    };
+
+    ui.horizontal(|ui| {
+        ui.selectable_value(view, MainView::Disassembly, "Disassembly");
+        ui.selectable_value(view, MainView::Decompile, "Decompile");
+        ui.selectable_value(view, MainView::Hex, "Hex");
+        ui.selectable_value(view, MainView::Cfg, "CFG");
+        ui.selectable_value(view, MainView::Xrefs, "Xrefs");
+        ui.selectable_value(view, MainView::Ir, "IR");
+    });
+    ui.separator();
+
+    let active_view = *view;
+    match active_view {
+        MainView::Disassembly => views::disasm::render(app, ui),
+        MainView::Decompile => views::decompile::render(app, ui),
+        MainView::Hex => views::hex::render(app, ui),
+        MainView::Cfg => views::cfg::render(app, ui),
+        MainView::Xrefs => views::xrefs::render(app, ui),
+        MainView::Ir => views::ir::render(app, ui),
+    }
+}

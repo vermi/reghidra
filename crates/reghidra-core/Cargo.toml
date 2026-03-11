@@ -1,0 +1,13 @@
+[package]
+name = "reghidra-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+goblin = { workspace = true }
+capstone = { workspace = true }
+reghidra-ir = { workspace = true }
+reghidra-decompile = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }

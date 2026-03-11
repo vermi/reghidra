@@ -1,0 +1,14 @@
+[package]
+name = "reghidra-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "reghidra-cli"
+path = "src/main.rs"
+
+[dependencies]
+reghidra-core = { workspace = true }
+anyhow = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

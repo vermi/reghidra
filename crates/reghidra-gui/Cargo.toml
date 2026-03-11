@@ -1,0 +1,25 @@
+[package]
+name = "reghidra-gui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "reghidra"
+path = "src/main.rs"
+
+[dependencies]
+reghidra-core = { workspace = true }
+reghidra-ir = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+rfd = "0.15"
+
+[package.metadata.bundle]
+name = "Reghidra"
+identifier = "com.reghidra.app"
+category = "Developer Tool"
+short_description = "A modern reverse engineering framework"
+copyright = "Copyright 2024-2026 Reghidra contributors"

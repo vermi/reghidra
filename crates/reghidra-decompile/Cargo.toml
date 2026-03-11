@@ -1,0 +1,10 @@
+[package]
+name = "reghidra-decompile"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reghidra-ir = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }
