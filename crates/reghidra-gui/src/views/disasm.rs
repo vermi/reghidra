@@ -24,185 +24,199 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let mut navigate_to = None;
     let mut clicked_mnemonic: Option<String> = None;
 
-    egui::ScrollArea::vertical()
+    let total_rows = project.instructions.len();
+    let row_height = 18.0;
+
+    // Find the selected row index for scroll-to
+    let selected_row = if should_scroll {
+        project
+            .instructions
+            .iter()
+            .position(|i| i.address == selected_addr)
+    } else {
+        None
+    };
+
+    let scroll_area = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-        .show(ui, |ui| {
-            for idx in 0..project.instructions.len() {
-                let insn = &project.instructions[idx];
-                let is_selected = insn.address == selected_addr;
-                let mnemonic_lower = insn.mnemonic.to_lowercase();
-                let is_mnemonic_highlighted = highlighted_mnemonic
-                    .as_ref()
-                    .is_some_and(|m| m == &mnemonic_lower);
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
-                // Function header
-                if let Some(func) = project.analysis.function_at(insn.address) {
-                    let xref_count = project.analysis.xrefs.ref_count_to(insn.address);
-                    let is_user_renamed = project.renamed_functions.contains_key(&insn.address);
-                    let display_name = project
-                        .renamed_functions
-                        .get(&insn.address)
-                        .map(|s| s.as_str())
-                        .unwrap_or(&func.name);
+    // If we need to scroll to a specific row, set the vertical offset
+    let scroll_area = if let Some(row_idx) = selected_row {
+        let target_offset = (row_idx as f32 * row_height).max(0.0);
+        scroll_area.vertical_scroll_offset(target_offset - 200.0_f32.max(0.0))
+    } else {
+        scroll_area
+    };
 
-                    // Use distinct colors for different function sources (unless user-renamed)
-                    let header_color = if is_user_renamed {
-                        theme.func_header
-                    } else if func.source == reghidra_core::FunctionSource::Signature {
-                        theme.func_header_sig
-                    } else if func.source == reghidra_core::FunctionSource::AutoNamed {
-                        theme.func_header_auto
-                    } else {
-                        theme.func_header
-                    };
+    scroll_area.show_rows(ui, row_height, total_rows, |ui, row_range| {
+        for idx in row_range {
+            let insn = &project.instructions[idx];
+            let is_selected = insn.address == selected_addr;
+            let mnemonic_lower = insn.mnemonic.to_lowercase();
+            let is_mnemonic_highlighted = highlighted_mnemonic
+                .as_ref()
+                .is_some_and(|m| m == &mnemonic_lower);
 
-                    if idx > 0 {
-                        ui.add_space(4.0);
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "; ======= {} ({} insns, {} xrefs) =======",
-                                display_name, func.instruction_count, xref_count
-                            ))
-                            .text_style(mono.clone())
-                            .color(header_color)
-                            .strong(),
-                        );
-                    });
-                }
+            // Function header
+            if let Some(func) = project.analysis.function_at(insn.address) {
+                let xref_count = project.analysis.xrefs.ref_count_to(insn.address);
+                let is_user_renamed = project.renamed_functions.contains_key(&insn.address);
+                let display_name = project
+                    .renamed_functions
+                    .get(&insn.address)
+                    .map(|s| s.as_str())
+                    .unwrap_or(&func.name);
 
-                // Xrefs TO this address (non-function-entry branch targets)
-                let xrefs_to = project.analysis.xrefs.xrefs_to(insn.address);
-                if !xrefs_to.is_empty() && project.analysis.function_at(insn.address).is_none() {
-                    let count = xrefs_to.len();
-                    ui.label(
-                        RichText::new(format!("; {count} xref(s) here"))
-                            .text_style(mono.clone())
-                            .color(theme.xref_hint),
-                    );
-                }
-
-                // Bookmark indicator
-                if project.bookmarks.contains(&insn.address) {
-                    ui.label(
-                        RichText::new("; [BOOKMARK]")
-                            .text_style(mono.clone())
-                            .color(theme.bookmark),
-                    );
-                }
-
-                // Pick background: selected row > mnemonic highlight > none
-                let frame = if is_selected {
-                    egui::Frame::new().fill(theme.bg_selected)
-                } else if is_mnemonic_highlighted {
-                    egui::Frame::new().fill(theme.bg_mnemonic_highlight)
+                let header_color = if is_user_renamed {
+                    theme.func_header
+                } else if func.source == reghidra_core::FunctionSource::Signature {
+                    theme.func_header_sig
+                } else if func.source == reghidra_core::FunctionSource::AutoNamed {
+                    theme.func_header_auto
                 } else {
-                    egui::Frame::NONE
+                    theme.func_header
                 };
 
-                let row_response = frame
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Address
-                            let addr_color = if is_selected {
-                                theme.addr_selected
-                            } else {
-                                theme.addr_normal
-                            };
-                            let addr_text = RichText::new(format!("0x{:08x}", insn.address))
-                                .text_style(mono.clone())
-                                .color(addr_color);
-
-                            if ui.link(addr_text).clicked() {
-                                navigate_to = Some(insn.address);
-                            }
-
-                            // Bytes
-                            if show_bytes {
-                                let hex: String = insn
-                                    .bytes
-                                    .iter()
-                                    .map(|b| format!("{b:02x}"))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                ui.label(
-                                    RichText::new(format!("{hex:<24}"))
-                                        .text_style(mono.clone())
-                                        .color(theme.text_dim),
-                                );
-                            }
-
-                            // Mnemonic (clickable for highlighting)
-                            let mc = theme.mnemonic_color(&insn.mnemonic);
-                            let mnemonic_text = RichText::new(format!("{:<8}", insn.mnemonic))
-                                .text_style(mono.clone())
-                                .color(mc);
-
-                            if ui.link(mnemonic_text).clicked() {
-                                clicked_mnemonic = Some(mnemonic_lower.clone());
-                            }
-
-                            // Operands
-                            ui.label(
-                                RichText::new(&insn.operands)
-                                    .text_style(mono.clone())
-                                    .color(theme.text_primary),
-                            );
-
-                            // Xref annotations: show call/jump target name (clickable)
-                            let xrefs_from = project.analysis.xrefs.xrefs_from(insn.address);
-                            for xref in xrefs_from {
-                                if let Some(target_name) = project.function_name(xref.to) {
-                                    if ui
-                                        .link(
-                                            RichText::new(format!("  ; -> {target_name}"))
-                                                .text_style(mono.clone())
-                                                .color(theme.xref_func),
-                                        )
-                                        .clicked()
-                                    {
-                                        navigate_to = Some(xref.to);
-                                    }
-                                } else if let Some(s) = project
-                                    .binary
-                                    .strings
-                                    .iter()
-                                    .find(|s| s.address == xref.to)
-                                {
-                                    let preview: String = s.value.chars().take(40).collect();
-                                    if ui
-                                        .link(
-                                            RichText::new(format!("  ; \"{preview}\""))
-                                                .text_style(mono.clone())
-                                                .color(theme.xref_string),
-                                        )
-                                        .clicked()
-                                    {
-                                        navigate_to = Some(xref.to);
-                                    }
-                                }
-                            }
-
-                            // User comment
-                            if let Some(comment) = project.comments.get(&insn.address) {
-                                ui.label(
-                                    RichText::new(format!("  ; {comment}"))
-                                        .text_style(mono.clone())
-                                        .color(theme.comment),
-                                );
-                            }
-                        });
-                    })
-                    .response;
-
-                // Scroll to the selected row when the selection changes
-                if is_selected && should_scroll {
-                    row_response.scroll_to_me(Some(egui::Align::Center));
+                if idx > 0 {
+                    ui.add_space(4.0);
                 }
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "; ======= {} ({} insns, {} xrefs) =======",
+                            display_name, func.instruction_count, xref_count
+                        ))
+                        .text_style(mono.clone())
+                        .color(header_color)
+                        .strong(),
+                    );
+                });
             }
-        });
+
+            // Xrefs TO this address (non-function-entry branch targets)
+            let xrefs_to = project.analysis.xrefs.xrefs_to(insn.address);
+            if !xrefs_to.is_empty() && project.analysis.function_at(insn.address).is_none() {
+                let count = xrefs_to.len();
+                ui.label(
+                    RichText::new(format!("; {count} xref(s) here"))
+                        .text_style(mono.clone())
+                        .color(theme.xref_hint),
+                );
+            }
+
+            // Bookmark indicator
+            if project.bookmarks.contains(&insn.address) {
+                ui.label(
+                    RichText::new("; [BOOKMARK]")
+                        .text_style(mono.clone())
+                        .color(theme.bookmark),
+                );
+            }
+
+            // Pick background: selected row > mnemonic highlight > none
+            let frame = if is_selected {
+                egui::Frame::new().fill(theme.bg_selected)
+            } else if is_mnemonic_highlighted {
+                egui::Frame::new().fill(theme.bg_mnemonic_highlight)
+            } else {
+                egui::Frame::NONE
+            };
+
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Address
+                    let addr_color = if is_selected {
+                        theme.addr_selected
+                    } else {
+                        theme.addr_normal
+                    };
+                    let addr_text = RichText::new(format!("0x{:08x}", insn.address))
+                        .text_style(mono.clone())
+                        .color(addr_color);
+
+                    if ui.link(addr_text).clicked() {
+                        navigate_to = Some(insn.address);
+                    }
+
+                    // Bytes
+                    if show_bytes {
+                        let hex: String = insn
+                            .bytes
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        ui.label(
+                            RichText::new(format!("{hex:<24}"))
+                                .text_style(mono.clone())
+                                .color(theme.text_dim),
+                        );
+                    }
+
+                    // Mnemonic (clickable for highlighting)
+                    let mc = theme.mnemonic_color(&insn.mnemonic);
+                    let mnemonic_text = RichText::new(format!("{:<8}", insn.mnemonic))
+                        .text_style(mono.clone())
+                        .color(mc);
+
+                    if ui.link(mnemonic_text).clicked() {
+                        clicked_mnemonic = Some(mnemonic_lower.clone());
+                    }
+
+                    // Operands
+                    ui.label(
+                        RichText::new(&insn.operands)
+                            .text_style(mono.clone())
+                            .color(theme.text_primary),
+                    );
+
+                    // Xref annotations: show call/jump target name (clickable)
+                    let xrefs_from = project.analysis.xrefs.xrefs_from(insn.address);
+                    for xref in xrefs_from {
+                        if let Some(target_name) = project.function_name(xref.to) {
+                            if ui
+                                .link(
+                                    RichText::new(format!("  ; -> {target_name}"))
+                                        .text_style(mono.clone())
+                                        .color(theme.xref_func),
+                                )
+                                .clicked()
+                            {
+                                navigate_to = Some(xref.to);
+                            }
+                        } else if let Some(s) = project
+                            .binary
+                            .strings
+                            .iter()
+                            .find(|s| s.address == xref.to)
+                        {
+                            let preview: String = s.value.chars().take(40).collect();
+                            if ui
+                                .link(
+                                    RichText::new(format!("  ; \"{preview}\""))
+                                        .text_style(mono.clone())
+                                        .color(theme.xref_string),
+                                )
+                                .clicked()
+                            {
+                                navigate_to = Some(xref.to);
+                            }
+                        }
+                    }
+
+                    // User comment
+                    if let Some(comment) = project.comments.get(&insn.address) {
+                        ui.label(
+                            RichText::new(format!("  ; {comment}"))
+                                .text_style(mono.clone())
+                                .color(theme.comment),
+                        );
+                    }
+                });
+            });
+        }
+    });
 
     // Handle mnemonic click: toggle highlight (click same mnemonic again to clear)
     if let Some(mnemonic) = clicked_mnemonic {

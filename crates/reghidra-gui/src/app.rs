@@ -95,6 +95,9 @@ pub struct ReghidraApp {
 
     // Track whether theme has been applied
     theme_applied: bool,
+
+    // Cached decompile output: (function_entry_addr, decompiled_code)
+    pub decompile_cache: Option<(u64, String)>,
 }
 
 impl ReghidraApp {
@@ -124,6 +127,7 @@ impl ReghidraApp {
             highlighted_mnemonic: None,
             prev_selected_address: None,
             theme_applied: false,
+            decompile_cache: None,
         }
     }
 
@@ -136,6 +140,7 @@ impl ReghidraApp {
                 self.project = Some(project);
                 self.loading_error = None;
                 self.undo = UndoHistory::new();
+                self.decompile_cache = None;
             }
             Err(e) => {
                 self.loading_error = Some(format!("Failed to load {}: {e}", path.display()));
@@ -292,6 +297,9 @@ impl ReghidraApp {
 
 impl eframe::App for ReghidraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Throttle repaints: only repaint at ~30 FPS max to avoid pegging CPU
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+
         // Apply theme
         if !self.theme_applied {
             self.theme.apply(ctx);
