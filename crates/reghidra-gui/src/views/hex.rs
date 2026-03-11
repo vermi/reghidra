@@ -101,54 +101,77 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             for row in row_range {
                 let offset = row * bytes_per_row;
                 let row_addr = base_va + offset as u64;
+                let row_end_addr = row_addr + bytes_per_row as u64;
                 let end = (offset + bytes_per_row).min(sec_data.len());
                 let row_bytes = &sec_data[offset..end];
 
-                ui.horizontal(|ui| {
-                    let addr_text = RichText::new(format!("0x{row_addr:08x}  "))
-                        .text_style(mono.clone())
-                        .color(theme.addr_normal);
-                    if ui.link(addr_text).clicked() {
-                        navigate_to = Some(row_addr);
-                    }
+                // Highlight this row if the selected or hovered address falls in it
+                let contains_selected =
+                    selected_addr >= row_addr && selected_addr < row_end_addr;
+                let contains_hovered = app
+                    .hovered_address
+                    .is_some_and(|h| h >= row_addr && h < row_end_addr);
 
-                    let mut hex = String::with_capacity(bytes_per_row * 3 + 4);
-                    for (i, &byte) in row_bytes.iter().enumerate() {
-                        if i > 0 && i % 8 == 0 {
-                            hex.push(' ');
-                        }
-                        hex.push_str(&format!("{byte:02x} "));
-                    }
-                    let padding_bytes = bytes_per_row - row_bytes.len();
-                    for i in 0..padding_bytes {
-                        let total_i = row_bytes.len() + i;
-                        if total_i > 0 && total_i % 8 == 0 {
-                            hex.push(' ');
-                        }
-                        hex.push_str("   ");
-                    }
+                let frame = if contains_selected {
+                    egui::Frame::new().fill(theme.bg_selected)
+                } else if contains_hovered {
+                    egui::Frame::new().fill(theme.bg_hover)
+                } else {
+                    egui::Frame::NONE
+                };
 
-                    ui.label(
-                        RichText::new(&hex)
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let addr_color = if contains_selected {
+                            theme.addr_selected
+                        } else {
+                            theme.addr_normal
+                        };
+                        let addr_text = RichText::new(format!("0x{row_addr:08x}  "))
                             .text_style(mono.clone())
-                            .color(theme.hex_bytes),
-                    );
+                            .color(addr_color);
+                        if ui.link(addr_text).clicked() {
+                            navigate_to = Some(row_addr);
+                        }
 
-                    let ascii: String = row_bytes
-                        .iter()
-                        .map(|&b| {
-                            if b.is_ascii_graphic() || b == b' ' {
-                                b as char
-                            } else {
-                                '.'
+                        let mut hex = String::with_capacity(bytes_per_row * 3 + 4);
+                        for (i, &byte) in row_bytes.iter().enumerate() {
+                            if i > 0 && i % 8 == 0 {
+                                hex.push(' ');
                             }
-                        })
-                        .collect();
-                    ui.label(
-                        RichText::new(&ascii)
-                            .text_style(mono.clone())
-                            .color(theme.hex_ascii),
-                    );
+                            hex.push_str(&format!("{byte:02x} "));
+                        }
+                        let padding_bytes = bytes_per_row - row_bytes.len();
+                        for i in 0..padding_bytes {
+                            let total_i = row_bytes.len() + i;
+                            if total_i > 0 && total_i % 8 == 0 {
+                                hex.push(' ');
+                            }
+                            hex.push_str("   ");
+                        }
+
+                        ui.label(
+                            RichText::new(&hex)
+                                .text_style(mono.clone())
+                                .color(theme.hex_bytes),
+                        );
+
+                        let ascii: String = row_bytes
+                            .iter()
+                            .map(|&b| {
+                                if b.is_ascii_graphic() || b == b' ' {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
+                            .collect();
+                        ui.label(
+                            RichText::new(&ascii)
+                                .text_style(mono.clone())
+                                .color(theme.hex_ascii),
+                        );
+                    });
                 });
             }
         });

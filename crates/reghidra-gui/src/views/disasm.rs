@@ -35,6 +35,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     }
 
     let selected_addr = app.selected_address.unwrap_or(0);
+    let hovered_addr = app.hovered_address;
     let show_bytes = app.show_bytes_in_disasm;
     let mono = egui::TextStyle::Monospace;
     let theme = app.theme.clone();
@@ -105,6 +106,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     let mut navigate_to = None;
     let mut clicked_mnemonic: Option<String> = None;
+    let mut new_hovered: Option<u64> = None;
 
     let total_rows = display_lines.len();
     let row_height = 18.0;
@@ -125,7 +127,6 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         for display_idx in row_range {
             match &display_lines[display_idx] {
                 DisplayLine::Spacer => {
-                    // Empty spacer row
                     ui.add_space(row_height);
                 }
                 DisplayLine::FuncHeader {
@@ -162,6 +163,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                 DisplayLine::Instruction { idx } => {
                     let insn = &project.instructions[*idx];
                     let is_selected = insn.address == selected_addr;
+                    let is_hovered_cross = hovered_addr == Some(insn.address) && !is_selected;
                     let mnemonic_lower = insn.mnemonic.to_lowercase();
                     let is_mnemonic_highlighted = highlighted_mnemonic
                         .as_ref()
@@ -169,110 +171,136 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
                     let frame = if is_selected {
                         egui::Frame::new().fill(theme.bg_selected)
+                    } else if is_hovered_cross {
+                        egui::Frame::new().fill(theme.bg_hover)
                     } else if is_mnemonic_highlighted {
                         egui::Frame::new().fill(theme.bg_mnemonic_highlight)
                     } else {
                         egui::Frame::NONE
                     };
 
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Address
-                            let addr_color = if is_selected {
-                                theme.addr_selected
-                            } else {
-                                theme.addr_normal
-                            };
-                            let addr_text = RichText::new(format!("0x{:08x}", insn.address))
-                                .text_style(mono.clone())
-                                .color(addr_color);
-
-                            if ui.link(addr_text).clicked() {
-                                navigate_to = Some(insn.address);
-                            }
-
-                            // Bytes
-                            if show_bytes {
-                                let hex: String = insn
-                                    .bytes
-                                    .iter()
-                                    .map(|b| format!("{b:02x}"))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                ui.label(
-                                    RichText::new(format!("{hex:<24}"))
+                    let resp = frame
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                // Address
+                                let addr_color = if is_selected {
+                                    theme.addr_selected
+                                } else {
+                                    theme.addr_normal
+                                };
+                                let addr_text =
+                                    RichText::new(format!("0x{:08x}", insn.address))
                                         .text_style(mono.clone())
-                                        .color(theme.text_dim),
+                                        .color(addr_color);
+
+                                if ui.link(addr_text).clicked() {
+                                    navigate_to = Some(insn.address);
+                                }
+
+                                // Bytes
+                                if show_bytes {
+                                    let hex: String = insn
+                                        .bytes
+                                        .iter()
+                                        .map(|b| format!("{b:02x}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    ui.label(
+                                        RichText::new(format!("{hex:<24}"))
+                                            .text_style(mono.clone())
+                                            .color(theme.text_dim),
+                                    );
+                                }
+
+                                // Mnemonic (clickable for highlighting)
+                                let mc = theme.mnemonic_color(&insn.mnemonic);
+                                let mnemonic_text =
+                                    RichText::new(format!("{:<8}", insn.mnemonic))
+                                        .text_style(mono.clone())
+                                        .color(mc);
+
+                                if ui.link(mnemonic_text).clicked() {
+                                    clicked_mnemonic = Some(mnemonic_lower.clone());
+                                }
+
+                                // Operands
+                                ui.label(
+                                    RichText::new(&insn.operands)
+                                        .text_style(mono.clone())
+                                        .color(theme.text_primary),
                                 );
-                            }
 
-                            // Mnemonic (clickable for highlighting)
-                            let mc = theme.mnemonic_color(&insn.mnemonic);
-                            let mnemonic_text = RichText::new(format!("{:<8}", insn.mnemonic))
-                                .text_style(mono.clone())
-                                .color(mc);
-
-                            if ui.link(mnemonic_text).clicked() {
-                                clicked_mnemonic = Some(mnemonic_lower.clone());
-                            }
-
-                            // Operands
-                            ui.label(
-                                RichText::new(&insn.operands)
-                                    .text_style(mono.clone())
-                                    .color(theme.text_primary),
-                            );
-
-                            // Xref annotations: show call/jump target name (clickable)
-                            let xrefs_from = project.analysis.xrefs.xrefs_from(insn.address);
-                            for xref in xrefs_from {
-                                if let Some(target_name) = project.function_name(xref.to) {
-                                    if ui
-                                        .link(
-                                            RichText::new(format!("  ; -> {target_name}"))
+                                // Xref annotations
+                                let xrefs_from =
+                                    project.analysis.xrefs.xrefs_from(insn.address);
+                                for xref in xrefs_from {
+                                    if let Some(target_name) =
+                                        project.function_name(xref.to)
+                                    {
+                                        if ui
+                                            .link(
+                                                RichText::new(format!(
+                                                    "  ; -> {target_name}"
+                                                ))
                                                 .text_style(mono.clone())
                                                 .color(theme.xref_func),
-                                        )
-                                        .clicked()
+                                            )
+                                            .clicked()
+                                        {
+                                            navigate_to = Some(xref.to);
+                                        }
+                                    } else if let Some(s) = project
+                                        .binary
+                                        .strings
+                                        .iter()
+                                        .find(|s| s.address == xref.to)
                                     {
-                                        navigate_to = Some(xref.to);
-                                    }
-                                } else if let Some(s) = project
-                                    .binary
-                                    .strings
-                                    .iter()
-                                    .find(|s| s.address == xref.to)
-                                {
-                                    let preview: String = s.value.chars().take(40).collect();
-                                    if ui
-                                        .link(
-                                            RichText::new(format!("  ; \"{preview}\""))
+                                        let preview: String =
+                                            s.value.chars().take(40).collect();
+                                        if ui
+                                            .link(
+                                                RichText::new(format!(
+                                                    "  ; \"{preview}\""
+                                                ))
                                                 .text_style(mono.clone())
                                                 .color(theme.xref_string),
-                                        )
-                                        .clicked()
-                                    {
-                                        navigate_to = Some(xref.to);
+                                            )
+                                            .clicked()
+                                        {
+                                            navigate_to = Some(xref.to);
+                                        }
                                     }
                                 }
-                            }
 
-                            // User comment
-                            if let Some(comment) = project.comments.get(&insn.address) {
-                                ui.label(
-                                    RichText::new(format!("  ; {comment}"))
-                                        .text_style(mono.clone())
-                                        .color(theme.comment),
-                                );
-                            }
-                        });
-                    });
+                                // User comment
+                                if let Some(comment) =
+                                    project.comments.get(&insn.address)
+                                {
+                                    ui.label(
+                                        RichText::new(format!("  ; {comment}"))
+                                            .text_style(mono.clone())
+                                            .color(theme.comment),
+                                    );
+                                }
+                            });
+                        })
+                        .response;
+
+                    // Track hover for cross-view highlighting
+                    if resp.hovered() {
+                        new_hovered = Some(insn.address);
+                    }
                 }
             }
         }
     });
 
-    // Handle mnemonic click: toggle highlight (click same mnemonic again to clear)
+    // Update hover state (only if mouse is over an instruction in this view)
+    if new_hovered.is_some() {
+        app.hovered_address = new_hovered;
+    }
+
+    // Handle mnemonic click
     if let Some(mnemonic) = clicked_mnemonic {
         if app.highlighted_mnemonic.as_ref() == Some(&mnemonic) {
             app.highlighted_mnemonic = None;

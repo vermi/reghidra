@@ -10,6 +10,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     };
 
     let selected_addr = app.selected_address.unwrap_or(0);
+    let hovered_addr = app.hovered_address;
     let mono = egui::TextStyle::Monospace;
     let theme = &app.theme;
 
@@ -43,6 +44,8 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     ui.separator();
 
     let mut navigate_to = None;
+    let mut new_hovered: Option<u64> = None;
+    let theme = theme.clone();
 
     egui::ScrollArea::vertical()
         .id_salt("ir_scroll")
@@ -58,39 +61,61 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
                 for insn in &block.instructions {
                     let is_selected = insn.address == selected_addr;
+                    let is_hovered_cross =
+                        hovered_addr == Some(insn.address) && !is_selected;
 
-                    ui.horizontal(|ui| {
-                        let addr_color = if is_selected {
-                            theme.addr_selected
-                        } else {
-                            theme.text_dim
-                        };
-                        if ui
-                            .link(
-                                RichText::new(format!(
-                                    "    0x{:08x}.{:02}",
-                                    insn.address, insn.sub_index
-                                ))
-                                .text_style(mono.clone())
-                                .color(addr_color),
-                            )
-                            .clicked()
-                        {
-                            navigate_to = Some(insn.address);
-                        }
+                    let frame = if is_selected {
+                        egui::Frame::new().fill(theme.bg_selected)
+                    } else if is_hovered_cross {
+                        egui::Frame::new().fill(theme.bg_hover)
+                    } else {
+                        egui::Frame::NONE
+                    };
 
-                        let (text, color) = format_ir_op(&insn.op, theme);
-                        ui.label(
-                            RichText::new(format!("  {text}"))
-                                .text_style(mono.clone())
-                                .color(color),
-                        );
-                    });
+                    let resp = frame
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let addr_color = if is_selected {
+                                    theme.addr_selected
+                                } else {
+                                    theme.text_dim
+                                };
+                                if ui
+                                    .link(
+                                        RichText::new(format!(
+                                            "    0x{:08x}.{:02}",
+                                            insn.address, insn.sub_index
+                                        ))
+                                        .text_style(mono.clone())
+                                        .color(addr_color),
+                                    )
+                                    .clicked()
+                                {
+                                    navigate_to = Some(insn.address);
+                                }
+
+                                let (text, color) = format_ir_op(&insn.op, &theme);
+                                ui.label(
+                                    RichText::new(format!("  {text}"))
+                                        .text_style(mono.clone())
+                                        .color(color),
+                                );
+                            });
+                        })
+                        .response;
+
+                    if resp.hovered() {
+                        new_hovered = Some(insn.address);
+                    }
                 }
 
                 ui.add_space(4.0);
             }
         });
+
+    if new_hovered.is_some() {
+        app.hovered_address = new_hovered;
+    }
 
     if let Some(addr) = navigate_to {
         app.navigate_to(addr);

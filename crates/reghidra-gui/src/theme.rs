@@ -18,6 +18,7 @@ pub struct Theme {
     #[allow(dead_code)]
     pub bg_secondary: Color32,
     pub bg_selected: Color32,
+    pub bg_hover: Color32,
     pub bg_mnemonic_highlight: Color32,
     pub text_primary: Color32,
     pub text_secondary: Color32,
@@ -109,6 +110,7 @@ impl Theme {
             bg_primary: Color32::from_rgb(30, 30, 35),
             bg_secondary: Color32::from_rgb(40, 40, 48),
             bg_selected: Color32::from_rgb(50, 55, 75),
+            bg_hover: Color32::from_rgb(40, 48, 65),
             bg_mnemonic_highlight: Color32::from_rgb(60, 50, 30),
             text_primary: Color32::from_rgb(220, 220, 220),
             text_secondary: Color32::from_rgb(150, 150, 150),
@@ -189,6 +191,7 @@ impl Theme {
             bg_primary: Color32::from_rgb(250, 250, 250),
             bg_secondary: Color32::from_rgb(240, 240, 245),
             bg_selected: Color32::from_rgb(210, 220, 240),
+            bg_hover: Color32::from_rgb(225, 232, 245),
             bg_mnemonic_highlight: Color32::from_rgb(255, 245, 200),
             text_primary: Color32::from_rgb(30, 30, 30),
             text_secondary: Color32::from_rgb(100, 100, 100),

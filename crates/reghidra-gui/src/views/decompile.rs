@@ -8,6 +8,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     };
 
     let selected_addr = app.selected_address.unwrap_or(0);
+    let hovered_addr = app.hovered_address;
     let mono = egui::TextStyle::Monospace;
 
     let func = project
@@ -47,7 +48,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let theme = app.theme.clone();
     let annotated_lines = annotated_lines.clone();
 
-    // Build a reverse map: function name -> address for click-to-navigate
+    // Build a reverse map: function name -> address
     let func_name_to_addr: std::collections::HashMap<String, u64> = project
         .analysis
         .functions
@@ -62,60 +63,81 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         })
         .collect();
 
-    // Find which block the selected address belongs to
-    let selected_block_addr = project
-        .analysis
-        .function_containing(selected_addr)
-        .and_then(|func| {
-            if let Some(ir) = project.analysis.ir_for(func.entry_address) {
-                for block in &ir.blocks {
-                    let block_start = block.address;
-                    let block_end = block
-                        .instructions
-                        .last()
-                        .map(|i| i.address)
-                        .unwrap_or(block_start);
-                    if selected_addr >= block_start && selected_addr <= block_end {
-                        return Some(block_start);
-                    }
+    // Build address-to-block mapping for the current function's IR so we can
+    // map any instruction address to its block start address, which is what the
+    // annotated lines carry.
+    let addr_to_block: std::collections::HashMap<u64, u64> =
+        if let Some(ir) = project.analysis.ir_for(func_entry) {
+            let mut map = std::collections::HashMap::new();
+            for block in &ir.blocks {
+                for insn in &block.instructions {
+                    map.insert(insn.address, block.address);
                 }
             }
-            None
-        });
+            map
+        } else {
+            std::collections::HashMap::new()
+        };
+
+    // The block address that contains the selected instruction
+    let selected_block = addr_to_block.get(&selected_addr).copied();
+    // The block address that contains the hovered instruction (from another view)
+    let hovered_block = hovered_addr.and_then(|a| addr_to_block.get(&a).copied());
 
     let mut navigate_to = None;
+    let mut new_hovered: Option<u64> = None;
 
     egui::ScrollArea::vertical()
         .id_salt("decompile_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for line in &annotated_lines {
-                let is_highlighted = match (line.addr, selected_block_addr) {
-                    (Some(line_addr), Some(block_addr)) => line_addr == block_addr,
-                    _ => false,
-                };
-                let is_exact_match = line.addr == Some(selected_addr);
+                // Determine highlighting for this line:
+                // 1. Selected: line's block matches the selected instruction's block
+                // 2. Hover: line's block matches the hovered instruction's block
+                let line_block = line.addr;
+                let is_selected_block =
+                    selected_block.is_some() && line_block == selected_block;
+                let is_hovered_block = hovered_block.is_some()
+                    && line_block == hovered_block
+                    && !is_selected_block;
 
-                let frame = if is_exact_match {
+                let frame = if is_selected_block {
                     egui::Frame::new().fill(theme.bg_selected)
-                } else if is_highlighted {
-                    egui::Frame::new().fill(theme.bg_mnemonic_highlight)
+                } else if is_hovered_block {
+                    egui::Frame::new().fill(theme.bg_hover)
                 } else {
                     egui::Frame::NONE
                 };
 
-                frame.show(ui, |ui| {
-                    render_interactive_line(
-                        ui,
-                        line,
-                        &mono,
-                        &theme,
-                        &func_name_to_addr,
-                        &mut navigate_to,
-                    );
-                });
+                let resp = frame
+                    .show(ui, |ui| {
+                        render_interactive_line(
+                            ui,
+                            line,
+                            &mono,
+                            &theme,
+                            &func_name_to_addr,
+                            &mut navigate_to,
+                        );
+                    })
+                    .response;
+
+                // Track hover: when hovering a decomp line, broadcast its
+                // source address so the disasm view can highlight it
+                if resp.hovered() {
+                    if let Some(addr) = line.addr {
+                        new_hovered = Some(addr);
+                    }
+                }
             }
         });
+
+    // Only update hovered_address if the mouse is actually in this view
+    // (new_hovered will be None if mouse isn't over any line)
+    if new_hovered.is_some() {
+        app.hovered_address = new_hovered;
+    }
 
     if let Some(addr) = navigate_to {
         app.navigate_to(addr);
@@ -137,21 +159,13 @@ fn render_interactive_line(
     let mut tokens = tokenize_line(text, func_name_to_addr);
 
     if tokens.is_empty() {
-        // No interactive tokens — render as a single sense-click label
+        // No interactive tokens — plain label
         let color = theme.colorize_decompile_line(text);
-        let resp = ui.add(
-            egui::Label::new(
-                RichText::new(text.as_str())
-                    .text_style(mono.clone())
-                    .color(color),
-            )
-            .sense(egui::Sense::click()),
+        ui.label(
+            RichText::new(text.as_str())
+                .text_style(mono.clone())
+                .color(color),
         );
-        if resp.clicked() {
-            if let Some(addr) = line.addr {
-                *navigate_to = Some(addr);
-            }
-        }
         return;
     }
 
@@ -235,7 +249,7 @@ fn tokenize_line(
 ) -> Vec<ClickableToken> {
     let mut tokens = Vec::new();
 
-    // 1. Find function calls: known function names as whole words
+    // 1. Function names as whole words
     for (name, &addr) in func_name_to_addr {
         if name.is_empty() {
             continue;
@@ -265,7 +279,7 @@ fn tokenize_line(
         }
     }
 
-    // 2. Find goto/label references: "label_XXXX"
+    // 2. Goto/label references: "label_XXXX"
     let mut search_from = 0;
     while let Some(pos) = text[search_from..].find("label_") {
         let abs_pos = search_from + pos;
@@ -287,7 +301,7 @@ fn tokenize_line(
         search_from = hex_end;
     }
 
-    // 3. Find hex addresses: "0xNNNN" (not inside identifiers, > 0xFF)
+    // 3. Hex addresses: "0xNNNN" (not inside identifiers, > 0xFF)
     search_from = 0;
     while let Some(pos) = text[search_from..].find("0x") {
         let abs_pos = search_from + pos;
@@ -318,7 +332,7 @@ fn tokenize_line(
         }
     }
 
-    // Remove overlapping tokens (prefer earlier/longer matches)
+    // Remove overlapping tokens
     tokens.sort_by_key(|t| (t.start, std::cmp::Reverse(t.end - t.start)));
     let mut filtered = Vec::new();
     let mut last_end = 0;

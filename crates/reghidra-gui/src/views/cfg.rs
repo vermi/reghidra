@@ -47,7 +47,21 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     }
 
     let mut navigate_to = None;
-    render_block_list(cfg, ui, &mut navigate_to, selected_addr, &app.theme);
+    let hovered_addr = app.hovered_address;
+    let mut new_hovered: Option<u64> = None;
+    render_block_list(
+        cfg,
+        ui,
+        &mut navigate_to,
+        selected_addr,
+        hovered_addr,
+        &mut new_hovered,
+        &app.theme,
+    );
+
+    if new_hovered.is_some() {
+        app.hovered_address = new_hovered;
+    }
 
     if let Some(addr) = navigate_to {
         app.navigate_to(addr);
@@ -59,6 +73,8 @@ fn render_block_list(
     ui: &mut Ui,
     navigate_to: &mut Option<u64>,
     selected_addr: u64,
+    hovered_addr: Option<u64>,
+    new_hovered: &mut Option<u64>,
     theme: &Theme,
 ) {
     let mono = egui::TextStyle::Monospace;
@@ -74,6 +90,9 @@ fn render_block_list(
                 let is_entry = block_addr == cfg.entry;
                 let contains_selected =
                     block.instructions.iter().any(|i| i.address == selected_addr);
+                let contains_hovered = hovered_addr
+                    .is_some_and(|h| block.instructions.iter().any(|i| i.address == h))
+                    && !contains_selected;
 
                 // Block header
                 ui.horizontal(|ui| {
@@ -110,6 +129,8 @@ fn render_block_list(
                         1.0,
                         if contains_selected {
                             theme.cfg_border_active
+                        } else if contains_hovered {
+                            theme.cfg_border_active
                         } else {
                             theme.cfg_border
                         },
@@ -120,36 +141,58 @@ fn render_block_list(
                 frame.show(ui, |ui| {
                     for insn in &block.instructions {
                         let is_selected = insn.address == selected_addr;
-                        ui.horizontal(|ui| {
-                            let addr_color = if is_selected {
-                                theme.addr_selected
-                            } else {
-                                theme.addr_normal
-                            };
+                        let is_hovered_cross =
+                            hovered_addr == Some(insn.address) && !is_selected;
 
-                            if ui
-                                .link(
-                                    RichText::new(format!("0x{:08x}", insn.address))
-                                        .text_style(mono.clone())
-                                        .color(addr_color),
-                                )
-                                .clicked()
-                            {
-                                *navigate_to = Some(insn.address);
-                            }
+                        let insn_frame = if is_selected {
+                            egui::Frame::new().fill(theme.bg_selected)
+                        } else if is_hovered_cross {
+                            egui::Frame::new().fill(theme.bg_hover)
+                        } else {
+                            egui::Frame::NONE
+                        };
 
-                            let mc = theme.mnemonic_color(&insn.mnemonic);
-                            ui.label(
-                                RichText::new(format!("  {:<8}", insn.mnemonic))
-                                    .text_style(mono.clone())
-                                    .color(mc),
-                            );
-                            ui.label(
-                                RichText::new(&insn.operands)
-                                    .text_style(mono.clone())
-                                    .color(theme.text_primary),
-                            );
-                        });
+                        let resp = insn_frame
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let addr_color = if is_selected {
+                                        theme.addr_selected
+                                    } else {
+                                        theme.addr_normal
+                                    };
+
+                                    if ui
+                                        .link(
+                                            RichText::new(format!(
+                                                "0x{:08x}",
+                                                insn.address
+                                            ))
+                                            .text_style(mono.clone())
+                                            .color(addr_color),
+                                        )
+                                        .clicked()
+                                    {
+                                        *navigate_to = Some(insn.address);
+                                    }
+
+                                    let mc = theme.mnemonic_color(&insn.mnemonic);
+                                    ui.label(
+                                        RichText::new(format!("  {:<8}", insn.mnemonic))
+                                            .text_style(mono.clone())
+                                            .color(mc),
+                                    );
+                                    ui.label(
+                                        RichText::new(&insn.operands)
+                                            .text_style(mono.clone())
+                                            .color(theme.text_primary),
+                                    );
+                                });
+                            })
+                            .response;
+
+                        if resp.hovered() {
+                            *new_hovered = Some(insn.address);
+                        }
                     }
                 });
 

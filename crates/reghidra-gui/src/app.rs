@@ -95,6 +95,9 @@ pub struct ReghidraApp {
     // Tracks the previous selected address to detect navigation changes
     pub prev_selected_address: Option<u64>,
 
+    // Hover-based cross-view highlighting: set by whichever view the mouse is in
+    pub hovered_address: Option<u64>,
+
     // Track whether theme has been applied
     theme_applied: bool,
 
@@ -128,6 +131,7 @@ impl ReghidraApp {
             context_menu_addr: None,
             help: HelpOverlay::new(),
             highlighted_mnemonic: None,
+            hovered_address: None,
             prev_selected_address: None,
             theme_applied: false,
             decompile_cache: None,
@@ -300,6 +304,9 @@ impl ReghidraApp {
 
 impl eframe::App for ReghidraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Clear hover each frame; views will re-set it if the mouse is over them
+        self.hovered_address = None;
+
         // Throttle repaints: only repaint at ~30 FPS max to avoid pegging CPU
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
 
