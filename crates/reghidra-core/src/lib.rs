@@ -8,6 +8,7 @@ pub mod project;
 pub use analysis::cfg::{BasicBlock, CfgEdge, ControlFlowGraph, EdgeKind};
 pub use analysis::functions::{Function, FunctionSource};
 pub use analysis::xrefs::{XRef, XRefDatabase, XRefKind};
+pub use analysis::flirt::FlirtDatabase;
 pub use analysis::AnalysisResults;
 pub use arch::Architecture;
 pub use binary::{sanitize_to_name, BinaryInfo, DetectedString, LoadedBinary, Section, Symbol, SymbolKind};

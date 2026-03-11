@@ -16,4 +16,7 @@ pub enum CoreError {
 
     #[error("disassembly error: {0}")]
     Disassembly(String),
+
+    #[error("signature file error: {0}")]
+    Signature(String),
 }

@@ -1,3 +1,4 @@
+use crate::analysis::flirt::FlirtDatabase;
 use crate::analysis::AnalysisResults;
 use crate::binary::LoadedBinary;
 use crate::disasm::{DisassembledInstruction, Disassembler};
@@ -13,6 +14,8 @@ pub struct Project {
     pub comments: HashMap<u64, String>,
     pub renamed_functions: HashMap<u64, String>,
     pub bookmarks: Vec<u64>,
+    pub flirt_db: Option<FlirtDatabase>,
+    pub sig_status: Option<String>,
 }
 
 impl Project {
@@ -30,7 +33,38 @@ impl Project {
             comments: HashMap::new(),
             renamed_functions: HashMap::new(),
             bookmarks: Vec::new(),
+            flirt_db: None,
+            sig_status: None,
         })
+    }
+
+    /// Load a FLIRT .sig file and apply signatures to detected functions.
+    /// Returns the number of functions matched.
+    pub fn load_signatures(&mut self, path: &Path) -> Result<usize, CoreError> {
+        let db = FlirtDatabase::load(path)?;
+        let lib_name = db.header.name.clone();
+        let sig_count = db.signature_count;
+
+        // Re-run full analysis with signatures
+        self.analysis = AnalysisResults::analyze_with_signatures(
+            &self.binary,
+            &self.instructions,
+            Some(&db),
+        );
+
+        let match_count = self
+            .analysis
+            .functions
+            .iter()
+            .filter(|f| f.source == crate::analysis::functions::FunctionSource::Signature)
+            .count();
+
+        self.sig_status = Some(format!(
+            "{sig_count} sigs loaded ({lib_name}), {match_count} matched"
+        ));
+        self.flirt_db = Some(db);
+
+        Ok(match_count)
     }
 
     /// Get the display name for a function at the given address.

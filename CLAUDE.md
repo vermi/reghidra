@@ -20,7 +20,9 @@ reghidra/
 │   │           ├── mod.rs              # AnalysisResults
 │   │           ├── functions.rs        # Function detection
 │   │           ├── cfg.rs              # Control flow graph
-│   │           └── xrefs.rs            # Cross-references
+│   │           ├── xrefs.rs            # Cross-references
+│   │           ├── naming.rs           # Heuristic auto-naming
+│   │           └── flirt.rs            # FLIRT .sig parser + matcher
 │   ├── reghidra-ir/
 │   │   └── src/
 │   │       ├── lib.rs                  # public API
