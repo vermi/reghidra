@@ -174,6 +174,41 @@ impl Project {
         Some(reghidra_decompile::decompile(ir, &ctx))
     }
 
+    /// Decompile the function at the given entry address, returning annotated lines.
+    pub fn decompile_annotated(
+        &self,
+        entry: u64,
+    ) -> Option<Vec<reghidra_decompile::AnnotatedLine>> {
+        let ir = self.analysis.ir_for(entry)?;
+
+        let mut function_names = HashMap::new();
+        for func in &self.analysis.functions {
+            let name = self
+                .renamed_functions
+                .get(&func.entry_address)
+                .cloned()
+                .unwrap_or_else(|| func.name.clone());
+            function_names.insert(func.entry_address, name);
+        }
+
+        let string_literals: HashMap<u64, String> = self
+            .binary
+            .strings
+            .iter()
+            .map(|s| (s.address, s.value.clone()))
+            .collect();
+
+        let cfg = self.analysis.cfgs.get(&entry)?;
+        let ctx = reghidra_decompile::DecompileContext {
+            function_names,
+            string_literals,
+            successors: cfg.successors.clone(),
+            predecessors: cfg.predecessors.clone(),
+        };
+
+        Some(reghidra_decompile::decompile_annotated(ir, &ctx))
+    }
+
     /// Get all detected functions with display names.
     pub fn functions(&self) -> Vec<(u64, String)> {
         let mut funcs: Vec<(u64, String)> = self

@@ -84,6 +84,8 @@ pub enum Stmt {
         ctype: CType,
         init: Option<Expr>,
     },
+    /// Source address marker (used to track which block produced this code).
+    SourceAddr(u64),
 }
 
 /// Simple C type representation.

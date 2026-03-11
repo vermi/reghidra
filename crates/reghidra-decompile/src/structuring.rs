@@ -120,8 +120,9 @@ fn structure_region(
             continue;
         }
 
-        // Emit the block's statements
+        // Emit the block's statements with source address marker
         if let Some(stmts) = block_stmts.get(&addr) {
+            output.push(Stmt::SourceAddr(addr));
             output.extend(stmts.iter().cloned());
         }
 
@@ -164,6 +165,7 @@ fn structure_region(
                         let mut then_stmts = Vec::new();
                         // Simple case: just emit the target block
                         if let Some(stmts) = block_stmts.get(target) {
+                            then_stmts.push(Stmt::SourceAddr(*target));
                             then_stmts.extend(stmts.iter().cloned());
                         }
                         visited.insert(*target);

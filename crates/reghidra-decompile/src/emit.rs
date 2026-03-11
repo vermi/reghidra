@@ -1,89 +1,175 @@
 use crate::ast::{BinOp, Expr, Stmt};
 
-/// Emit a complete function as C-like pseudocode.
-pub fn emit_function(name: &str, body: &[Stmt]) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("void {name}() {{\n"));
-    for stmt in body {
-        emit_stmt(&mut out, stmt, 1);
-    }
-    out.push_str("}\n");
-    out
+/// A line of decompiled output with optional source address.
+#[derive(Debug, Clone)]
+pub struct AnnotatedLine {
+    pub text: String,
+    pub addr: Option<u64>,
 }
 
-fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
+/// Emit a complete function as C-like pseudocode.
+pub fn emit_function(name: &str, body: &[Stmt]) -> String {
+    let lines = emit_function_annotated(name, body);
+    lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n")
+}
+
+/// Emit a complete function as annotated lines (text + source address).
+pub fn emit_function_annotated(name: &str, body: &[Stmt]) -> Vec<AnnotatedLine> {
+    let mut lines = Vec::new();
+    let mut current_addr: Option<u64> = None;
+
+    lines.push(AnnotatedLine {
+        text: format!("void {name}() {{"),
+        addr: None,
+    });
+
+    for stmt in body {
+        emit_stmt_annotated(&mut lines, stmt, 1, &mut current_addr);
+    }
+
+    lines.push(AnnotatedLine {
+        text: "}".to_string(),
+        addr: None,
+    });
+
+    lines
+}
+
+fn emit_stmt_annotated(
+    lines: &mut Vec<AnnotatedLine>,
+    stmt: &Stmt,
+    indent: usize,
+    current_addr: &mut Option<u64>,
+) {
     let pad = "    ".repeat(indent);
     match stmt {
+        Stmt::SourceAddr(addr) => {
+            *current_addr = Some(*addr);
+            // No output line for this marker
+        }
         Stmt::Assign(lhs, rhs) => {
-            // Skip flag assignments for cleaner output
             if is_flags_var(lhs) {
                 return;
             }
-            // Skip stack pointer manipulation for cleaner output
             if is_stack_ptr(lhs) && is_simple_stack_adjust(rhs) {
                 return;
             }
-            out.push_str(&format!("{pad}{} = {};\n", emit_expr(lhs), emit_expr(rhs)));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}{} = {};", emit_expr(lhs), emit_expr(rhs)),
+                addr: *current_addr,
+            });
         }
         Stmt::ExprStmt(e) => {
-            out.push_str(&format!("{pad}{};\n", emit_expr(e)));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}{};", emit_expr(e)),
+                addr: *current_addr,
+            });
         }
         Stmt::Return(Some(e)) => {
-            out.push_str(&format!("{pad}return {};\n", emit_expr(e)));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}return {};", emit_expr(e)),
+                addr: *current_addr,
+            });
         }
         Stmt::Return(None) => {
-            out.push_str(&format!("{pad}return;\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}return;"),
+                addr: *current_addr,
+            });
         }
         Stmt::If { cond, then_body, else_body } => {
-            out.push_str(&format!("{pad}if ({}) {{\n", emit_expr(cond)));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}if ({}) {{", emit_expr(cond)),
+                addr: *current_addr,
+            });
             for s in then_body {
-                emit_stmt(out, s, indent + 1);
+                emit_stmt_annotated(lines, s, indent + 1, current_addr);
             }
             if else_body.is_empty() {
-                out.push_str(&format!("{pad}}}\n"));
+                lines.push(AnnotatedLine {
+                    text: format!("{pad}}}"),
+                    addr: *current_addr,
+                });
             } else {
-                out.push_str(&format!("{pad}}} else {{\n"));
+                lines.push(AnnotatedLine {
+                    text: format!("{pad}}} else {{"),
+                    addr: *current_addr,
+                });
                 for s in else_body {
-                    emit_stmt(out, s, indent + 1);
+                    emit_stmt_annotated(lines, s, indent + 1, current_addr);
                 }
-                out.push_str(&format!("{pad}}}\n"));
+                lines.push(AnnotatedLine {
+                    text: format!("{pad}}}"),
+                    addr: *current_addr,
+                });
             }
         }
         Stmt::While { cond, body } => {
-            out.push_str(&format!("{pad}while ({}) {{\n", emit_expr(cond)));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}while ({}) {{", emit_expr(cond)),
+                addr: *current_addr,
+            });
             for s in body {
-                emit_stmt(out, s, indent + 1);
+                emit_stmt_annotated(lines, s, indent + 1, current_addr);
             }
-            out.push_str(&format!("{pad}}}\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}}}"),
+                addr: *current_addr,
+            });
         }
         Stmt::Loop { body } => {
-            out.push_str(&format!("{pad}for (;;) {{\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}for (;;) {{"),
+                addr: *current_addr,
+            });
             for s in body {
-                emit_stmt(out, s, indent + 1);
+                emit_stmt_annotated(lines, s, indent + 1, current_addr);
             }
-            out.push_str(&format!("{pad}}}\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}}}"),
+                addr: *current_addr,
+            });
         }
         Stmt::Break => {
-            out.push_str(&format!("{pad}break;\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}break;"),
+                addr: *current_addr,
+            });
         }
         Stmt::Continue => {
-            out.push_str(&format!("{pad}continue;\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}continue;"),
+                addr: *current_addr,
+            });
         }
         Stmt::Goto(target) => {
-            out.push_str(&format!("{pad}goto label_{target:x};\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}goto label_{target:x};"),
+                addr: *current_addr,
+            });
         }
         Stmt::Label(addr) => {
-            out.push_str(&format!("label_{addr:x}:\n"));
+            lines.push(AnnotatedLine {
+                text: format!("label_{addr:x}:"),
+                addr: Some(*addr),
+            });
         }
         Stmt::Comment(text) => {
-            out.push_str(&format!("{pad}/* {text} */\n"));
+            lines.push(AnnotatedLine {
+                text: format!("{pad}/* {text} */"),
+                addr: *current_addr,
+            });
         }
         Stmt::VarDecl { name, ctype, init } => {
-            if let Some(init_expr) = init {
-                out.push_str(&format!("{pad}{ctype} {name} = {};\n", emit_expr(init_expr)));
+            let text = if let Some(init_expr) = init {
+                format!("{pad}{ctype} {name} = {};", emit_expr(init_expr))
             } else {
-                out.push_str(&format!("{pad}{ctype} {name};\n"));
-            }
+                format!("{pad}{ctype} {name};")
+            };
+            lines.push(AnnotatedLine {
+                text,
+                addr: *current_addr,
+            });
         }
     }
 }

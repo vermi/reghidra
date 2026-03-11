@@ -5,6 +5,8 @@ pub mod structuring;
 pub mod types;
 pub mod varnames;
 
+pub use emit::AnnotatedLine;
+
 use reghidra_ir::IrFunction;
 
 /// Decompile context: everything needed to decompile one function.
@@ -32,4 +34,12 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> String {
 
     // Step 4: Emit C-like code
     emit::emit_function(&ir.name, &body)
+}
+
+/// Decompile an IR function into annotated lines (text + source address per line).
+pub fn decompile_annotated(ir: &IrFunction, ctx: &DecompileContext) -> Vec<AnnotatedLine> {
+    let block_stmts = expr_builder::build_statements(ir, ctx);
+    let body = structuring::structure(ir, &block_stmts, ctx);
+    let body = varnames::rename_variables(body);
+    emit::emit_function_annotated(&ir.name, &body)
 }

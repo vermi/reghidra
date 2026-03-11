@@ -119,6 +119,7 @@ impl VarRenamer {
                 ctype,
                 init: init.map(|e| self.rename_expr(e)),
             },
+            Stmt::SourceAddr(addr) => Stmt::SourceAddr(addr),
             other => other,
         }
     }

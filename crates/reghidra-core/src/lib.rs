@@ -15,3 +15,4 @@ pub use binary::{sanitize_to_name, BinaryInfo, DetectedString, LoadedBinary, Sec
 pub use disasm::{DisassembledInstruction, Disassembler};
 pub use error::CoreError;
 pub use project::Project;
+pub use reghidra_decompile::AnnotatedLine;

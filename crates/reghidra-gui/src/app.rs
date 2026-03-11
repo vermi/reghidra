@@ -96,8 +96,8 @@ pub struct ReghidraApp {
     // Track whether theme has been applied
     theme_applied: bool,
 
-    // Cached decompile output: (function_entry_addr, decompiled_code)
-    pub decompile_cache: Option<(u64, String)>,
+    // Cached decompile output: (function_entry_addr, annotated_lines)
+    pub decompile_cache: Option<(u64, Vec<reghidra_core::AnnotatedLine>)>,
 }
 
 impl ReghidraApp {
