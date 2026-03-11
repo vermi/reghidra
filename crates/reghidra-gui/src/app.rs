@@ -841,29 +841,48 @@ impl eframe::App for ReghidraApp {
                     render_view_tabs_and_content(self, ui, true);
                 }
                 ViewLayout::SplitVertical => {
-                    // Split the available area in half
-                    let available = ui.available_size();
-                    let half_width = available.x / 2.0 - 4.0;
+                    // Give each pane its own clipping rect so scroll areas
+                    // are independent (one pane's content length doesn't
+                    // constrain the other).
+                    let available = ui.available_rect_before_wrap();
+                    let half_width = available.width() / 2.0 - 2.0;
+                    let sep_x = available.min.x + half_width + 1.0;
 
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(available.y);
+                    let left_rect = egui::Rect::from_min_size(
+                        available.min,
+                        egui::vec2(half_width, available.height()),
+                    );
+                    let right_rect = egui::Rect::from_min_size(
+                        egui::pos2(sep_x + 3.0, available.min.y),
+                        egui::vec2(half_width, available.height()),
+                    );
 
-                        // Left pane (primary)
-                        ui.vertical(|ui| {
-                            ui.set_width(half_width);
-                            ui.set_min_height(available.y);
+                    // Left pane (primary) — independent clip rect
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new().max_rect(left_rect),
+                        |ui| {
+                            ui.set_clip_rect(left_rect);
                             render_view_tabs_and_content(self, ui, true);
-                        });
+                        },
+                    );
 
-                        ui.separator();
+                    // Separator line
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(sep_x, available.min.y),
+                            egui::pos2(sep_x, available.max.y),
+                        ],
+                        ui.visuals().widgets.noninteractive.bg_stroke,
+                    );
 
-                        // Right pane (secondary)
-                        ui.vertical(|ui| {
-                            ui.set_width(half_width);
-                            ui.set_min_height(available.y);
+                    // Right pane (secondary) — independent clip rect
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new().max_rect(right_rect),
+                        |ui| {
+                            ui.set_clip_rect(right_rect);
                             render_view_tabs_and_content(self, ui, false);
-                        });
-                    });
+                        },
+                    );
                 }
             }
         });
