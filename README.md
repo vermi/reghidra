@@ -1,4 +1,8 @@
-# Reghidra
+<p align="center">
+  <img src="assets/reghidra.png" alt="Reghidra" width="128" />
+</p>
+
+<h1 align="center">Reghidra</h1>
 
 A Rust-based reverse engineering framework reimplementing Ghidra's core functionality with a modern, user-friendly interface. Cross-platform, built with Rust and egui.
 

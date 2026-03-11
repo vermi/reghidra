@@ -47,6 +47,7 @@ pub enum ViewLayout {
 }
 
 pub struct ReghidraApp {
+    pub logo: Option<egui::TextureHandle>,
     pub project: Option<Project>,
     pub loading_error: Option<String>,
     pub side_panel: SidePanel,
@@ -108,6 +109,7 @@ pub struct ReghidraApp {
 impl ReghidraApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
+            logo: None,
             project: None,
             loading_error: None,
             side_panel: SidePanel::Functions,
@@ -792,10 +794,26 @@ impl eframe::App for ReghidraApp {
         });
 
         if self.project.is_none() {
+            // Load logo texture on first frame
+            let logo = self.logo.get_or_insert_with(|| {
+                let png_bytes = include_bytes!("../../../assets/reghidra.png");
+                let img = image::load_from_memory(png_bytes)
+                    .expect("Failed to decode logo PNG")
+                    .into_rgba8();
+                let size = [img.width() as usize, img.height() as usize];
+                let pixels = img.into_raw();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+                ctx.load_texture("logo", color_image, egui::TextureOptions::LINEAR)
+            });
+            let logo_texture = logo.id();
+
             // Welcome screen
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(200.0);
+                    ui.add_space(100.0);
+                    let logo_size = egui::vec2(128.0, 128.0);
+                    ui.image(egui::load::SizedTexture::new(logo_texture, logo_size));
+                    ui.add_space(16.0);
                     ui.heading("Reghidra");
                     ui.label("A modern reverse engineering framework");
                     ui.add_space(20.0);
