@@ -9,6 +9,7 @@ A Rust-based reverse engineering framework reimplementing Ghidra's core function
 - **Automated analysis** — function detection (symbols, prologues, call targets), control flow graphs, cross-references, string detection with auto-naming
 - **Intermediate representation** — register transfer language with ~30 opcodes, x86_64 and ARM64 lifters, optimization passes (constant folding, copy propagation, DCE)
 - **Decompiler** — type inference, control flow structuring (if/else/while/goto), C-like pseudocode output
+- **FLIRT signature matching** — ships with 76 bundled signature databases from [rizinorg/sigdb](https://github.com/rizinorg/sigdb) covering ELF and PE across x86, ARM, and MIPS; auto-applied on binary load with support for user-provided `.sig` files
 - **Heuristic auto-naming** — IDA-style string labels (`s_EnterPassword`), function naming via thunk/wrapper/string-ref/API-pattern detection
 - **Interactive GUI** — synchronized disassembly, decompile, hex, CFG, IR, and xref views with dark/light themes
 - **Keyboard-driven workflow** — Vim-like navigation, command palette (Cmd+K), fuzzy search, inline annotations, undo/redo
@@ -61,6 +62,7 @@ reghidra/
 │   ├── reghidra-decompile/  # IR → C-like pseudocode
 │   ├── reghidra-gui/        # egui-based interactive GUI
 │   └── reghidra-cli/        # Headless CLI for batch analysis
+├── signatures/              # Bundled FLIRT .sig files (rizinorg/sigdb)
 └── tests/fixtures/          # Test binaries
 ```
 
@@ -68,7 +70,6 @@ reghidra/
 
 - [ ] Lua scripting API
 - [ ] Rust trait-based plugin system
-- [ ] FLIRT/FID-style signature matching
 - [ ] Headless CLI batch analysis mode
 
 ## License
