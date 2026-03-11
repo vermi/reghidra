@@ -1,3 +1,4 @@
+pub mod bundled_sigs;
 pub mod cfg;
 pub mod flirt;
 pub mod functions;
@@ -26,14 +27,14 @@ impl AnalysisResults {
         binary: &LoadedBinary,
         instructions: &[DisassembledInstruction],
     ) -> Self {
-        Self::analyze_with_signatures(binary, instructions, None)
+        Self::analyze_with_signatures(binary, instructions, &[])
     }
 
     /// Run all analysis passes, optionally applying FLIRT signatures.
     pub fn analyze_with_signatures(
         binary: &LoadedBinary,
         instructions: &[DisassembledInstruction],
-        flirt_db: Option<&flirt::FlirtDatabase>,
+        flirt_dbs: &[&flirt::FlirtDatabase],
     ) -> Self {
         let mut functions = functions::detect_functions(binary, instructions);
 
@@ -41,7 +42,7 @@ impl AnalysisResults {
         resolve_import_functions(&mut functions, binary);
 
         // Apply FLIRT signatures before xrefs/naming so matched names propagate
-        if let Some(db) = flirt_db {
+        for db in flirt_dbs {
             flirt::apply_signatures(db, &mut functions, binary);
         }
 

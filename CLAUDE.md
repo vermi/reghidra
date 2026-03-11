@@ -22,7 +22,8 @@ reghidra/
 │   │           ├── cfg.rs              # Control flow graph
 │   │           ├── xrefs.rs            # Cross-references
 │   │           ├── naming.rs           # Heuristic auto-naming
-│   │           └── flirt.rs            # FLIRT .sig parser + matcher
+│   │           ├── flirt.rs            # FLIRT .sig parser + matcher
+│   │           └── bundled_sigs.rs     # Bundled sigdb (auto-loaded per format+arch)
 │   ├── reghidra-ir/
 │   │   └── src/
 │   │       ├── lib.rs                  # public API
@@ -57,6 +58,9 @@ reghidra/
 │   │           ├── xrefs.rs            # Cross-references view
 │   │           └── side_panel.rs       # Sidebar (fns, symbols, etc.)
 │   └── reghidra-cli/                   # Headless CLI
+├── signatures/                         # Bundled FLIRT .sig files (from rizinorg/sigdb)
+│   ├── elf/{arm,mips,x86}/{32,64}/     # ELF sigs by arch+bitness
+│   └── pe/{arm,mips,sh,x86}/{32,64}/   # PE sigs by arch+bitness
 └── tests/fixtures/                     # Test binaries
 ```
 

@@ -1,3 +1,4 @@
+use crate::analysis::bundled_sigs;
 use crate::analysis::flirt::FlirtDatabase;
 use crate::analysis::AnalysisResults;
 use crate::binary::LoadedBinary;
@@ -14,17 +15,47 @@ pub struct Project {
     pub comments: HashMap<u64, String>,
     pub renamed_functions: HashMap<u64, String>,
     pub bookmarks: Vec<u64>,
-    pub flirt_db: Option<FlirtDatabase>,
+    /// Bundled signature databases (auto-loaded on open).
+    pub bundled_dbs: Vec<FlirtDatabase>,
+    /// User-loaded signature databases (via File > Load Signatures).
+    pub user_dbs: Vec<FlirtDatabase>,
     pub sig_status: Option<String>,
 }
 
 impl Project {
     /// Open a binary file, parse, disassemble, and analyze it.
+    /// Automatically loads and applies bundled FLIRT signatures matching the
+    /// binary's format and architecture.
     pub fn open(path: &Path) -> Result<Self, CoreError> {
         let binary = LoadedBinary::load(path)?;
         let disassembler = Disassembler::new(binary.info.architecture)?;
         let instructions = disassembler.disassemble_binary(&binary)?;
-        let analysis = AnalysisResults::analyze(&binary, &instructions);
+
+        // Load bundled signatures for this binary's format + architecture
+        let (bundled_dbs, bundled_status) = bundled_sigs::load_bundled_signatures(
+            binary.info.format,
+            binary.info.architecture,
+        );
+
+        // Run analysis with bundled sigs applied
+        let db_refs: Vec<&FlirtDatabase> = bundled_dbs.iter().collect();
+        let analysis = AnalysisResults::analyze_with_signatures(
+            &binary,
+            &instructions,
+            &db_refs,
+        );
+
+        let match_count = analysis
+            .functions
+            .iter()
+            .filter(|f| f.source == crate::analysis::functions::FunctionSource::Signature)
+            .count();
+
+        let sig_status = if bundled_dbs.is_empty() {
+            None
+        } else {
+            Some(format!("{bundled_status}, {match_count} matched"))
+        };
 
         Ok(Self {
             binary,
@@ -33,23 +64,32 @@ impl Project {
             comments: HashMap::new(),
             renamed_functions: HashMap::new(),
             bookmarks: Vec::new(),
-            flirt_db: None,
-            sig_status: None,
+            bundled_dbs,
+            user_dbs: Vec::new(),
+            sig_status,
         })
     }
 
-    /// Load a FLIRT .sig file and apply signatures to detected functions.
-    /// Returns the number of functions matched.
+    /// Load a user-provided FLIRT .sig file and re-run analysis with all signatures.
+    /// Returns the number of functions matched by this new database.
     pub fn load_signatures(&mut self, path: &Path) -> Result<usize, CoreError> {
         let db = FlirtDatabase::load(path)?;
         let lib_name = db.header.name.clone();
         let sig_count = db.signature_count;
 
-        // Re-run full analysis with signatures
+        self.user_dbs.push(db);
+
+        // Re-run analysis with all signature databases (bundled + user)
+        let all_db_refs: Vec<&FlirtDatabase> = self
+            .bundled_dbs
+            .iter()
+            .chain(self.user_dbs.iter())
+            .collect();
+
         self.analysis = AnalysisResults::analyze_with_signatures(
             &self.binary,
             &self.instructions,
-            Some(&db),
+            &all_db_refs,
         );
 
         let match_count = self
@@ -60,9 +100,8 @@ impl Project {
             .count();
 
         self.sig_status = Some(format!(
-            "{sig_count} sigs loaded ({lib_name}), {match_count} matched"
+            "{sig_count} sigs loaded ({lib_name}), {match_count} total matched"
         ));
-        self.flirt_db = Some(db);
 
         Ok(match_count)
     }
