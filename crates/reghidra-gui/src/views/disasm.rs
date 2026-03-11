@@ -24,11 +24,10 @@ enum DisplayLine {
     },
 }
 
-/// Per-instance scroll tracking so split view panes don't stomp each other.
-static DISASM_NAV_GEN_PRIMARY: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static DISASM_NAV_GEN_SECONDARY: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+/// Tracks the last nav_generation each disasm pane has seen, keyed by ui Id.
+/// Using a small fixed array avoids HashMap overhead for the typical 1-2 panes.
+static DISASM_LAST_GEN: std::sync::Mutex<[(u64, u64); 2]> =
+    std::sync::Mutex::new([(0, 0); 2]);
 
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
@@ -47,18 +46,26 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let theme = app.theme.clone();
     let highlighted_mnemonic = app.highlighted_mnemonic.clone();
 
-    // Use per-pane generation tracker so split view panes scroll independently
-    let is_primary = ui.id().with("split_left") != ui.id();
-    let gen_tracker = if is_primary {
-        &DISASM_NAV_GEN_PRIMARY
-    } else {
-        &DISASM_NAV_GEN_SECONDARY
+    // Per-pane scroll tracking: each pane (identified by ui id hash) stores
+    // the last nav_generation it scrolled to.
+    let pane_key = ui.id().value();
+    let should_scroll = {
+        let mut gens = DISASM_LAST_GEN.lock().unwrap();
+        // Find existing slot or allocate an empty one
+        let idx = gens.iter().position(|s| s.0 == pane_key)
+            .or_else(|| gens.iter().position(|s| s.0 == 0));
+        if let Some(idx) = idx {
+            gens[idx].0 = pane_key;
+            if gens[idx].1 != app.nav_generation {
+                gens[idx].1 = app.nav_generation;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        }
     };
-    let last_gen = gen_tracker.load(std::sync::atomic::Ordering::Relaxed);
-    let should_scroll = app.nav_generation != last_gen;
-    if should_scroll {
-        gen_tracker.store(app.nav_generation, std::sync::atomic::Ordering::Relaxed);
-    }
 
     // Build a flat display list where each item = one fixed-height row
     let mut display_lines: Vec<DisplayLine> = Vec::new();
@@ -131,8 +138,9 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .auto_shrink([false, false])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
+    let visible_height = ui.available_height();
     let scroll_area = if let Some(row_idx) = scroll_to_display_row {
-        let target_offset = (row_idx as f32 * row_height - 200.0).max(0.0);
+        let target_offset = (row_idx as f32 * row_height - visible_height / 2.0).max(0.0);
         scroll_area.vertical_scroll_offset(target_offset)
     } else {
         scroll_area

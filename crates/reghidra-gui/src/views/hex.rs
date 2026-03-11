@@ -121,7 +121,8 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
     let scroll_area = if let Some(row_idx) = scroll_to_row {
-        let target_offset = (row_idx as f32 * row_height - 200.0).max(0.0);
+        let visible_height = ui.available_height();
+        let target_offset = (row_idx as f32 * row_height - visible_height / 2.0).max(0.0);
         scroll_area.vertical_scroll_offset(target_offset)
     } else {
         scroll_area

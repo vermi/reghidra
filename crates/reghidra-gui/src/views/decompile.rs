@@ -114,8 +114,9 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .id_salt("decompile_scroll")
         .auto_shrink([false, false]);
 
+    let visible_height = ui.available_height();
     let scroll_area = if let Some(line_idx) = scroll_to_line {
-        let target_offset = (line_idx as f32 * row_height - 200.0).max(0.0);
+        let target_offset = (line_idx as f32 * row_height - visible_height / 2.0).max(0.0);
         scroll_area.vertical_scroll_offset(target_offset)
     } else {
         scroll_area

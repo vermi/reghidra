@@ -466,17 +466,15 @@ impl eframe::App for ReghidraApp {
             self.toggle_theme();
         }
 
-        // Vim-like keys: only active when no modals, no text editing widget focused, project loaded.
-        // Detect text input by checking if this frame has text events (typed chars) or
-        // if the focused widget is handling IME/key input (i.e. a TextEdit has focus).
+        // Vim-like keys: only active when no modals, no text editing active, project loaded.
+        // We detect active text editing by checking if any Text or Ime events fired this
+        // frame — this reliably indicates a TextEdit widget is consuming keystrokes.
         let text_input_active = ctx.input(|i| {
             i.events
                 .iter()
                 .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Ime(_)))
         });
-        // Also check if the sidebar filter text box has focus
-        let filter_focused = ctx.memory(|m| m.focused().is_some()) && !modals_open;
-        let suppress_vim = modals_open || text_input_active || filter_focused;
+        let suppress_vim = modals_open || text_input_active;
 
         if !suppress_vim && self.project.is_some() {
             ctx.input(|i| {
