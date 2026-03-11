@@ -83,6 +83,10 @@ cat > "$CONTENTS/Info.plist" << PLIST
 </plist>
 PLIST
 
+# Ad-hoc code sign (required by macOS to launch .app bundles)
+echo "Code signing..."
+codesign --force --deep --sign - "$BUNDLE_DIR"
+
 echo ""
 echo "Done! App bundle created at:"
 echo "  $BUNDLE_DIR"
