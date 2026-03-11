@@ -37,6 +37,9 @@ impl AnalysisResults {
     ) -> Self {
         let mut functions = functions::detect_functions(binary, instructions);
 
+        // Resolve PLT stubs (ELF) and IAT entries (PE) to import names
+        resolve_import_functions(&mut functions, binary);
+
         // Apply FLIRT signatures before xrefs/naming so matched names propagate
         if let Some(db) = flirt_db {
             flirt::apply_signatures(db, &mut functions, binary);
@@ -45,7 +48,7 @@ impl AnalysisResults {
         let xrefs = xrefs::build_xrefs(binary, instructions);
 
         // Auto-name functions using heuristics (thunks, wrappers, string-refs, API patterns)
-        naming::auto_name_functions(&mut functions, &xrefs, &binary.strings, instructions);
+        naming::auto_name_functions(&mut functions, &xrefs, &binary.strings, instructions, &binary.import_addr_map);
 
         let cfgs: std::collections::HashMap<u64, ControlFlowGraph> = functions
             .iter()
@@ -86,5 +89,26 @@ impl AnalysisResults {
     /// Get the lifted IR for a function.
     pub fn ir_for(&self, entry: u64) -> Option<&IrFunction> {
         self.ir_functions.get(&entry)
+    }
+}
+
+/// Resolve PLT stubs (ELF) and IAT thunks (PE) to their import names.
+/// Uses `LoadedBinary::import_addr_map` which was built during loading.
+fn resolve_import_functions(functions: &mut [Function], binary: &LoadedBinary) {
+    if binary.import_addr_map.is_empty() {
+        return;
+    }
+
+    for func in functions.iter_mut() {
+        // Only rename sub_* functions
+        if !matches!(func.source, functions::FunctionSource::CallTarget | functions::FunctionSource::Prologue) {
+            continue;
+        }
+
+        // Check if this function's entry address is a known PLT/IAT stub
+        if let Some(import_name) = binary.import_addr_map.get(&func.entry_address) {
+            func.name = import_name.clone();
+            func.source = functions::FunctionSource::Symbol;
+        }
     }
 }

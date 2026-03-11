@@ -105,6 +105,20 @@ pub fn build_xrefs(
             continue;
         }
 
+        // Indirect call/jump through memory (e.g. `call dword ptr [0x40bfaa]`)
+        // Emit a Call/Jump xref to the IAT/GOT address so naming can resolve it
+        if is_call(mnemonic) || is_unconditional_jump(mnemonic) {
+            if let Some(addr) = extract_indirect_target(&insn.operands) {
+                let kind = classify_branch(mnemonic);
+                db.add(XRef {
+                    from: insn.address,
+                    to: addr,
+                    kind,
+                });
+                continue;
+            }
+        }
+
         // Data references: lea, adr, adrp, mov with memory operands
         if let Some(targets) = extract_data_references(mnemonic, &insn.operands) {
             for (target, kind) in targets {
@@ -196,6 +210,24 @@ fn extract_memory_address(operands: &str) -> Option<u64> {
     // For RIP-relative, we can't resolve without knowing the instruction address,
     // so we just look for absolute addresses
     extract_address_from_operands(operands)
+}
+
+/// Extract target from indirect call/jump operands like `dword ptr [0x40bfaa]`
+/// or `qword ptr [rip + 0x200bc2]`.
+fn extract_indirect_target(operands: &str) -> Option<u64> {
+    // Match patterns like "[0x40bfaa]" or "dword ptr [0x40bfaa]"
+    // But NOT register-indirect like "[rax]" or "[rbx + rcx]"
+    let bracket_start = operands.find('[')?;
+    let bracket_end = operands.find(']')?;
+    if bracket_end <= bracket_start {
+        return None;
+    }
+    let inner = &operands[bracket_start + 1..bracket_end].trim();
+
+    // Skip if it contains a register-only reference without an absolute address
+    // Accept: "0x40bfaa", "rip + 0x200bc2"
+    // Skip: "rax", "rbx + rcx*4"
+    extract_address_from_operands(inner)
 }
 
 /// Extract a hex address from operand text.

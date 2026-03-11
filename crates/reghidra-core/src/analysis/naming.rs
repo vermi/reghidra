@@ -12,12 +12,18 @@ pub fn auto_name_functions(
     xrefs: &XRefDatabase,
     strings: &[DetectedString],
     instructions: &[DisassembledInstruction],
+    import_addr_map: &HashMap<u64, String>,
 ) {
-    // Build lookup maps
-    let func_name_by_addr: HashMap<u64, &str> = functions
+    // Build lookup maps — include import names so indirect calls can be resolved
+    let mut func_name_by_addr: HashMap<u64, &str> = functions
         .iter()
         .map(|f| (f.entry_address, f.name.as_str()))
         .collect();
+
+    // Add import IAT addresses so PE indirect calls (call [IAT_addr]) resolve
+    for (addr, name) in import_addr_map {
+        func_name_by_addr.entry(*addr).or_insert(name.as_str());
+    }
 
     let string_by_addr: HashMap<u64, &DetectedString> =
         strings.iter().map(|s| (s.address, s)).collect();

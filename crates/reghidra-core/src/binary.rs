@@ -2,6 +2,7 @@ use crate::arch::Architecture;
 use crate::error::CoreError;
 use goblin::Object;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// High-level information about a parsed binary.
@@ -74,6 +75,8 @@ pub struct LoadedBinary {
     pub imports: Vec<Symbol>,
     pub exports: Vec<Symbol>,
     pub strings: Vec<DetectedString>,
+    /// ELF: PLT stub address → import name. PE: IAT entry address → import name.
+    pub import_addr_map: HashMap<u64, String>,
 }
 
 /// A string found in the binary.
@@ -317,6 +320,9 @@ impl LoadedBinary {
 
         let strings = Self::detect_strings(data, &sections);
 
+        // Build PLT stub → import name map
+        let import_addr_map = Self::build_elf_plt_map(elf, &sections);
+
         Ok(Self {
             info,
             data: data.to_vec(),
@@ -325,7 +331,47 @@ impl LoadedBinary {
             imports,
             exports,
             strings,
+            import_addr_map,
         })
+    }
+
+    /// Build a mapping from PLT stub addresses to import names.
+    /// Uses .rela.plt relocations to determine the GOT slots, then maps
+    /// each PLT entry (by index) to the corresponding symbol name.
+    fn build_elf_plt_map(
+        elf: &goblin::elf::Elf,
+        sections: &[Section],
+    ) -> HashMap<u64, String> {
+        let mut map = HashMap::new();
+
+        // Find .plt section
+        let plt_section = sections.iter().find(|s| s.name == ".plt");
+        let Some(plt) = plt_section else {
+            return map;
+        };
+
+        // Determine PLT entry size (typically 16 bytes on x86_64, 16 on x86)
+        let plt_entry_size = if elf.is_64 { 16u64 } else { 16u64 };
+
+        // Each .rela.plt relocation corresponds to a PLT entry (in order).
+        // PLT[0] is the resolver stub, actual entries start at PLT[1].
+        for (i, reloc) in elf.pltrelocs.iter().enumerate() {
+            let sym_idx = reloc.r_sym;
+            let name = elf
+                .dynsyms
+                .get(sym_idx)
+                .and_then(|sym| elf.dynstrtab.get_at(sym.st_name))
+                .unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            // Clean version suffixes like "puts@@GLIBC_2.2.5"
+            let clean_name = name.split('@').next().unwrap_or(name).to_string();
+            let plt_addr = plt.virtual_address + (i as u64 + 1) * plt_entry_size;
+            map.insert(plt_addr, clean_name);
+        }
+
+        map
     }
 
     fn from_pe(
@@ -426,6 +472,31 @@ impl LoadedBinary {
 
         let strings = Self::detect_strings(data, &sections);
 
+        // Build IAT slot address → import name map for PE.
+        // Code references imports via `call [IAT_addr]` where IAT_addr is the
+        // virtual address of the IAT slot (not the ILT/hint-name RVA).
+        let mut import_addr_map = HashMap::new();
+        let ptr_size: u64 = if is_64bit { 8 } else { 4 };
+        if let Some(ref import_data) = pe.import_data {
+            for entry in &import_data.import_data {
+                let iat_base = entry.import_directory_entry.import_address_table_rva as u64;
+                // Match IAT entries with import names from the lookup table
+                if let Some(ref ilt) = entry.import_lookup_table {
+                    for (i, ilt_entry) in ilt.iter().enumerate() {
+                        use goblin::pe::import::SyntheticImportLookupTableEntry::*;
+                        let name = match ilt_entry {
+                            HintNameTableRVA((_rva, hint_entry)) => {
+                                hint_entry.name.to_string()
+                            }
+                            OrdinalNumber(_) => continue,
+                        };
+                        let iat_slot_addr = image_base + iat_base + (i as u64 * ptr_size);
+                        import_addr_map.insert(iat_slot_addr, name);
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             info,
             data: data.to_vec(),
@@ -434,6 +505,7 @@ impl LoadedBinary {
             imports,
             exports,
             strings,
+            import_addr_map,
         })
     }
 
@@ -568,6 +640,7 @@ impl LoadedBinary {
             imports,
             exports,
             strings,
+            import_addr_map: HashMap::new(),
         })
     }
 

@@ -145,16 +145,36 @@ impl ReghidraApp {
     }
 
     pub fn navigate_to(&mut self, address: u64) {
-        if self.selected_address == Some(address) {
+        // Snap to the nearest instruction address if the exact address isn't one.
+        // This enables navigating from symbols, imports, strings, etc. in data sections.
+        let target = if let Some(ref project) = self.project {
+            if project.instructions.iter().any(|i| i.address == address) {
+                address
+            } else {
+                // Find the nearest instruction at or before this address
+                project
+                    .instructions
+                    .iter()
+                    .filter(|i| i.address <= address)
+                    .last()
+                    .or_else(|| project.instructions.first())
+                    .map(|i| i.address)
+                    .unwrap_or(address)
+            }
+        } else {
+            address
+        };
+
+        if self.selected_address == Some(target) {
             return;
         }
         // Truncate forward history
         if self.nav_position + 1 < self.nav_history.len() {
             self.nav_history.truncate(self.nav_position + 1);
         }
-        self.nav_history.push(address);
+        self.nav_history.push(target);
         self.nav_position = self.nav_history.len() - 1;
-        self.selected_address = Some(address);
+        self.selected_address = Some(target);
     }
 
     pub fn nav_back(&mut self) {

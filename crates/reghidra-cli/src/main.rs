@@ -157,7 +157,7 @@ fn main() -> Result<()> {
     println!("\n--- Strings (first 20) ---");
     for s in project.binary.strings.iter().take(20) {
         let xrefs = project.analysis.xrefs.ref_count_to(s.address);
-        println!("  0x{:08x}  ({} xrefs)  \"{}\"", s.address, xrefs, s.value);
+        println!("  0x{:08x}  ({} xrefs)  {}  \"{}\"", s.address, xrefs, s.auto_name, s.value);
     }
 
     Ok(())

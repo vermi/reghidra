@@ -30,7 +30,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             ui.label(format!("{} functions", filtered.len()));
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (addr, name) in &filtered {
                     let label = format!("0x{addr:08x}  {name}");
                     let selected = selected_addr == Some(*addr);
@@ -56,7 +56,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             ui.label(format!("{} symbols", filtered.len()));
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for sym in &filtered {
                     let kind = match sym.kind {
                         reghidra_core::SymbolKind::Function => "fn",
@@ -85,7 +85,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             ui.label(format!("{} imports", filtered.len()));
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for imp in &filtered {
                     let label = format!("0x{:08x}  {}", imp.address, imp.name);
                     let selected = selected_addr == Some(imp.address);
@@ -107,7 +107,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             ui.label(format!("{} exports", filtered.len()));
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for exp in &filtered {
                     let label = format!("0x{:08x}  {}", exp.address, exp.name);
                     let selected = selected_addr == Some(exp.address);
@@ -124,7 +124,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             ui.label(format!("{} sections", sections.len()));
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for sec in &sections {
                     if !query.is_empty() && !sec.name.to_lowercase().contains(&query) {
                         continue;
@@ -162,7 +162,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             ui.label(format!("{} strings", filtered.len()));
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for s in &filtered {
                     let display_val: String = s.value.chars().take(50).collect();
                     let label = format!(
