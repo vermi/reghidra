@@ -2,6 +2,8 @@ use crate::app::ReghidraApp;
 use egui::{RichText, Ui};
 use reghidra_core::AnnotatedLine;
 
+static DECOMP_NAV_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
         return;
@@ -24,20 +26,22 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let func_entry = func.entry_address;
     let func_name = func.name.clone();
 
-    // Use cached decompile output if the function hasn't changed
+    // Use cached decompile output if the function and rename generation haven't changed
     let needs_decompile = match &app.decompile_cache {
-        Some((cached_entry, _)) => *cached_entry != func_entry,
+        Some((cached_entry, cached_rename_gen, _)) => {
+            *cached_entry != func_entry || *cached_rename_gen != app.rename_generation
+        }
         None => true,
     };
     if needs_decompile {
         if let Some(lines) = project.decompile_annotated(func_entry) {
-            app.decompile_cache = Some((func_entry, lines));
+            app.decompile_cache = Some((func_entry, app.rename_generation, lines));
         } else {
             app.decompile_cache = None;
         }
     }
 
-    let Some((_, ref annotated_lines)) = app.decompile_cache else {
+    let Some((_, _, ref annotated_lines)) = app.decompile_cache else {
         ui.label("Could not decompile this function.");
         return;
     };
@@ -63,9 +67,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         })
         .collect();
 
-    // Build address-to-block mapping for the current function's IR so we can
-    // map any instruction address to its block start address, which is what the
-    // annotated lines carry.
+    // Build address-to-block mapping for the current function's IR
     let addr_to_block: std::collections::HashMap<u64, u64> =
         if let Some(ir) = project.analysis.ir_for(func_entry) {
             let mut map = std::collections::HashMap::new();
@@ -84,57 +86,86 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     // The block address that contains the hovered instruction (from another view)
     let hovered_block = hovered_addr.and_then(|a| addr_to_block.get(&a).copied());
 
+    // Check if we need to scroll to the selected block
+    let last_gen = DECOMP_NAV_GEN.load(std::sync::atomic::Ordering::Relaxed);
+    let should_scroll = app.nav_generation != last_gen;
+    if should_scroll {
+        DECOMP_NAV_GEN.store(app.nav_generation, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Find the line index to scroll to
+    let scroll_to_line = if should_scroll {
+        selected_block.and_then(|sb| {
+            annotated_lines
+                .iter()
+                .position(|line| line.addr == Some(sb))
+        })
+    } else {
+        None
+    };
+
     let mut navigate_to = None;
     let mut new_hovered: Option<u64> = None;
 
-    egui::ScrollArea::vertical()
+    let row_height = 18.0;
+    let total_lines = annotated_lines.len();
+
+    let scroll_area = egui::ScrollArea::vertical()
         .id_salt("decompile_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for line in &annotated_lines {
-                // Determine highlighting for this line:
-                // 1. Selected: line's block matches the selected instruction's block
-                // 2. Hover: line's block matches the hovered instruction's block
-                let line_block = line.addr;
-                let is_selected_block =
-                    selected_block.is_some() && line_block == selected_block;
-                let is_hovered_block = hovered_block.is_some()
-                    && line_block == hovered_block
-                    && !is_selected_block;
+        .auto_shrink([false, false]);
 
-                let frame = if is_selected_block {
-                    egui::Frame::new().fill(theme.bg_selected)
-                } else if is_hovered_block {
-                    egui::Frame::new().fill(theme.bg_hover)
-                } else {
-                    egui::Frame::NONE
-                };
+    let scroll_area = if let Some(line_idx) = scroll_to_line {
+        let target_offset = (line_idx as f32 * row_height - 200.0).max(0.0);
+        scroll_area.vertical_scroll_offset(target_offset)
+    } else {
+        scroll_area
+    };
 
-                let resp = frame
-                    .show(ui, |ui| {
-                        render_interactive_line(
-                            ui,
-                            line,
-                            &mono,
-                            &theme,
-                            &func_name_to_addr,
-                            &mut navigate_to,
-                        );
-                    })
-                    .response;
+    scroll_area.show_rows(ui, row_height, total_lines, |ui, row_range| {
+        for idx in row_range {
+            let line = &annotated_lines[idx];
+            let line_block = line.addr;
+            // Only highlight if we actually have a matching block (not None == None)
+            let is_selected_block = selected_block.is_some()
+                && line_block.is_some()
+                && line_block == selected_block;
+            let is_hovered_block = hovered_block.is_some()
+                && line_block.is_some()
+                && line_block == hovered_block
+                && !is_selected_block;
 
-                // Track hover: when hovering a decomp line, broadcast its
-                // source address so the disasm view can highlight it
-                if resp.hovered() {
-                    if let Some(addr) = line.addr {
-                        new_hovered = Some(addr);
-                    }
+            let frame = if is_selected_block {
+                egui::Frame::new().fill(theme.bg_selected)
+            } else if is_hovered_block {
+                egui::Frame::new().fill(theme.bg_hover)
+            } else {
+                egui::Frame::NONE
+            };
+
+            let resp = frame
+                .show(ui, |ui| {
+                    render_interactive_line(
+                        ui,
+                        line,
+                        &mono,
+                        &theme,
+                        &func_name_to_addr,
+                        &mut navigate_to,
+                    );
+                })
+                .response;
+
+            // Track hover: when hovering a decomp line, broadcast its
+            // source address so the disasm view can highlight it
+            if resp.hovered() {
+                if let Some(addr) = line.addr {
+                    new_hovered = Some(addr);
                 }
             }
-        });
+        }
+    });
 
     // Only update hovered_address if the mouse is actually in this view
-    // (new_hovered will be None if mouse isn't over any line)
     if new_hovered.is_some() {
         app.hovered_address = new_hovered;
     }

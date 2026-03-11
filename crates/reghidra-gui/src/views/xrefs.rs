@@ -46,6 +46,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .collect();
 
     let mut navigate_to = None;
+    let mut new_hovered: Option<u64> = None;
 
     ui.label(RichText::new(format!("Xrefs for 0x{selected_addr:08x}")).strong());
     ui.separator();
@@ -65,25 +66,30 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                         .color(theme.xref_to_header),
                 );
                 for (from_addr, caller, kind) in &to_entries {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .link(
-                                RichText::new(format!("0x{from_addr:08x}"))
+                    let resp = ui
+                        .horizontal(|ui| {
+                            if ui
+                                .link(
+                                    RichText::new(format!("0x{from_addr:08x}"))
+                                        .text_style(mono.clone())
+                                        .color(theme.addr_normal),
+                                )
+                                .clicked()
+                            {
+                                navigate_to = Some(*from_addr);
+                            }
+                            let kind_str = format!("[{kind:?}]");
+                            let kind_color = theme.xref_kind_color(*kind);
+                            ui.label(
+                                RichText::new(format!("  {kind_str:<20} {caller}"))
                                     .text_style(mono.clone())
-                                    .color(theme.addr_normal),
-                            )
-                            .clicked()
-                        {
-                            navigate_to = Some(*from_addr);
-                        }
-                        let kind_str = format!("[{kind:?}]");
-                        let kind_color = theme.xref_kind_color(*kind);
-                        ui.label(
-                            RichText::new(format!("  {kind_str:<20} {caller}"))
-                                .text_style(mono.clone())
-                                .color(kind_color),
-                        );
-                    });
+                                    .color(kind_color),
+                            );
+                        })
+                        .response;
+                    if resp.hovered() {
+                        new_hovered = Some(*from_addr);
+                    }
                 }
                 ui.add_space(8.0);
             }
@@ -97,28 +103,37 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                     .color(theme.xref_from_header),
                 );
                 for (to_addr, target, kind) in &from_entries {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .link(
-                                RichText::new(format!("0x{to_addr:08x}"))
+                    let resp = ui
+                        .horizontal(|ui| {
+                            if ui
+                                .link(
+                                    RichText::new(format!("0x{to_addr:08x}"))
+                                        .text_style(mono.clone())
+                                        .color(theme.addr_normal),
+                                )
+                                .clicked()
+                            {
+                                navigate_to = Some(*to_addr);
+                            }
+                            let kind_str = format!("[{kind:?}]");
+                            let kind_color = theme.xref_kind_color(*kind);
+                            ui.label(
+                                RichText::new(format!("  {kind_str:<20} {target}"))
                                     .text_style(mono.clone())
-                                    .color(theme.addr_normal),
-                            )
-                            .clicked()
-                        {
-                            navigate_to = Some(*to_addr);
-                        }
-                        let kind_str = format!("[{kind:?}]");
-                        let kind_color = theme.xref_kind_color(*kind);
-                        ui.label(
-                            RichText::new(format!("  {kind_str:<20} {target}"))
-                                .text_style(mono.clone())
-                                .color(kind_color),
-                        );
-                    });
+                                    .color(kind_color),
+                            );
+                        })
+                        .response;
+                    if resp.hovered() {
+                        new_hovered = Some(*to_addr);
+                    }
                 }
             }
         });
+
+    if new_hovered.is_some() {
+        app.hovered_address = new_hovered;
+    }
 
     if let Some(addr) = navigate_to {
         app.navigate_to(addr);

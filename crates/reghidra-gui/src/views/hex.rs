@@ -1,6 +1,8 @@
 use crate::app::ReghidraApp;
 use egui::{RichText, Ui};
 
+static HEX_NAV_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
         return;
@@ -48,6 +50,24 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let row_height = 18.0;
     let mono = egui::TextStyle::Monospace;
 
+    // Check if we need to scroll to selection
+    let last_gen = HEX_NAV_GEN.load(std::sync::atomic::Ordering::Relaxed);
+    let should_scroll = app.nav_generation != last_gen;
+    if should_scroll {
+        HEX_NAV_GEN.store(app.nav_generation, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let scroll_to_row = if should_scroll && selected_addr >= base_va {
+        let offset = (selected_addr - base_va) as usize;
+        if offset < sec_data.len() {
+            Some(offset / bytes_per_row)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Section selector
     let mut nav_target: Option<u64> = None;
     ui.horizontal(|ui| {
@@ -93,34 +113,45 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     ui.separator();
 
     let mut navigate_to = None;
+    let mut new_hovered: Option<u64> = None;
 
-    egui::ScrollArea::vertical()
+    let scroll_area = egui::ScrollArea::vertical()
         .id_salt("hex_scroll")
         .auto_shrink([false, false])
-        .show_rows(ui, row_height, total_rows, |ui, row_range| {
-            for row in row_range {
-                let offset = row * bytes_per_row;
-                let row_addr = base_va + offset as u64;
-                let row_end_addr = row_addr + bytes_per_row as u64;
-                let end = (offset + bytes_per_row).min(sec_data.len());
-                let row_bytes = &sec_data[offset..end];
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
-                // Highlight this row if the selected or hovered address falls in it
-                let contains_selected =
-                    selected_addr >= row_addr && selected_addr < row_end_addr;
-                let contains_hovered = app
-                    .hovered_address
-                    .is_some_and(|h| h >= row_addr && h < row_end_addr);
+    let scroll_area = if let Some(row_idx) = scroll_to_row {
+        let target_offset = (row_idx as f32 * row_height - 200.0).max(0.0);
+        scroll_area.vertical_scroll_offset(target_offset)
+    } else {
+        scroll_area
+    };
 
-                let frame = if contains_selected {
-                    egui::Frame::new().fill(theme.bg_selected)
-                } else if contains_hovered {
-                    egui::Frame::new().fill(theme.bg_hover)
-                } else {
-                    egui::Frame::NONE
-                };
+    scroll_area.show_rows(ui, row_height, total_rows, |ui, row_range| {
+        for row in row_range {
+            let offset = row * bytes_per_row;
+            let row_addr = base_va + offset as u64;
+            let row_end_addr = row_addr + bytes_per_row as u64;
+            let end = (offset + bytes_per_row).min(sec_data.len());
+            let row_bytes = &sec_data[offset..end];
 
-                frame.show(ui, |ui| {
+            // Highlight this row if the selected or hovered address falls in it
+            let contains_selected =
+                selected_addr >= row_addr && selected_addr < row_end_addr;
+            let contains_hovered = app
+                .hovered_address
+                .is_some_and(|h| h >= row_addr && h < row_end_addr);
+
+            let frame = if contains_selected {
+                egui::Frame::new().fill(theme.bg_selected)
+            } else if contains_hovered {
+                egui::Frame::new().fill(theme.bg_hover)
+            } else {
+                egui::Frame::NONE
+            };
+
+            let resp = frame
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let addr_color = if contains_selected {
                             theme.addr_selected
@@ -172,9 +203,19 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                                 .color(theme.hex_ascii),
                         );
                     });
-                });
+                })
+                .response;
+
+            // Broadcast hover for cross-view highlighting
+            if resp.hovered() {
+                new_hovered = Some(row_addr);
             }
-        });
+        }
+    });
+
+    if new_hovered.is_some() {
+        app.hovered_address = new_hovered;
+    }
 
     if let Some(addr) = navigate_to {
         app.navigate_to(addr);

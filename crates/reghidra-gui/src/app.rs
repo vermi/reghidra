@@ -50,8 +50,8 @@ pub struct ReghidraApp {
     pub logo: Option<egui::TextureHandle>,
     pub project: Option<Project>,
     pub loading_error: Option<String>,
-    pub side_panel: SidePanel,
     pub main_view: MainView,
+    pub side_panel: SidePanel,
     pub selected_address: Option<u64>,
     pub search_query: String,
     pub show_bytes_in_disasm: bool,
@@ -93,8 +93,9 @@ pub struct ReghidraApp {
     // Mnemonic highlighting (click a mnemonic to highlight all matching)
     pub highlighted_mnemonic: Option<String>,
 
-    // Tracks the previous selected address to detect navigation changes
-    pub prev_selected_address: Option<u64>,
+    /// Monotonically increasing counter bumped on every navigation; views compare
+    /// their last-seen value to detect when they need to scroll to selection.
+    pub nav_generation: u64,
 
     // Hover-based cross-view highlighting: set by whichever view the mouse is in
     pub hovered_address: Option<u64>,
@@ -102,8 +103,10 @@ pub struct ReghidraApp {
     // Track whether theme has been applied
     theme_applied: bool,
 
-    // Cached decompile output: (function_entry_addr, annotated_lines)
-    pub decompile_cache: Option<(u64, Vec<reghidra_core::AnnotatedLine>)>,
+    // Cached decompile output: (function_entry_addr, rename_generation, annotated_lines)
+    pub decompile_cache: Option<(u64, u64, Vec<reghidra_core::AnnotatedLine>)>,
+    /// Bumped whenever a function is renamed so decompile cache knows to refresh.
+    pub rename_generation: u64,
 }
 
 impl ReghidraApp {
@@ -134,9 +137,10 @@ impl ReghidraApp {
             help: HelpOverlay::new(),
             highlighted_mnemonic: None,
             hovered_address: None,
-            prev_selected_address: None,
+            nav_generation: 0,
             theme_applied: false,
             decompile_cache: None,
+            rename_generation: 0,
         }
     }
 
@@ -150,6 +154,7 @@ impl ReghidraApp {
                 self.loading_error = None;
                 self.undo = UndoHistory::new();
                 self.decompile_cache = None;
+                self.nav_generation += 1;
             }
             Err(e) => {
                 self.loading_error = Some(format!("Failed to load {}: {e}", path.display()));
@@ -158,9 +163,44 @@ impl ReghidraApp {
         }
     }
 
+    /// Returns true if `addr` is a known instruction address.
+    fn is_instruction_addr(&self, addr: u64) -> bool {
+        self.project.as_ref().is_some_and(|p| {
+            p.instructions
+                .binary_search_by_key(&addr, |i| i.address)
+                .is_ok()
+        })
+    }
+
+    /// Returns true if `addr` falls inside a non-executable (data) section.
+    fn is_data_addr(&self, addr: u64) -> bool {
+        self.project.as_ref().is_some_and(|p| {
+            p.binary
+                .section_at_va(addr)
+                .is_some_and(|s| !s.is_executable)
+        })
+    }
+
+    /// Auto-switch view only between Disassembly and Hex based on code vs data.
+    /// Does NOT yank the user out of other views (CFG, IR, Decompile, Xrefs).
+    fn auto_switch_view_for_addr(&mut self, addr: u64) {
+        match self.main_view {
+            MainView::Hex => {
+                if self.is_instruction_addr(addr) {
+                    self.main_view = MainView::Disassembly;
+                }
+            }
+            MainView::Disassembly => {
+                if self.is_data_addr(addr) {
+                    self.main_view = MainView::Hex;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn navigate_to(&mut self, address: u64) {
         let target = if let Some(ref project) = self.project {
-            // Check if this is a known instruction address
             let is_instruction = project
                 .instructions
                 .binary_search_by_key(&address, |i| i.address)
@@ -173,16 +213,6 @@ impl ReghidraApp {
                 let in_section = project.binary.section_at_va(address).is_some();
 
                 if in_section {
-                    // Check if it's in a non-executable (data) section
-                    let is_data = project
-                        .binary
-                        .section_at_va(address)
-                        .is_some_and(|s| !s.is_executable);
-
-                    if is_data {
-                        // Switch to hex view for data addresses
-                        self.main_view = MainView::Hex;
-                    }
                     address
                 } else {
                     // Not in any section — snap to nearest instruction
@@ -200,16 +230,19 @@ impl ReghidraApp {
             address
         };
 
-        if self.selected_address == Some(target) {
-            return;
-        }
+        // Always bump generation so views scroll, even for same address
+        self.nav_generation += 1;
+
         // Truncate forward history
-        if self.nav_position + 1 < self.nav_history.len() {
-            self.nav_history.truncate(self.nav_position + 1);
+        if self.selected_address != Some(target) {
+            if self.nav_position + 1 < self.nav_history.len() {
+                self.nav_history.truncate(self.nav_position + 1);
+            }
+            self.nav_history.push(target);
+            self.nav_position = self.nav_history.len() - 1;
         }
-        self.nav_history.push(target);
-        self.nav_position = self.nav_history.len() - 1;
         self.selected_address = Some(target);
+        self.auto_switch_view_for_addr(target);
     }
 
     pub fn nav_back(&mut self) {
@@ -217,7 +250,8 @@ impl ReghidraApp {
             self.nav_position -= 1;
             let addr = self.nav_history[self.nav_position];
             self.selected_address = Some(addr);
-            self.auto_switch_view(addr);
+            self.nav_generation += 1;
+            self.auto_switch_view_for_addr(addr);
         }
     }
 
@@ -226,28 +260,8 @@ impl ReghidraApp {
             self.nav_position += 1;
             let addr = self.nav_history[self.nav_position];
             self.selected_address = Some(addr);
-            self.auto_switch_view(addr);
-        }
-    }
-
-    /// Switch between hex and disasm views based on whether the address is code or data.
-    fn auto_switch_view(&mut self, addr: u64) {
-        if let Some(ref project) = self.project {
-            let is_code = project
-                .instructions
-                .binary_search_by_key(&addr, |i| i.address)
-                .is_ok();
-            if is_code && self.main_view == MainView::Hex {
-                self.main_view = MainView::Disassembly;
-            } else if !is_code {
-                let is_data = project
-                    .binary
-                    .section_at_va(addr)
-                    .is_some_and(|s| !s.is_executable);
-                if is_data {
-                    self.main_view = MainView::Hex;
-                }
-            }
+            self.nav_generation += 1;
+            self.auto_switch_view_for_addr(addr);
         }
     }
 
@@ -348,6 +362,15 @@ impl ReghidraApp {
             }
         }
     }
+
+    /// Get the active view ref for the focused pane (primary or secondary).
+    fn focused_view_mut(&mut self) -> &mut MainView {
+        if self.layout == ViewLayout::SplitVertical && self.focused_pane == 1 {
+            &mut self.secondary_view
+        } else {
+            &mut self.main_view
+        }
+    }
 }
 
 impl eframe::App for ReghidraApp {
@@ -390,11 +413,19 @@ impl eframe::App for ReghidraApp {
             // Cmd+Z / Cmd+Shift+Z: Undo/redo
             if i.key_pressed(egui::Key::Z) && i.modifiers.command && !i.modifiers.shift {
                 if let Some(ref mut project) = self.project {
+                    if self.undo.is_next_undo_rename() {
+                        self.rename_generation += 1;
+                        self.decompile_cache = None;
+                    }
                     self.undo.undo(project);
                 }
             }
             if i.key_pressed(egui::Key::Z) && i.modifiers.command && i.modifiers.shift {
                 if let Some(ref mut project) = self.project {
+                    if self.undo.is_next_redo_rename() {
+                        self.rename_generation += 1;
+                        self.decompile_cache = None;
+                    }
                     self.undo.redo(project);
                 }
             }
@@ -405,6 +436,11 @@ impl eframe::App for ReghidraApp {
             // Cmd+D: Toggle theme
             if i.key_pressed(egui::Key::D) && i.modifiers.command {
                 // handled after closure
+            }
+
+            // Reset g_pending on mouse click
+            if i.pointer.any_click() {
+                self.g_pending = false;
             }
         });
 
@@ -430,13 +466,20 @@ impl eframe::App for ReghidraApp {
             self.toggle_theme();
         }
 
-        // Vim-like keys (only in Normal mode, no modals open, no text field focused, project loaded)
-        let text_field_focused = ctx.memory(|m| m.focused().is_some())
-            && !modals_open; // modals handle their own focus
-        if !modals_open && !text_field_focused && self.project.is_some() {
+        // Vim-like keys: only active when no modals, no text editing widget focused, project loaded.
+        // Detect text input by checking if this frame has text events (typed chars) or
+        // if the focused widget is handling IME/key input (i.e. a TextEdit has focus).
+        let text_input_active = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Ime(_)))
+        });
+        // Also check if the sidebar filter text box has focus
+        let filter_focused = ctx.memory(|m| m.focused().is_some()) && !modals_open;
+        let suppress_vim = modals_open || text_input_active || filter_focused;
+
+        if !suppress_vim && self.project.is_some() {
             ctx.input(|i| {
-                // Check no text edit has focus by seeing if any key produces text
-                // We use explicit key checks for vim bindings
                 if !i.modifiers.command && !i.modifiers.alt && !i.modifiers.ctrl {
                     // j/k: next/prev instruction
                     if i.key_pressed(egui::Key::J) {
@@ -488,11 +531,11 @@ impl eframe::App for ReghidraApp {
                     }
                     // x: switch to xrefs view
                     if i.key_pressed(egui::Key::X) {
-                        self.main_view = MainView::Xrefs;
+                        *self.focused_view_mut() = MainView::Xrefs;
                     }
                     // d: switch to decompile view (without cmd)
                     if i.key_pressed(egui::Key::D) {
-                        self.main_view = MainView::Decompile;
+                        *self.focused_view_mut() = MainView::Decompile;
                     }
                     // Space: toggle split view
                     if i.key_pressed(egui::Key::Space) {
@@ -507,24 +550,24 @@ impl eframe::App for ReghidraApp {
                     {
                         self.focused_pane = 1 - self.focused_pane;
                     }
-                    // 1-6: switch views
+                    // 1-6: switch views (respects focused pane)
                     if i.key_pressed(egui::Key::Num1) {
-                        self.main_view = MainView::Disassembly;
+                        *self.focused_view_mut() = MainView::Disassembly;
                     }
                     if i.key_pressed(egui::Key::Num2) {
-                        self.main_view = MainView::Decompile;
+                        *self.focused_view_mut() = MainView::Decompile;
                     }
                     if i.key_pressed(egui::Key::Num3) {
-                        self.main_view = MainView::Hex;
+                        *self.focused_view_mut() = MainView::Hex;
                     }
                     if i.key_pressed(egui::Key::Num4) {
-                        self.main_view = MainView::Cfg;
+                        *self.focused_view_mut() = MainView::Cfg;
                     }
                     if i.key_pressed(egui::Key::Num5) {
-                        self.main_view = MainView::Xrefs;
+                        *self.focused_view_mut() = MainView::Xrefs;
                     }
                     if i.key_pressed(egui::Key::Num6) {
-                        self.main_view = MainView::Ir;
+                        *self.focused_view_mut() = MainView::Ir;
                     }
                     // ?: toggle help
                     if i.key_pressed(egui::Key::Questionmark) {
@@ -936,12 +979,14 @@ impl eframe::App for ReghidraApp {
                         egui::vec2(half_width, available.height()),
                     );
 
-                    // Track which pane the mouse is over for automatic focus
-                    if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                        if left_rect.contains(pos) {
-                            self.focused_pane = 0;
-                        } else if right_rect.contains(pos) {
-                            self.focused_pane = 1;
+                    // Only switch focused pane on mouse click (not hover)
+                    if ctx.input(|i| i.pointer.any_click()) {
+                        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                            if left_rect.contains(pos) {
+                                self.focused_pane = 0;
+                            } else if right_rect.contains(pos) {
+                                self.focused_pane = 1;
+                            }
                         }
                     }
 
@@ -1001,9 +1046,15 @@ impl eframe::App for ReghidraApp {
 
         // Annotation popup
         if self.annotation_popup.open {
+            let was_rename =
+                self.annotation_popup.kind == crate::annotations::AnnotationKind::Rename;
             if let Some(ref mut project) = self.project {
-                self.annotation_popup
+                let committed = self.annotation_popup
                     .show(ctx, &theme_clone, project, &mut self.undo);
+                if committed && was_rename {
+                    self.rename_generation += 1;
+                    self.decompile_cache = None;
+                }
             }
         }
 

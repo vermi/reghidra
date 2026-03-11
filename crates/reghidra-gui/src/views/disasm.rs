@@ -24,6 +24,12 @@ enum DisplayLine {
     },
 }
 
+/// Per-instance scroll tracking so split view panes don't stomp each other.
+static DISASM_NAV_GEN_PRIMARY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static DISASM_NAV_GEN_SECONDARY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
         return;
@@ -41,9 +47,18 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let theme = app.theme.clone();
     let highlighted_mnemonic = app.highlighted_mnemonic.clone();
 
-    // Detect if the selected address changed (e.g. sidebar click, vim nav)
-    let should_scroll = app.prev_selected_address != app.selected_address;
-    app.prev_selected_address = app.selected_address;
+    // Use per-pane generation tracker so split view panes scroll independently
+    let is_primary = ui.id().with("split_left") != ui.id();
+    let gen_tracker = if is_primary {
+        &DISASM_NAV_GEN_PRIMARY
+    } else {
+        &DISASM_NAV_GEN_SECONDARY
+    };
+    let last_gen = gen_tracker.load(std::sync::atomic::Ordering::Relaxed);
+    let should_scroll = app.nav_generation != last_gen;
+    if should_scroll {
+        gen_tracker.store(app.nav_generation, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Build a flat display list where each item = one fixed-height row
     let mut display_lines: Vec<DisplayLine> = Vec::new();

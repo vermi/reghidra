@@ -74,6 +74,18 @@ impl UndoHistory {
     pub fn redo_description(&self) -> Option<&str> {
         self.redo_stack.last().map(action_description)
     }
+
+    pub fn is_next_undo_rename(&self) -> bool {
+        self.undo_stack
+            .last()
+            .is_some_and(|a| matches!(a, Action::RenameFunction { .. }))
+    }
+
+    pub fn is_next_redo_rename(&self) -> bool {
+        self.redo_stack
+            .last()
+            .is_some_and(|a| matches!(a, Action::RenameFunction { .. }))
+    }
 }
 
 fn apply_action(action: &Action, project: &mut Project) {
