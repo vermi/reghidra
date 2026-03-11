@@ -79,6 +79,8 @@ pub struct ReghidraApp {
     // Phase 5: Split views
     pub layout: ViewLayout,
     pub secondary_view: MainView,
+    /// Which pane has keyboard focus in split view (0 = left/primary, 1 = right/secondary).
+    pub focused_pane: usize,
 
     // Phase 5: Context menu state
     #[allow(dead_code)]
@@ -122,6 +124,7 @@ impl ReghidraApp {
             g_pending: false,
             layout: ViewLayout::Single,
             secondary_view: MainView::Decompile,
+            focused_pane: 0,
             context_menu_addr: None,
             help: HelpOverlay::new(),
             highlighted_mnemonic: None,
@@ -442,6 +445,12 @@ impl eframe::App for ReghidraApp {
                             ViewLayout::Single => ViewLayout::SplitVertical,
                             ViewLayout::SplitVertical => ViewLayout::Single,
                         };
+                    }
+                    // Tab: switch focused pane in split view
+                    if i.key_pressed(egui::Key::Tab)
+                        && self.layout == ViewLayout::SplitVertical
+                    {
+                        self.focused_pane = 1 - self.focused_pane;
                     }
                     // 1-6: switch views
                     if i.key_pressed(egui::Key::Num1) {
@@ -841,9 +850,8 @@ impl eframe::App for ReghidraApp {
                     render_view_tabs_and_content(self, ui, true);
                 }
                 ViewLayout::SplitVertical => {
-                    // Give each pane its own clipping rect so scroll areas
-                    // are independent (one pane's content length doesn't
-                    // constrain the other).
+                    // Give each pane its own clipping rect and id_salt so
+                    // scroll areas and widgets are fully independent.
                     let available = ui.available_rect_before_wrap();
                     let half_width = available.width() / 2.0 - 2.0;
                     let sep_x = available.min.x + half_width + 1.0;
@@ -857,9 +865,20 @@ impl eframe::App for ReghidraApp {
                         egui::vec2(half_width, available.height()),
                     );
 
-                    // Left pane (primary) — independent clip rect
+                    // Track which pane the mouse is over for automatic focus
+                    if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                        if left_rect.contains(pos) {
+                            self.focused_pane = 0;
+                        } else if right_rect.contains(pos) {
+                            self.focused_pane = 1;
+                        }
+                    }
+
+                    // Left pane (primary) — unique id_salt + clip rect
                     ui.allocate_new_ui(
-                        egui::UiBuilder::new().max_rect(left_rect),
+                        egui::UiBuilder::new()
+                            .max_rect(left_rect)
+                            .id_salt("split_left"),
                         |ui| {
                             ui.set_clip_rect(left_rect);
                             render_view_tabs_and_content(self, ui, true);
@@ -875,9 +894,11 @@ impl eframe::App for ReghidraApp {
                         ui.visuals().widgets.noninteractive.bg_stroke,
                     );
 
-                    // Right pane (secondary) — independent clip rect
+                    // Right pane (secondary) — unique id_salt + clip rect
                     ui.allocate_new_ui(
-                        egui::UiBuilder::new().max_rect(right_rect),
+                        egui::UiBuilder::new()
+                            .max_rect(right_rect)
+                            .id_salt("split_right"),
                         |ui| {
                             ui.set_clip_rect(right_rect);
                             render_view_tabs_and_content(self, ui, false);

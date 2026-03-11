@@ -47,7 +47,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let theme = app.theme.clone();
     let annotated_lines = annotated_lines.clone();
 
-    // Build a reverse map: function name → address for click-to-navigate
+    // Build a reverse map: function name -> address for click-to-navigate
     let func_name_to_addr: std::collections::HashMap<String, u64> = project
         .analysis
         .functions
@@ -62,12 +62,11 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         })
         .collect();
 
-    // Find which line(s) correspond to the selected address by checking block membership
+    // Find which block the selected address belongs to
     let selected_block_addr = project
         .analysis
         .function_containing(selected_addr)
         .and_then(|func| {
-            // Find the block that contains the selected address
             if let Some(ir) = project.analysis.ir_for(func.entry_address) {
                 for block in &ir.blocks {
                     let block_start = block.address;
@@ -87,6 +86,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let mut navigate_to = None;
 
     egui::ScrollArea::vertical()
+        .id_salt("decompile_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for line in &annotated_lines {
@@ -94,8 +94,6 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                     (Some(line_addr), Some(block_addr)) => line_addr == block_addr,
                     _ => false,
                 };
-
-                // Also highlight if the line's addr exactly matches selected_addr
                 let is_exact_match = line.addr == Some(selected_addr);
 
                 let frame = if is_exact_match {
@@ -136,25 +134,33 @@ fn render_interactive_line(
     let text = &line.text;
     let trimmed = text.trim();
 
-    // Try to find clickable tokens in the line
-    // We'll scan for function call patterns: name(...) and goto/label addresses
     let mut tokens = tokenize_line(text, func_name_to_addr);
 
     if tokens.is_empty() {
-        // Simple line with no interactive elements
+        // No interactive tokens — render as a single sense-click label
         let color = theme.colorize_decompile_line(text);
-        ui.label(RichText::new(text.as_str()).text_style(mono.clone()).color(color));
+        let resp = ui.add(
+            egui::Label::new(
+                RichText::new(text.as_str())
+                    .text_style(mono.clone())
+                    .color(color),
+            )
+            .sense(egui::Sense::click()),
+        );
+        if resp.clicked() {
+            if let Some(addr) = line.addr {
+                *navigate_to = Some(addr);
+            }
+        }
         return;
     }
 
-    // If the line addr is set, make the whole line clickable to navigate to that addr
     ui.horizontal(|ui| {
-        // Sort tokens by position
         tokens.sort_by_key(|t| t.start);
 
         let mut pos = 0;
         for token in &tokens {
-            // Emit plain text before this token
+            // Plain text before this token
             if token.start > pos {
                 let before = &text[pos..token.start];
                 if !before.is_empty() {
@@ -168,7 +174,7 @@ fn render_interactive_line(
                 }
             }
 
-            // Emit the clickable token
+            // Clickable token
             let token_text = &text[token.start..token.end];
             let color = match token.kind {
                 TokenKind::FuncCall => theme.xref_func,
@@ -191,7 +197,7 @@ fn render_interactive_line(
             pos = token.end;
         }
 
-        // Emit remaining text after last token
+        // Remaining text after last token
         if pos < text.len() {
             let after = &text[pos..];
             if !after.is_empty() {
@@ -229,8 +235,7 @@ fn tokenize_line(
 ) -> Vec<ClickableToken> {
     let mut tokens = Vec::new();
 
-    // 1. Find function calls: identifier followed by '('
-    // Look for patterns like "func_name(" where func_name is in our map
+    // 1. Find function calls: known function names as whole words
     for (name, &addr) in func_name_to_addr {
         if name.is_empty() {
             continue;
@@ -240,7 +245,6 @@ fn tokenize_line(
             let abs_pos = search_from + pos;
             let end_pos = abs_pos + name.len();
 
-            // Verify it's a whole word: check char before and after
             let before_ok = abs_pos == 0
                 || !text.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
                     && text.as_bytes()[abs_pos - 1] != b'_';
@@ -261,11 +265,11 @@ fn tokenize_line(
         }
     }
 
-    // 2. Find goto/label references: "goto label_XXXX" or "label_XXXX:"
+    // 2. Find goto/label references: "label_XXXX"
     let mut search_from = 0;
     while let Some(pos) = text[search_from..].find("label_") {
         let abs_pos = search_from + pos;
-        let hex_start = abs_pos + 6; // after "label_"
+        let hex_start = abs_pos + 6;
         let hex_end = text[hex_start..]
             .find(|c: char| !c.is_ascii_hexdigit())
             .map(|p| hex_start + p)
@@ -283,11 +287,10 @@ fn tokenize_line(
         search_from = hex_end;
     }
 
-    // 3. Find hex addresses: "0xNNNN" patterns (but not inside identifiers)
+    // 3. Find hex addresses: "0xNNNN" (not inside identifiers, > 0xFF)
     search_from = 0;
     while let Some(pos) = text[search_from..].find("0x") {
         let abs_pos = search_from + pos;
-        // Make sure it's not part of a larger identifier
         let before_ok = abs_pos == 0
             || !text.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
                 && text.as_bytes()[abs_pos - 1] != b'_';
@@ -299,7 +302,6 @@ fn tokenize_line(
                 .unwrap_or(text.len());
             if hex_end > hex_start {
                 if let Ok(addr) = u64::from_str_radix(&text[hex_start..hex_end], 16) {
-                    // Only make it clickable if it looks like a reasonable address (> 0xFF)
                     if addr > 0xFF {
                         tokens.push(ClickableToken {
                             start: abs_pos,

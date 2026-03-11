@@ -110,6 +110,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let row_height = 18.0;
 
     let scroll_area = egui::ScrollArea::vertical()
+        .id_salt("disasm_scroll")
         .auto_shrink([false, false])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 

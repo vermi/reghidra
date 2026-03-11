@@ -95,6 +95,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let mut navigate_to = None;
 
     egui::ScrollArea::vertical()
+        .id_salt("hex_scroll")
         .auto_shrink([false, false])
         .show_rows(ui, row_height, total_rows, |ui, row_range| {
             for row in row_range {

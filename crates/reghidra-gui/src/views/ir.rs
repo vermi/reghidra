@@ -45,6 +45,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let mut navigate_to = None;
 
     egui::ScrollArea::vertical()
+        .id_salt("ir_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for block in &ir.blocks {

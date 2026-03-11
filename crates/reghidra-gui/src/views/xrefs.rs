@@ -56,6 +56,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     }
 
     egui::ScrollArea::vertical()
+        .id_salt("xrefs_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !to_entries.is_empty() {

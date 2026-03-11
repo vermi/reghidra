@@ -64,6 +64,7 @@ fn render_block_list(
     let mono = egui::TextStyle::Monospace;
 
     egui::ScrollArea::vertical()
+        .id_salt("cfg_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (&block_addr, block) in &cfg.blocks {
