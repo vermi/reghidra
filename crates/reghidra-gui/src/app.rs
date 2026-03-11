@@ -479,6 +479,30 @@ impl eframe::App for ReghidraApp {
                         }
                         ui.close_menu();
                     }
+                    if self.project.is_some() {
+                        if ui.button("Load Signatures... (.sig)").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Load FLIRT Signatures")
+                                .add_filter("IDA Signatures", &["sig"])
+                                .pick_file()
+                            {
+                                if let Some(ref mut project) = self.project {
+                                    match project.load_signatures(&path) {
+                                        Ok(count) => {
+                                            self.loading_error = None;
+                                            log::info!("Loaded signatures: {count} functions matched");
+                                        }
+                                        Err(e) => {
+                                            self.loading_error = Some(format!(
+                                                "Failed to load signatures: {e}"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            ui.close_menu();
+                        }
+                    }
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -687,6 +711,12 @@ impl eframe::App for ReghidraApp {
                         project.analysis.xrefs.total_count(),
                         project.binary.strings.len(),
                     ));
+
+                    // Show signature status
+                    if let Some(ref status) = project.sig_status {
+                        ui.separator();
+                        ui.colored_label(self.theme.func_header_sig, status);
+                    }
 
                     // Show bookmark indicator
                     if let Some(addr) = self.selected_address {

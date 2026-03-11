@@ -46,10 +46,12 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                         .map(|s| s.as_str())
                         .unwrap_or(&func.name);
 
-                    // Use dimmer color for auto-named functions (unless user-renamed)
-                    let header_color = if !is_user_renamed
-                        && func.source == reghidra_core::FunctionSource::AutoNamed
-                    {
+                    // Use distinct colors for different function sources (unless user-renamed)
+                    let header_color = if is_user_renamed {
+                        theme.func_header
+                    } else if func.source == reghidra_core::FunctionSource::Signature {
+                        theme.func_header_sig
+                    } else if func.source == reghidra_core::FunctionSource::AutoNamed {
                         theme.func_header_auto
                     } else {
                         theme.func_header

@@ -26,6 +26,8 @@ pub enum FunctionSource {
     Prologue,
     /// Auto-named by heuristic analysis (thunk, wrapper, string-ref, API pattern).
     AutoNamed,
+    /// Identified by FLIRT signature matching.
+    Signature,
 }
 
 /// Detect functions using multiple strategies.

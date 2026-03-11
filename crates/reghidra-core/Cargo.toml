@@ -11,3 +11,4 @@ reghidra-decompile = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 log = { workspace = true }
+flate2 = { workspace = true }
