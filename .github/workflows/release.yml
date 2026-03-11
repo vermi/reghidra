@@ -177,3 +177,14 @@ jobs:
         with:
           generate_release_notes: true
           files: artifacts/*
+          body: |
+            ## Installation
+
+            Download the archive for your platform below.
+
+            ### macOS note
+            After extracting, remove the quarantine attribute before launching:
+            ```sh
+            xattr -cr Reghidra.app
+            ```
+            Or right-click → **Open** → **Open** on first launch.

@@ -18,6 +18,20 @@ A Rust-based reverse engineering framework reimplementing Ghidra's core function
 - **Interactive GUI** — synchronized disassembly, decompile, hex, CFG, IR, and xref views with dark/light themes
 - **Keyboard-driven workflow** — Vim-like navigation, command palette (Cmd+K), fuzzy search, inline annotations, undo/redo
 
+## Installation
+
+Download the latest release for your platform from [Releases](https://github.com/reghidra/reghidra/releases).
+
+### macOS
+
+After extracting the `.tar.gz`, macOS Gatekeeper may block the app since it isn't notarized. To fix this, remove the quarantine attribute before launching:
+
+```sh
+xattr -cr Reghidra.app
+```
+
+Alternatively, right-click the app → **Open** → **Open** on the first launch.
+
 ## Building
 
 Requires Rust 2024 edition (1.85+) and the capstone library.
