@@ -132,7 +132,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         });
 
     if new_hovered.is_some() {
-        app.hovered_address = new_hovered;
+        app.hovered_address_next = new_hovered;
     }
 
     if let Some(addr) = navigate_to {

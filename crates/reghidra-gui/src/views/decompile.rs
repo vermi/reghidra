@@ -2,21 +2,36 @@ use crate::app::ReghidraApp;
 use egui::{RichText, Ui};
 use reghidra_core::AnnotatedLine;
 
-static DECOMP_NAV_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DECOMP_LAST_GEN: std::sync::Mutex<[(u64, u64); 2]> =
+    std::sync::Mutex::new([(0, 0); 2]);
+
+pub fn reset_scroll_gen() {
+    *DECOMP_LAST_GEN.lock().unwrap() = [(0, 0); 2];
+}
 
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
         return;
     };
 
+    // Use code_address for function lookup so the view persists when
+    // the user navigates to a data address in another pane.
+    // Falls back to the decompile cache entry if function_containing fails
+    // (e.g. goto label past the first ret in a multi-return function).
+    let code_addr = app.code_address.unwrap_or(0);
     let selected_addr = app.selected_address.unwrap_or(0);
     let hovered_addr = app.hovered_address;
     let mono = egui::TextStyle::Monospace;
 
     let func = project
         .analysis
-        .function_containing(selected_addr)
-        .or_else(|| project.analysis.function_at(selected_addr));
+        .function_containing(code_addr)
+        .or_else(|| project.analysis.function_at(code_addr))
+        .or_else(|| {
+            app.decompile_cache
+                .as_ref()
+                .and_then(|(entry, _, _)| project.analysis.function_at(*entry))
+        });
 
     let Some(func) = func else {
         ui.label("Select a function to view decompiled output.");
@@ -86,12 +101,24 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     // The block address that contains the hovered instruction (from another view)
     let hovered_block = hovered_addr.and_then(|a| addr_to_block.get(&a).copied());
 
-    // Check if we need to scroll to the selected block
-    let last_gen = DECOMP_NAV_GEN.load(std::sync::atomic::Ordering::Relaxed);
-    let should_scroll = app.nav_generation != last_gen;
-    if should_scroll {
-        DECOMP_NAV_GEN.store(app.nav_generation, std::sync::atomic::Ordering::Relaxed);
-    }
+    // Per-pane scroll tracking
+    let pane_key = ui.id().value();
+    let should_scroll = {
+        let mut gens = DECOMP_LAST_GEN.lock().unwrap();
+        let idx = gens.iter().position(|s| s.0 == pane_key)
+            .or_else(|| gens.iter().position(|s| s.0 == 0));
+        if let Some(idx) = idx {
+            gens[idx].0 = pane_key;
+            if gens[idx].1 != app.nav_generation {
+                gens[idx].1 = app.nav_generation;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    };
 
     // Find the line index to scroll to
     let scroll_to_line = if should_scroll {
@@ -115,8 +142,10 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .auto_shrink([false, false]);
 
     let visible_height = ui.available_height();
+    let spacing_y = ui.spacing().item_spacing.y;
     let scroll_area = if let Some(line_idx) = scroll_to_line {
-        let target_offset = (line_idx as f32 * row_height - visible_height / 2.0).max(0.0);
+        let target_offset =
+            (line_idx as f32 * (row_height + spacing_y) - visible_height / 2.0).max(0.0);
         scroll_area.vertical_scroll_offset(target_offset)
     } else {
         scroll_area
@@ -168,7 +197,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     // Only update hovered_address if the mouse is actually in this view
     if new_hovered.is_some() {
-        app.hovered_address = new_hovered;
+        app.hovered_address_next = new_hovered;
     }
 
     if let Some(addr) = navigate_to {

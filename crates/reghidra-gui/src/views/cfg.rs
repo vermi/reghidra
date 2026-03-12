@@ -4,18 +4,31 @@ use reghidra_core::{ControlFlowGraph, EdgeKind};
 
 use crate::theme::Theme;
 
+static CFG_LAST_GEN: std::sync::Mutex<[(u64, u64); 2]> =
+    std::sync::Mutex::new([(0, 0); 2]);
+
+pub fn reset_scroll_gen() {
+    *CFG_LAST_GEN.lock().unwrap() = [(0, 0); 2];
+}
+
 /// Render the control flow graph for the currently selected function.
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
         return;
     };
 
+    let code_addr = app.code_address.unwrap_or(0);
     let selected_addr = app.selected_address.unwrap_or(0);
 
     let func = project
         .analysis
-        .function_containing(selected_addr)
-        .or_else(|| project.analysis.function_at(selected_addr));
+        .function_containing(code_addr)
+        .or_else(|| project.analysis.function_at(code_addr))
+        .or_else(|| {
+            app.decompile_cache
+                .as_ref()
+                .and_then(|(entry, _, _)| project.analysis.function_at(*entry))
+        });
 
     let Some(func) = func else {
         ui.label("Select a function to view its control flow graph.");
@@ -46,6 +59,25 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         return;
     }
 
+    // Per-pane scroll tracking
+    let pane_key = ui.id().value();
+    let should_scroll = {
+        let mut gens = CFG_LAST_GEN.lock().unwrap();
+        let idx = gens.iter().position(|s| s.0 == pane_key)
+            .or_else(|| gens.iter().position(|s| s.0 == 0));
+        if let Some(idx) = idx {
+            gens[idx].0 = pane_key;
+            if gens[idx].1 != app.nav_generation {
+                gens[idx].1 = app.nav_generation;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    };
+
     let mut navigate_to = None;
     let hovered_addr = app.hovered_address;
     let mut new_hovered: Option<u64> = None;
@@ -57,10 +89,11 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         hovered_addr,
         &mut new_hovered,
         &app.theme,
+        should_scroll,
     );
 
     if new_hovered.is_some() {
-        app.hovered_address = new_hovered;
+        app.hovered_address_next = new_hovered;
     }
 
     if let Some(addr) = navigate_to {
@@ -76,6 +109,7 @@ fn render_block_list(
     hovered_addr: Option<u64>,
     new_hovered: &mut Option<u64>,
     theme: &Theme,
+    should_scroll: bool,
 ) {
     let mono = egui::TextStyle::Monospace;
 
@@ -138,7 +172,7 @@ fn render_block_list(
                     .inner_margin(4.0)
                     .corner_radius(2.0);
 
-                frame.show(ui, |ui| {
+                let frame_resp = frame.show(ui, |ui| {
                     for insn in &block.instructions {
                         let is_selected = insn.address == selected_addr;
                         let is_hovered_cross =
@@ -195,6 +229,11 @@ fn render_block_list(
                         }
                     }
                 });
+
+                // Scroll the selected block into view
+                if should_scroll && contains_selected {
+                    frame_resp.response.scroll_to_me(Some(egui::Align::Center));
+                }
 
                 // Show successors
                 if !succs.is_empty() {

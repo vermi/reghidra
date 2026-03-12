@@ -53,6 +53,9 @@ pub struct ReghidraApp {
     pub main_view: MainView,
     pub side_panel: SidePanel,
     pub selected_address: Option<u64>,
+    /// Last selected instruction address — code views (decompile, IR, CFG) use
+    /// this to keep showing their function when the user navigates to a data address.
+    pub code_address: Option<u64>,
     pub search_query: String,
     pub show_bytes_in_disasm: bool,
     pub hex_bytes_per_row: usize,
@@ -97,8 +100,10 @@ pub struct ReghidraApp {
     /// their last-seen value to detect when they need to scroll to selection.
     pub nav_generation: u64,
 
-    // Hover-based cross-view highlighting: set by whichever view the mouse is in
+    // Hover-based cross-view highlighting: double-buffered so all views read
+    // last frame's value while writing this frame's value (avoids render-order bugs).
     pub hovered_address: Option<u64>,
+    pub hovered_address_next: Option<u64>,
 
     // Track whether theme has been applied
     theme_applied: bool,
@@ -118,6 +123,7 @@ impl ReghidraApp {
             side_panel: SidePanel::Functions,
             main_view: MainView::Disassembly,
             selected_address: None,
+            code_address: None,
             search_query: String::new(),
             show_bytes_in_disasm: true,
             hex_bytes_per_row: 16,
@@ -137,6 +143,7 @@ impl ReghidraApp {
             help: HelpOverlay::new(),
             highlighted_mnemonic: None,
             hovered_address: None,
+            hovered_address_next: None,
             nav_generation: 0,
             theme_applied: false,
             decompile_cache: None,
@@ -147,20 +154,38 @@ impl ReghidraApp {
     pub fn open_file(&mut self, path: PathBuf) {
         match Project::open(&path) {
             Ok(project) => {
-                self.selected_address = Some(project.binary.info.entry_point);
-                self.nav_history = vec![project.binary.info.entry_point];
+                let entry = project.binary.info.entry_point;
+                self.selected_address = Some(entry);
+                self.code_address = Some(entry);
+                self.nav_history = vec![entry];
                 self.nav_position = 0;
                 self.project = Some(project);
                 self.loading_error = None;
                 self.undo = UndoHistory::new();
                 self.decompile_cache = None;
+                self.hovered_address = None;
+                self.hovered_address_next = None;
+                self.highlighted_mnemonic = None;
                 self.nav_generation += 1;
+                // Reset per-pane scroll tracking in all views so they scroll
+                // to the new binary's entry point on first render.
+                Self::reset_scroll_tracking();
             }
             Err(e) => {
                 self.loading_error = Some(format!("Failed to load {}: {e}", path.display()));
                 self.project = None;
             }
         }
+    }
+
+    /// Clear all per-pane scroll-tracking statics so views re-scroll on next render.
+    fn reset_scroll_tracking() {
+        use crate::views::{disasm, decompile, hex, ir, cfg};
+        disasm::reset_scroll_gen();
+        decompile::reset_scroll_gen();
+        hex::reset_scroll_gen();
+        ir::reset_scroll_gen();
+        cfg::reset_scroll_gen();
     }
 
     /// Returns true if `addr` is a known instruction address.
@@ -172,30 +197,33 @@ impl ReghidraApp {
         })
     }
 
-    /// Returns true if `addr` falls inside a non-executable (data) section.
-    fn is_data_addr(&self, addr: u64) -> bool {
-        self.project.as_ref().is_some_and(|p| {
-            p.binary
-                .section_at_va(addr)
-                .is_some_and(|s| !s.is_executable)
-        })
-    }
 
-    /// Auto-switch view only between Disassembly and Hex based on code vs data.
-    /// Does NOT yank the user out of other views (CFG, IR, Decompile, Xrefs).
+    /// Auto-switch views based on code vs data addresses.
+    ///
+    /// - Data address: ensure a Hex view is visible. In split mode, switch the
+    ///   *opposite* pane to Hex so the user keeps their current view. In single
+    ///   mode, switch the active view to Hex.
+    /// - Code address from Hex: switch back to Disassembly (same pane logic).
     fn auto_switch_view_for_addr(&mut self, addr: u64) {
-        match self.main_view {
-            MainView::Hex => {
-                if self.is_instruction_addr(addr) {
-                    self.main_view = MainView::Disassembly;
-                }
+        if self.is_instruction_addr(addr) {
+            // Code address: only auto-switch back if the current view is Hex
+            let view = self.focused_view_mut();
+            if *view == MainView::Hex {
+                *view = MainView::Disassembly;
             }
-            MainView::Disassembly => {
-                if self.is_data_addr(addr) {
+        } else {
+            // Non-instruction address (data, string, etc.): show Hex.
+            // In split mode, switch the opposite pane so the user keeps
+            // their current view; in single mode, switch the active view.
+            if self.layout == ViewLayout::SplitVertical {
+                if self.focused_pane == 0 {
+                    self.secondary_view = MainView::Hex;
+                } else {
                     self.main_view = MainView::Hex;
                 }
+            } else {
+                *self.focused_view_mut() = MainView::Hex;
             }
-            _ => {}
         }
     }
 
@@ -242,6 +270,9 @@ impl ReghidraApp {
             self.nav_position = self.nav_history.len() - 1;
         }
         self.selected_address = Some(target);
+        if self.is_instruction_addr(target) {
+            self.code_address = Some(target);
+        }
         self.auto_switch_view_for_addr(target);
     }
 
@@ -250,6 +281,9 @@ impl ReghidraApp {
             self.nav_position -= 1;
             let addr = self.nav_history[self.nav_position];
             self.selected_address = Some(addr);
+            if self.is_instruction_addr(addr) {
+                self.code_address = Some(addr);
+            }
             self.nav_generation += 1;
             self.auto_switch_view_for_addr(addr);
         }
@@ -260,6 +294,9 @@ impl ReghidraApp {
             self.nav_position += 1;
             let addr = self.nav_history[self.nav_position];
             self.selected_address = Some(addr);
+            if self.is_instruction_addr(addr) {
+                self.code_address = Some(addr);
+            }
             self.nav_generation += 1;
             self.auto_switch_view_for_addr(addr);
         }
@@ -375,8 +412,9 @@ impl ReghidraApp {
 
 impl eframe::App for ReghidraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Clear hover each frame; views will re-set it if the mouse is over them
-        self.hovered_address = None;
+        // Double-buffer hover: publish last frame's writes so all views read the
+        // same value regardless of render order, then clear the write slot.
+        self.hovered_address = self.hovered_address_next.take();
 
         // Throttle repaints: only repaint at ~30 FPS max to avoid pegging CPU
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
@@ -467,14 +505,9 @@ impl eframe::App for ReghidraApp {
         }
 
         // Vim-like keys: only active when no modals, no text editing active, project loaded.
-        // We detect active text editing by checking if any Text or Ime events fired this
-        // frame — this reliably indicates a TextEdit widget is consuming keystrokes.
-        let text_input_active = ctx.input(|i| {
-            i.events
-                .iter()
-                .any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Ime(_)))
-        });
-        let suppress_vim = modals_open || text_input_active;
+        // wants_keyboard_input() returns true only when a TextEdit (or similar) widget
+        // actually has focus — unlike checking for Text events which fire on every keypress.
+        let suppress_vim = modals_open || ctx.wants_keyboard_input();
 
         if !suppress_vim && self.project.is_some() {
             ctx.input(|i| {
@@ -1035,7 +1068,7 @@ impl eframe::App for ReghidraApp {
         if let Some(action) = self.palette.show(ctx, &theme_clone) {
             match action {
                 PaletteAction::NavigateTo(addr) => self.navigate_to(addr),
-                PaletteAction::SwitchView(view) => self.main_view = view,
+                PaletteAction::SwitchView(view) => *self.focused_view_mut() = view,
                 PaletteAction::ToggleTheme => self.toggle_theme(),
                 PaletteAction::ShowHelp => self.help.toggle(),
                 PaletteAction::GoToAddress => {}

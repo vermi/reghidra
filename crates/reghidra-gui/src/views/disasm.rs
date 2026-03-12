@@ -29,6 +29,10 @@ enum DisplayLine {
 static DISASM_LAST_GEN: std::sync::Mutex<[(u64, u64); 2]> =
     std::sync::Mutex::new([(0, 0); 2]);
 
+pub fn reset_scroll_gen() {
+    *DISASM_LAST_GEN.lock().unwrap() = [(0, 0); 2];
+}
+
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
         return;
@@ -139,8 +143,10 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
     let visible_height = ui.available_height();
+    let spacing_y = ui.spacing().item_spacing.y;
     let scroll_area = if let Some(row_idx) = scroll_to_display_row {
-        let target_offset = (row_idx as f32 * row_height - visible_height / 2.0).max(0.0);
+        let target_offset =
+            (row_idx as f32 * (row_height + spacing_y) - visible_height / 2.0).max(0.0);
         scroll_area.vertical_scroll_offset(target_offset)
     } else {
         scroll_area
@@ -320,7 +326,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     // Update hover state (only if mouse is over an instruction in this view)
     if new_hovered.is_some() {
-        app.hovered_address = new_hovered;
+        app.hovered_address_next = new_hovered;
     }
 
     // Handle mnemonic click

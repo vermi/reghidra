@@ -96,10 +96,14 @@ pub fn detect_functions(
             Err(_) => continue, // Entry doesn't correspond to a real instruction
         };
 
-        // Estimate function end: either next function entry or a return instruction
+        // Estimate function end: scan to the next function entry or a final
+        // return instruction.  We don't stop at the *first* ret because
+        // functions with multiple exit paths (early returns, conditional
+        // cleanup, etc.) have valid code after the first ret.
         let next_entry = entry_vec.get(i + 1).copied();
         let mut end_addr = entry;
         let mut insn_count = 0;
+        let mut last_ret_end = None;
 
         for idx in start_idx..instructions.len() {
             let insn = &instructions[idx];
@@ -114,9 +118,18 @@ pub fn detect_functions(
             end_addr = insn.address + insn.bytes.len() as u64;
             insn_count += 1;
 
-            // Stop after a return (but include the return instruction)
             if is_return_instruction(&insn.mnemonic) {
-                break;
+                last_ret_end = Some((end_addr, insn_count));
+            }
+        }
+
+        // If we stopped because of the next function entry (not end of
+        // instructions), use that boundary.  Otherwise, if we found at
+        // least one ret, trim to the last one to avoid trailing padding.
+        if next_entry.is_none() || next_entry.is_some_and(|n| end_addr < n) {
+            if let Some((ret_end, ret_count)) = last_ret_end {
+                end_addr = ret_end;
+                insn_count = ret_count;
             }
         }
 

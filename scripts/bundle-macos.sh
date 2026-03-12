@@ -19,7 +19,7 @@ MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
 
 VERSION=$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-1.0.0}"
 
 echo "Building reghidra ($PROFILE)..."
 if [[ "$PROFILE" == "release" ]]; then

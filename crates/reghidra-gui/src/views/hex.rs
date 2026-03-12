@@ -1,7 +1,13 @@
 use crate::app::ReghidraApp;
 use egui::{RichText, Ui};
 
-static HEX_NAV_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Per-pane scroll tracking, keyed by ui Id. Matches the pattern used by disasm.
+static HEX_LAST_GEN: std::sync::Mutex<[(u64, u64); 2]> =
+    std::sync::Mutex::new([(0, 0); 2]);
+
+pub fn reset_scroll_gen() {
+    *HEX_LAST_GEN.lock().unwrap() = [(0, 0); 2];
+}
 
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
@@ -38,6 +44,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let sec_start = section.file_offset as usize;
     let sec_end = sec_start + section.file_size as usize;
     let current_sec_va = section.virtual_address;
+    let virtual_len = section.virtual_size as usize;
 
     if sec_end > project.binary.data.len() {
         ui.label("Section data out of bounds.");
@@ -46,20 +53,35 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     let sec_data: Vec<u8> = project.binary.data[sec_start..sec_end].to_vec();
     let base_va = current_sec_va;
-    let total_rows = (sec_data.len() + bytes_per_row - 1) / bytes_per_row;
+    // Use the larger of file_size and virtual_size so virtual-only
+    // regions (e.g. .bss) are shown as zero-filled rows.
+    let display_len = virtual_len.max(sec_data.len());
+    let total_rows = (display_len + bytes_per_row - 1) / bytes_per_row;
     let row_height = 18.0;
     let mono = egui::TextStyle::Monospace;
 
-    // Check if we need to scroll to selection
-    let last_gen = HEX_NAV_GEN.load(std::sync::atomic::Ordering::Relaxed);
-    let should_scroll = app.nav_generation != last_gen;
-    if should_scroll {
-        HEX_NAV_GEN.store(app.nav_generation, std::sync::atomic::Ordering::Relaxed);
-    }
+    // Per-pane scroll tracking (same pattern as disasm view)
+    let pane_key = ui.id().value();
+    let should_scroll = {
+        let mut gens = HEX_LAST_GEN.lock().unwrap();
+        let idx = gens.iter().position(|s| s.0 == pane_key)
+            .or_else(|| gens.iter().position(|s| s.0 == 0));
+        if let Some(idx) = idx {
+            gens[idx].0 = pane_key;
+            if gens[idx].1 != app.nav_generation {
+                gens[idx].1 = app.nav_generation;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    };
 
     let scroll_to_row = if should_scroll && selected_addr >= base_va {
         let offset = (selected_addr - base_va) as usize;
-        if offset < sec_data.len() {
+        if offset < display_len {
             Some(offset / bytes_per_row)
         } else {
             None
@@ -122,19 +144,33 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     let scroll_area = if let Some(row_idx) = scroll_to_row {
         let visible_height = ui.available_height();
-        let target_offset = (row_idx as f32 * row_height - visible_height / 2.0).max(0.0);
+        let spacing_y = ui.spacing().item_spacing.y;
+        let target_offset =
+            (row_idx as f32 * (row_height + spacing_y) - visible_height / 2.0).max(0.0);
         scroll_area.vertical_scroll_offset(target_offset)
     } else {
         scroll_area
     };
+
+    // Pre-build a zero buffer for virtual-only rows
+    let zero_buf = vec![0u8; bytes_per_row];
 
     scroll_area.show_rows(ui, row_height, total_rows, |ui, row_range| {
         for row in row_range {
             let offset = row * bytes_per_row;
             let row_addr = base_va + offset as u64;
             let row_end_addr = row_addr + bytes_per_row as u64;
-            let end = (offset + bytes_per_row).min(sec_data.len());
-            let row_bytes = &sec_data[offset..end];
+
+            // Get bytes: file-backed data where available, zeros for virtual-only
+            let row_bytes: &[u8] = if offset >= sec_data.len() {
+                // Entirely in virtual-only range
+                let virt_end = (offset + bytes_per_row).min(display_len);
+                &zero_buf[..virt_end - offset]
+            } else {
+                let end = (offset + bytes_per_row).min(sec_data.len());
+                &sec_data[offset..end]
+            };
+            let is_virtual = offset >= sec_data.len();
 
             // Highlight this row if the selected or hovered address falls in it
             let contains_selected =
@@ -182,10 +218,15 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                             hex.push_str("   ");
                         }
 
+                        let hex_color = if is_virtual {
+                            theme.text_dim
+                        } else {
+                            theme.hex_bytes
+                        };
                         ui.label(
                             RichText::new(&hex)
                                 .text_style(mono.clone())
-                                .color(theme.hex_bytes),
+                                .color(hex_color),
                         );
 
                         let ascii: String = row_bytes
@@ -215,7 +256,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     });
 
     if new_hovered.is_some() {
-        app.hovered_address = new_hovered;
+        app.hovered_address_next = new_hovered;
     }
 
     if let Some(addr) = navigate_to {
