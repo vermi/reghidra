@@ -14,5 +14,5 @@ pub use arch::Architecture;
 pub use binary::{sanitize_to_name, BinaryInfo, DetectedString, LoadedBinary, Section, Symbol, SymbolKind};
 pub use disasm::{DisassembledInstruction, Disassembler};
 pub use error::CoreError;
-pub use project::Project;
+pub use project::{Project, Session};
 pub use reghidra_decompile::AnnotatedLine;

@@ -12,6 +12,7 @@ reghidra-core = { workspace = true }
 reghidra-ir = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
+serde_json = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

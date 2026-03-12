@@ -10,6 +10,7 @@ reghidra-ir = { workspace = true }
 reghidra-decompile = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 log = { workspace = true }
 flate2 = { workspace = true }
 include_dir = { workspace = true }

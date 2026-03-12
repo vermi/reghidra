@@ -18,6 +18,8 @@ pub enum PaletteAction {
     SwitchView(crate::app::MainView),
     ToggleTheme,
     ShowHelp,
+    SaveSession,
+    OpenSession,
     #[allow(dead_code)]
     GoToAddress,
 }
@@ -105,6 +107,16 @@ impl CommandPalette {
                 label: "Help: Quick Start Guide".into(),
                 detail: "Open help overlay (F1)".into(),
                 action: PaletteAction::ShowHelp,
+            },
+            PaletteEntry {
+                label: "Save Session".into(),
+                detail: "Save annotations to file (Cmd+S)".into(),
+                action: PaletteAction::SaveSession,
+            },
+            PaletteEntry {
+                label: "Open Session".into(),
+                detail: "Load a saved session file".into(),
+                action: PaletteAction::OpenSession,
             },
         ];
 

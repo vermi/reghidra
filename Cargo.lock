@@ -2825,6 +2825,7 @@ dependencies = [
  "reghidra-decompile",
  "reghidra-ir",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -2851,6 +2852,7 @@ dependencies = [
  "reghidra-core",
  "reghidra-ir",
  "rfd",
+ "serde_json",
  "winresource",
 ]
 

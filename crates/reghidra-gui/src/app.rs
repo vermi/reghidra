@@ -112,6 +112,11 @@ pub struct ReghidraApp {
     pub decompile_cache: Option<(u64, u64, Vec<reghidra_core::AnnotatedLine>)>,
     /// Bumped whenever a function is renamed so decompile cache knows to refresh.
     pub rename_generation: u64,
+
+    /// Path to the current session file (set after Save/Load Session).
+    pub session_path: Option<PathBuf>,
+    /// Status message shown briefly in the status bar.
+    pub status_message: Option<(String, std::time::Instant)>,
 }
 
 impl ReghidraApp {
@@ -148,6 +153,8 @@ impl ReghidraApp {
             theme_applied: false,
             decompile_cache: None,
             rename_generation: 0,
+            session_path: None,
+            status_message: None,
         }
     }
 
@@ -166,6 +173,7 @@ impl ReghidraApp {
                 self.hovered_address = None;
                 self.hovered_address_next = None;
                 self.highlighted_mnemonic = None;
+                self.session_path = None;
                 self.nav_generation += 1;
                 // Reset per-pane scroll tracking in all views so they scroll
                 // to the new binary's entry point on first render.
@@ -176,6 +184,88 @@ impl ReghidraApp {
                 self.project = None;
             }
         }
+    }
+
+    /// Open a session file, re-loading the binary and restoring annotations.
+    pub fn open_session(&mut self, path: PathBuf) {
+        match Project::open_with_session(&path) {
+            Ok(project) => {
+                let entry = project.binary.info.entry_point;
+                self.selected_address = Some(entry);
+                self.code_address = Some(entry);
+                self.nav_history = vec![entry];
+                self.nav_position = 0;
+                self.project = Some(project);
+                self.loading_error = None;
+                self.undo = UndoHistory::new();
+                self.decompile_cache = None;
+                self.hovered_address = None;
+                self.hovered_address_next = None;
+                self.highlighted_mnemonic = None;
+                self.rename_generation += 1;
+                self.session_path = Some(path);
+                self.nav_generation += 1;
+                Self::reset_scroll_tracking();
+                self.set_status("Session loaded");
+            }
+            Err(e) => {
+                self.loading_error = Some(format!("Failed to load session: {e}"));
+            }
+        }
+    }
+
+    /// Save session to the current session path, or prompt for a new path.
+    pub fn save_session(&mut self) {
+        let path = if let Some(ref p) = self.session_path {
+            Some(p.clone())
+        } else {
+            self.save_session_as()
+        };
+        if let Some(path) = path {
+            self.do_save_session(&path);
+        }
+    }
+
+    /// Prompt for a new session file path and save.
+    pub fn save_session_as(&mut self) -> Option<PathBuf> {
+        let default_name = self
+            .project
+            .as_ref()
+            .map(|p| {
+                p.binary
+                    .info
+                    .path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+                    + ".reghidra"
+            })
+            .unwrap_or_else(|| "session.reghidra".into());
+
+        rfd::FileDialog::new()
+            .set_title("Save Session")
+            .set_file_name(&default_name)
+            .add_filter("Reghidra Session", &["reghidra"])
+            .save_file()
+    }
+
+    fn do_save_session(&mut self, path: &std::path::Path) {
+        if let Some(ref project) = self.project {
+            match project.save_session(path) {
+                Ok(()) => {
+                    self.session_path = Some(path.to_path_buf());
+                    self.set_status("Session saved");
+                }
+                Err(e) => {
+                    self.loading_error = Some(format!("Failed to save session: {e}"));
+                }
+            }
+        }
+    }
+
+    fn set_status(&mut self, msg: &str) {
+        self.status_message = Some((msg.to_string(), std::time::Instant::now()));
     }
 
     /// Clear all per-pane scroll-tracking statics so views re-scroll on next render.
@@ -495,6 +585,20 @@ impl eframe::App for ReghidraApp {
                 self.open_file(path);
             }
         }
+        // Handle Cmd+S: Save session
+        if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.command && !i.modifiers.shift) {
+            if self.project.is_some() {
+                self.save_session();
+            }
+        }
+        // Handle Cmd+Shift+S: Save session as
+        if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.command && i.modifiers.shift) {
+            if self.project.is_some() {
+                if let Some(path) = self.save_session_as() {
+                    self.do_save_session(&path);
+                }
+            }
+        }
         // Handle Cmd+B
         if ctx.input(|i| i.key_pressed(egui::Key::B) && i.modifiers.command) {
             self.toggle_bookmark();
@@ -665,6 +769,29 @@ impl eframe::App for ReghidraApp {
                                         }
                                     }
                                 }
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Open Session...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Session")
+                            .add_filter("Reghidra Session", &["reghidra"])
+                            .pick_file()
+                        {
+                            self.open_session(path);
+                        }
+                        ui.close_menu();
+                    }
+                    if self.project.is_some() {
+                        if ui.button("Save Session (Cmd+S)").clicked() {
+                            self.save_session();
+                            ui.close_menu();
+                        }
+                        if ui.button("Save Session As... (Cmd+Shift+S)").clicked() {
+                            if let Some(path) = self.save_session_as() {
+                                self.do_save_session(&path);
                             }
                             ui.close_menu();
                         }
@@ -892,6 +1019,14 @@ impl eframe::App for ReghidraApp {
                         }
                     }
 
+                    // Show transient status message (visible for 3 seconds)
+                    if let Some((ref msg, ref instant)) = self.status_message {
+                        if instant.elapsed() < std::time::Duration::from_secs(3) {
+                            ui.separator();
+                            ui.colored_label(self.theme.func_header_sig, msg);
+                        }
+                    }
+
                     // Show vim key hints
                     ui.separator();
                     ui.colored_label(
@@ -943,6 +1078,15 @@ impl eframe::App for ReghidraApp {
                             .pick_file()
                         {
                             self.open_file(path);
+                        }
+                    }
+                    if ui.button("Open Session...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Open Session")
+                            .add_filter("Reghidra Session", &["reghidra"])
+                            .pick_file()
+                        {
+                            self.open_session(path);
                         }
                     }
                     ui.add_space(8.0);
@@ -1071,6 +1215,20 @@ impl eframe::App for ReghidraApp {
                 PaletteAction::SwitchView(view) => *self.focused_view_mut() = view,
                 PaletteAction::ToggleTheme => self.toggle_theme(),
                 PaletteAction::ShowHelp => self.help.toggle(),
+                PaletteAction::SaveSession => {
+                    if self.project.is_some() {
+                        self.save_session();
+                    }
+                }
+                PaletteAction::OpenSession => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Open Session")
+                        .add_filter("Reghidra Session", &["reghidra"])
+                        .pick_file()
+                    {
+                        self.open_session(path);
+                    }
+                }
                 PaletteAction::GoToAddress => {}
             }
         }

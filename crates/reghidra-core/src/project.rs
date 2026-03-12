@@ -4,8 +4,9 @@ use crate::analysis::AnalysisResults;
 use crate::binary::LoadedBinary;
 use crate::disasm::{DisassembledInstruction, Disassembler};
 use crate::error::CoreError;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A reghidra project: a loaded binary with its analysis results.
 pub struct Project {
@@ -229,4 +230,56 @@ impl Project {
         funcs.dedup_by_key(|(addr, _)| *addr);
         funcs
     }
+
+    /// Save user annotations to a session file.
+    pub fn save_session(&self, path: &Path) -> Result<(), CoreError> {
+        let session = Session {
+            version: 1,
+            binary_path: self.binary.info.path.clone(),
+            comments: self.comments.clone(),
+            renamed_functions: self.renamed_functions.clone(),
+            bookmarks: self.bookmarks.clone(),
+        };
+        let json = serde_json::to_string_pretty(&session)
+            .map_err(|e| CoreError::Other(format!("Failed to serialize session: {e}")))?;
+        std::fs::write(path, json)
+            .map_err(|e| CoreError::Other(format!("Failed to write session file: {e}")))?;
+        Ok(())
+    }
+
+    /// Load a session file and apply saved annotations to this project.
+    pub fn load_session(&mut self, path: &Path) -> Result<(), CoreError> {
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| CoreError::Other(format!("Failed to read session file: {e}")))?;
+        let session: Session = serde_json::from_str(&data)
+            .map_err(|e| CoreError::Other(format!("Failed to parse session file: {e}")))?;
+        self.comments = session.comments;
+        self.renamed_functions = session.renamed_functions;
+        self.bookmarks = session.bookmarks;
+        Ok(())
+    }
+
+    /// Open a binary and restore a session file's annotations.
+    pub fn open_with_session(session_path: &Path) -> Result<Self, CoreError> {
+        let data = std::fs::read_to_string(session_path)
+            .map_err(|e| CoreError::Other(format!("Failed to read session file: {e}")))?;
+        let session: Session = serde_json::from_str(&data)
+            .map_err(|e| CoreError::Other(format!("Failed to parse session file: {e}")))?;
+
+        let mut project = Self::open(&session.binary_path)?;
+        project.comments = session.comments;
+        project.renamed_functions = session.renamed_functions;
+        project.bookmarks = session.bookmarks;
+        Ok(project)
+    }
+}
+
+/// Serializable session state — stores user annotations alongside the binary path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub version: u32,
+    pub binary_path: PathBuf,
+    pub comments: HashMap<u64, String>,
+    pub renamed_functions: HashMap<u64, String>,
+    pub bookmarks: Vec<u64>,
 }

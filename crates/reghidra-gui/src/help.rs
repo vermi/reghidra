@@ -201,6 +201,8 @@ fn render_keyboard(ui: &mut egui::Ui, theme: &Theme) {
     key_row(ui, theme, "Cmd+Z", "Undo");
     key_row(ui, theme, "Cmd+Shift+Z", "Redo");
     key_row(ui, theme, "Cmd+B", "Toggle bookmark");
+    key_row(ui, theme, "Cmd+S", "Save session");
+    key_row(ui, theme, "Cmd+Shift+S", "Save session as...");
     key_row(ui, theme, "Cmd+D", "Toggle dark/light theme");
     key_row(ui, theme, "Alt+Left", "Navigate back");
     key_row(ui, theme, "Alt+Right", "Navigate forward");

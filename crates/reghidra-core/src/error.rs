@@ -19,4 +19,7 @@ pub enum CoreError {
 
     #[error("signature file error: {0}")]
     Signature(String),
+
+    #[error("{0}")]
+    Other(String),
 }
