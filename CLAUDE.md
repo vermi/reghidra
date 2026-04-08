@@ -48,6 +48,11 @@ reghidra/
 │   │   └── src/
 │   │       ├── main.rs                 # Entry point
 │   │       ├── app.rs                  # App state + eframe::App impl
+│   │       ├── annotations.rs          # Comment/rename popup dialogs
+│   │       ├── context_menu.rs         # Right-click context menu (symbol actions)
+│   │       ├── palette.rs              # Command palette (Cmd+K)
+│   │       ├── theme.rs                # Dark/light themes + color palette
+│   │       ├── undo.rs                 # Undo/redo history (Action enum)
 │   │       ├── help.rs                 # In-app help overlay (quickstart, keys, views, workflow)
 │   │       └── views/
 │   │           ├── disasm.rs           # Disassembly view
@@ -112,6 +117,9 @@ reghidra/
 - [x] Vim-like keyboard navigation (j/k, n/N, gg/G, ;, r, x, d, 1-6)
 - [x] Split/tabbed synchronized views (Space to toggle split)
 - [x] Full undo/redo history (Cmd+Z / Cmd+Shift+Z)
+- [x] Right-click context menu on any symbol (navigate, comment, rename, bookmark, xrefs, copy address/string)
+- [x] Rename labels and decompiler variables in addition to functions
+- [x] Session persistence (comments, renames, bookmarks saved/loaded)
 
 ### Phase 5a — In-App Documentation
 - [x] Help overlay with tabbed content (Quick Start, Keyboard, Views, Workflow)
@@ -125,6 +133,11 @@ reghidra/
 - [ ] Lua scripting API
 - [ ] Rust trait-based plugin system
 - [ ] Headless CLI mode for batch analysis
+
+## Build & Packaging
+- Workspace version lives in `Cargo.toml` under `[workspace.package]` — bump once, all crates inherit it.
+- macOS .app bundle: `./scripts/bundle-macos.sh` (add `--debug` for debug builds); outputs `target/Reghidra.app`.
+- Release builds hide the Windows console window via `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` in `reghidra-gui/src/main.rs` — debug builds keep the console for dev output.
 
 ## Conventions
 - Workspace crates communicate via public APIs defined in each crate's `lib.rs`
