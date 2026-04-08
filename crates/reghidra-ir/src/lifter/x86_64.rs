@@ -1,5 +1,5 @@
 use super::{DisasmInput, LiftContext};
-use crate::op::{IrOp, Operand, VarNode};
+use crate::op::{IrOp, Operand, VarNode, VarSpace};
 use crate::types::IrFunction;
 
 // x86_64 register offsets (arbitrary but consistent mapping)
@@ -90,7 +90,7 @@ fn lift_instruction(ctx: &mut LiftContext, insn: &DisasmInput) {
         "ja" | "jnbe" => lift_cjmp(ctx, operands, CondKind::UGrtr),
         "js" => lift_cjmp(ctx, operands, CondKind::Sign),
         "jns" => lift_cjmp(ctx, operands, CondKind::NotSign),
-        "call" => lift_call(ctx, operands),
+        "call" => lift_call(ctx, operands, insn.bytes.len()),
         "ret" | "retq" => {
             ctx.emit(IrOp::Return { value: Operand::Var(VarNode::reg(regs::RAX, 8)) });
         }
@@ -366,14 +366,64 @@ fn lift_cjmp(ctx: &mut LiftContext, operands: &str, kind: CondKind) {
     ctx.emit(IrOp::CBranch { cond, target });
 }
 
-fn lift_call(ctx: &mut LiftContext, operands: &str) {
+fn lift_call(ctx: &mut LiftContext, operands: &str, insn_size: usize) {
     let operands = operands.trim();
+
+    // Direct call: `call 0x401000`
     if let Some(target) = parse_immediate(operands) {
         ctx.emit(IrOp::Call { target });
-    } else {
-        let target = parse_operand(ctx, operands);
-        ctx.emit(IrOp::CallInd { target });
+        return;
     }
+
+    // x86-64 rip-relative IAT dispatch: `call qword ptr [rip + 0x1234]`
+    // resolves to an absolute address = next_ip + disp.
+    if let Some(disp) = parse_rip_relative(operands) {
+        let next_ip = ctx.current_address.wrapping_add(insn_size as u64);
+        let target = next_ip.wrapping_add(disp);
+        ctx.emit(IrOp::Call { target });
+        return;
+    }
+
+    // Indirect call through a bare memory constant, e.g. `call [0x40a028]` or
+    // `call dword ptr [0x00404028]`. On x86-32 PE this is the classic IAT
+    // dispatch pattern. We model it as a direct Call whose target is the IAT
+    // slot address; the decompiler's function_names map resolves that address
+    // to the import name.
+    let target = parse_operand(ctx, operands);
+    if target.space == VarSpace::Memory {
+        ctx.emit(IrOp::Call { target: target.offset });
+        return;
+    }
+
+    ctx.emit(IrOp::CallInd { target });
+}
+
+/// Parse a rip-relative memory operand of the form `[rip + disp]` or
+/// `[rip - disp]`, optionally with a `qword ptr ` / `dword ptr ` prefix.
+/// Returns the signed displacement as u64 (two's-complement).
+fn parse_rip_relative(operands: &str) -> Option<u64> {
+    let s = operands
+        .trim()
+        .trim_start_matches("qword ptr ")
+        .trim_start_matches("dword ptr ")
+        .trim_start_matches("word ptr ")
+        .trim_start_matches("byte ptr ")
+        .trim();
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?.trim();
+    // Accept "rip + imm", "rip - imm", or bare "rip" (disp = 0).
+    let rest = inner.strip_prefix("rip")?.trim_start();
+    if rest.is_empty() {
+        return Some(0);
+    }
+    let (sign, rest) = if let Some(r) = rest.strip_prefix('+') {
+        (1i64, r.trim())
+    } else if let Some(r) = rest.strip_prefix('-') {
+        (-1i64, r.trim())
+    } else {
+        return None;
+    };
+    let imm = parse_immediate(rest)?;
+    Some((sign * imm as i64) as u64)
 }
 
 // -- Operand parsing helpers --
@@ -548,4 +598,82 @@ fn parse_memory_expression(ctx: &mut LiftContext, s: &str) -> Option<VarNode> {
     let addr = ctx.new_temp(8);
     ctx.emit(IrOp::Copy { dst: addr.clone(), src: VarNode::constant(0, 8) });
     Some(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lift_one_at(addr: u64, mnemonic: &str, operands: &str, size: usize) -> Vec<IrOp> {
+        let mut ctx = LiftContext::new(addr);
+        ctx.set_address(addr);
+        lift_instruction(
+            &mut ctx,
+            &DisasmInput {
+                address: addr,
+                mnemonic: mnemonic.to_string(),
+                operands: operands.to_string(),
+                bytes: vec![0; size],
+            },
+        );
+        ctx.finish()
+            .into_iter()
+            .flat_map(|b| b.instructions.into_iter().map(|i| i.op))
+            .collect()
+    }
+
+    fn lift_one(mnemonic: &str, operands: &str) -> Vec<IrOp> {
+        lift_one_at(0x1000, mnemonic, operands, 6)
+    }
+
+    #[test]
+    fn call_direct_immediate() {
+        let ops = lift_one("call", "0x401000");
+        assert!(matches!(ops.last(), Some(IrOp::Call { target: 0x401000 })));
+    }
+
+    #[test]
+    fn call_iat_memory_constant_becomes_direct_call() {
+        // `call [0x40a028]` (x86-32 IAT dispatch) should lift to Call { target: 0x40a028 }
+        // so that function_names[0x40a028] (= import name) resolves it at decompile time.
+        let ops = lift_one("call", "dword ptr [0x40a028]");
+        assert!(
+            matches!(ops.last(), Some(IrOp::Call { target: 0x40a028 })),
+            "expected direct Call for IAT indirection, got {:?}",
+            ops.last()
+        );
+    }
+
+    #[test]
+    fn call_register_indirect_stays_indirect() {
+        // `call rax` is a real indirect call, not an IAT lookup.
+        let ops = lift_one("call", "rax");
+        assert!(
+            matches!(ops.last(), Some(IrOp::CallInd { .. })),
+            "expected CallInd for register target, got {:?}",
+            ops.last()
+        );
+    }
+
+    #[test]
+    fn call_rip_relative_resolves_to_absolute() {
+        // x86-64 `call qword ptr [rip + 0x2034]` at 0x140001000 with 6-byte
+        // encoding resolves to 0x140001000 + 6 + 0x2034 = 0x14000303a.
+        let ops = lift_one_at(0x140001000, "call", "qword ptr [rip + 0x2034]", 6);
+        assert!(
+            matches!(ops.last(), Some(IrOp::Call { target: 0x14000303a })),
+            "got {:?}",
+            ops.last()
+        );
+    }
+
+    #[test]
+    fn call_rip_relative_negative_disp() {
+        let ops = lift_one_at(0x140001000, "call", "qword ptr [rip - 0x10]", 6);
+        assert!(
+            matches!(ops.last(), Some(IrOp::Call { target: 0x140000ff6 })),
+            "got {:?}",
+            ops.last()
+        );
+    }
 }
