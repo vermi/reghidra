@@ -4,9 +4,11 @@ use crate::analysis::AnalysisResults;
 use crate::binary::LoadedBinary;
 use crate::disasm::{DisassembledInstruction, Disassembler};
 use crate::error::CoreError;
+use crate::types::{self as type_archives, TypeArchive};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A reghidra project: a loaded binary with its analysis results.
 pub struct Project {
@@ -26,6 +28,12 @@ pub struct Project {
     /// User-loaded signature databases (via File > Load Signatures).
     pub user_dbs: Vec<FlirtDatabase>,
     pub sig_status: Option<String>,
+    /// Bundled type archives auto-selected by format+arch at open time.
+    /// Currently unconsumed — Phase 5c PR 4 wires them into the decompile
+    /// pipeline for arity capping, typed decls, and return-type propagation.
+    /// Kept behind `Arc` because the decompile context clones references
+    /// cheaply per-function.
+    pub type_archives: Vec<Arc<TypeArchive>>,
 }
 
 impl Project {
@@ -63,6 +71,13 @@ impl Project {
             Some(format!("{bundled_status}, {match_count} matched"))
         };
 
+        // Load bundled type archives matching this binary's format+arch.
+        // The `types/` tree may be empty or only partially populated during
+        // early Phase 5c PRs; the loader tolerates that and returns an empty
+        // vec. Nothing in the pipeline consumes these yet — they're wired
+        // in by later PRs (arity capping, typed VarDecls, retype UI).
+        let type_archives = type_archives::load_bundled(&binary.info);
+
         Ok(Self {
             binary,
             instructions,
@@ -75,6 +90,7 @@ impl Project {
             bundled_dbs,
             user_dbs: Vec::new(),
             sig_status,
+            type_archives,
         })
     }
 
