@@ -296,16 +296,41 @@ fn synthesize_arg_slots_from_prototype(layout: &mut FrameLayout, proto: &Functio
 // ---------------------------------------------------------------------------
 
 fn has_frame_pointer_setup(body: &[Stmt]) -> bool {
-    // A single `rbp = rsp` assignment anywhere in the function is sufficient
-    // evidence. In practice it only appears in the prologue because nothing
-    // else touches rbp in standard frame-pointer code, but we don't restrict
-    // position here — the important thing is that rbp tracks rsp at entry,
-    // which means `rbp ± k` offsets are stable for the whole function.
+    // A single `fp = sp` (x86 `mov ebp, esp` or ARM64 `mov x29, sp`) or
+    // `fp = sp ± const` (ARM64 `add x29, sp, #16` after `stp x29, x30,
+    // [sp, #-16]!`) assignment anywhere in the function is sufficient
+    // evidence that the function has a frame pointer. In practice these
+    // only appear in the prologue because nothing else touches fp in
+    // standard frame-pointer code, but we don't restrict position here
+    // — the important thing is that fp tracks sp at entry, which means
+    // `fp ± k` offsets are stable for the whole function.
+    //
+    // ARM64 note: the prologue is typically two instructions —
+    // `stp x29, x30, [sp, #-16]!` (saves old fp and lr, writes back to
+    // sp) followed by `mov x29, sp` (or `add x29, sp, #0` which also
+    // becomes `fp = sp`). A frame-pointer-omission build skips the
+    // `mov`/`add` entirely and this detector correctly returns false.
     let mut found = false;
     walk_stmts(body, &mut |stmt| {
-        if let Stmt::Assign(Expr::Var(lhs), Expr::Var(rhs)) = stmt {
-            if is_rbp(lhs) && is_rsp(rhs) {
-                found = true;
+        if let Stmt::Assign(Expr::Var(lhs), rhs) = stmt {
+            if !is_rbp(lhs) {
+                return;
+            }
+            match rhs {
+                // `fp = sp` (x86 `mov ebp, esp`, ARM64 `mov x29, sp`).
+                Expr::Var(rhs_name) if is_rsp(rhs_name) => found = true,
+                // `fp = sp ± k` (ARM64 `add x29, sp, #16`). The magnitude
+                // doesn't matter here — only that the RHS has the shape of
+                // a stack-pointer-derived constant, which guarantees fp
+                // tracks sp at this program point.
+                Expr::Binary(BinOp::Add | BinOp::Sub, a, b) => {
+                    let a_is_sp = matches!(a.as_ref(), Expr::Var(n) if is_rsp(n));
+                    let b_is_const = matches!(b.as_ref(), Expr::IntLit(_, _));
+                    if a_is_sp && b_is_const {
+                        found = true;
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -377,12 +402,16 @@ fn is_temp_name(s: &str) -> bool {
     s.len() >= 2 && s.starts_with('t') && s[1..].chars().all(|c| c.is_ascii_digit())
 }
 
+/// Recognize any sized alias of the architectural frame pointer.
+/// x86: `rbp` / `ebp`. ARM64: `fp` (canonical alias for `x29`).
 fn is_rbp(s: &str) -> bool {
-    matches!(s, "rbp" | "ebp")
+    matches!(s, "rbp" | "ebp" | "fp")
 }
 
+/// Recognize any sized alias of the architectural stack pointer.
+/// x86: `rsp` / `esp`. ARM64: `sp` (canonical alias for `x31`).
 fn is_rsp(s: &str) -> bool {
-    matches!(s, "rsp" | "esp")
+    matches!(s, "rsp" | "esp" | "sp")
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +638,20 @@ fn is_droppable(
 ) -> bool {
     match stmt {
         // Drop `rbp = rsp` — the frame-pointer setup marker.
+        // (x86 `mov ebp, esp`, ARM64 `mov x29, sp`.)
         Stmt::Assign(Expr::Var(l), Expr::Var(r)) if is_rbp(l) && is_rsp(r) => true,
+        // Drop `fp = sp ± k` — ARM64 prologue's frame-pointer setup
+        // that follows a pre-indexed `stp x29, x30, [sp, #-N]!`
+        // (emitted as `add x29, sp, #0` or `add x29, sp, #16`). Same
+        // role as `mov ebp, esp` on x86; once stripped, downstream
+        // fp-relative accesses are already rewritten to named slots.
+        Stmt::Assign(Expr::Var(l), Expr::Binary(BinOp::Add | BinOp::Sub, a, b))
+            if is_rbp(l)
+                && matches!(a.as_ref(), Expr::Var(n) if is_rsp(n))
+                && matches!(b.as_ref(), Expr::IntLit(_, _)) =>
+        {
+            true
+        }
         // Drop `rsp = rsp ± k` — stack adjustment bookkeeping (sub rsp, N in
         // the prologue; add rsp, N in the epilogue). These stopped carrying
         // useful information the moment we started referring to slots by
@@ -1016,6 +1058,77 @@ mod tests {
         assert!(!layout.has_frame_pointer);
         assert!(layout.slots.is_empty());
         assert_eq!(out.len(), 1);
+    }
+
+    /// ARM64 prologues establish the frame pointer via
+    /// `mov x29, sp` (which shows up as `fp = sp` in the IR after the
+    /// renamer canonicalizes x29 → fp). The tier-2 pass should
+    /// recognize this and rewrite `fp ± k` accesses to named slots
+    /// just like the x86 rbp case.
+    #[test]
+    fn arm64_mov_fp_sp_is_recognized() {
+        // `*(fp - 0x10) = w0`  ->  `local_10 = w0`
+        let body = vec![
+            assign(var("fp"), var("sp")),
+            assign(
+                deref(Expr::Binary(BinOp::Sub, Box::new(var("fp")), Box::new(int(0x10)))),
+                var("w0"),
+            ),
+        ];
+        let (out, layout) = analyze_and_rewrite(body, None);
+        assert!(layout.has_frame_pointer, "mov x29, sp should be recognized");
+        let slot = layout.slots.get(&-0x10).expect("slot at -0x10");
+        assert_eq!(slot.name, "local_10");
+        // The `fp = sp` prologue marker should be dropped.
+        assert!(!out.iter().any(|s| matches!(
+            s,
+            Stmt::Assign(Expr::Var(l), Expr::Var(r)) if l == "fp" && r == "sp"
+        )));
+        assert!(has_var(&out, "local_10"));
+    }
+
+    /// ARM64 also emits `add x29, sp, #16` after a pre-indexed
+    /// `stp x29, x30, [sp, #-16]!`, which in the IR looks like
+    /// `fp = sp + 16`. The frame-pointer detector should accept
+    /// this shape alongside the bare `mov` form, and the prologue
+    /// stripper should drop it.
+    #[test]
+    fn arm64_add_fp_sp_const_is_recognized() {
+        let body = vec![
+            assign(
+                var("fp"),
+                Expr::Binary(BinOp::Add, Box::new(var("sp")), Box::new(int(0x10))),
+            ),
+            assign(
+                deref(Expr::Binary(BinOp::Sub, Box::new(var("fp")), Box::new(int(8)))),
+                var("w0"),
+            ),
+        ];
+        let (out, layout) = analyze_and_rewrite(body, None);
+        assert!(layout.has_frame_pointer, "add x29, sp, #16 should be recognized");
+        assert!(layout.slots.get(&-8).is_some());
+        // `fp = sp + 16` should be stripped.
+        assert!(!out.iter().any(|s| matches!(
+            s,
+            Stmt::Assign(Expr::Var(l), Expr::Binary(..)) if l == "fp"
+        )));
+    }
+
+    /// ARM64 positive-offset accesses via fp (stack args, though
+    /// rare on AArch64) should still land as arg_N slots, reusing
+    /// the same convention as x86.
+    #[test]
+    fn arm64_fp_positive_offset_becomes_arg() {
+        let body = vec![
+            assign(var("fp"), var("sp")),
+            assign(
+                var("w0"),
+                deref(Expr::Binary(BinOp::Add, Box::new(var("fp")), Box::new(int(0x20)))),
+            ),
+        ];
+        let (_out, layout) = analyze_and_rewrite(body, None);
+        let slot = layout.slots.get(&0x20).expect("slot at +0x20");
+        assert_eq!(slot.name, "arg_20");
     }
 
     /// Underscore-decoration variants of the SEH/EH prolog name should
