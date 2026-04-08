@@ -274,6 +274,79 @@ pub fn is_embedded(stem: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Bridge into the decompile-layer AST
+// ---------------------------------------------------------------------------
+
+/// Convert a [`TypeRef`] from the type archive layer into a
+/// [`crate::ast::CType`] suitable for rendering in decompile output.
+///
+/// The conversion is lossy on purpose: `CType` is a narrow model
+/// focused on what the C-like pretty-printer actually needs to
+/// display. Anything `TypeRef` carries that doesn't fit (function
+/// pointer signatures, multi-dimensional array element types,
+/// struct/union references into the archive's `types` map) collapses
+/// into a [`CType::Named`] leaf with a readable stand-in. The output
+/// is stable enough for display but should NOT be used for layout or
+/// ABI calculations — consumers that need those should query the
+/// archive directly via [`TypeArchive::types`].
+///
+/// Size-sensitive primitives (`usize`/`isize`, `c_long`/`c_ulong`)
+/// are already resolved at archive-build time by `tools/typegen`,
+/// so this function doesn't need a target parameter.
+pub fn type_ref_to_ctype(ty: &TypeRef) -> crate::ast::CType {
+    use crate::ast::CType;
+    match ty {
+        TypeRef::Primitive(p) => primitive_to_ctype(*p),
+        TypeRef::Pointer(inner) => CType::Pointer(Box::new(type_ref_to_ctype(inner))),
+        TypeRef::Array(elem, _len) => {
+            // CType has no array variant — degrade to `Pointer` to
+            // match how C decays arrays at the ABI boundary. This
+            // loses the element count but preserves the pointer
+            // semantics that the decompile output cares about.
+            CType::Pointer(Box::new(type_ref_to_ctype(elem)))
+        }
+        TypeRef::FunctionPointer(_) => {
+            // We don't render full function-pointer signatures in
+            // decompile output yet. Degrade to a generic pointer-to-
+            // void so the slot still prints as a callable-looking
+            // pointer and the user can tell it's a function pointer
+            // by its name rather than its type.
+            CType::Pointer(Box::new(CType::Void))
+        }
+        TypeRef::Named(name) => CType::Named(name.clone()),
+    }
+}
+
+fn primitive_to_ctype(p: Primitive) -> crate::ast::CType {
+    use crate::ast::CType;
+    match p {
+        Primitive::Void => CType::Void,
+        // CType has no Bool — render as uint8_t since Win32 BOOL and
+        // most POSIX bool typedefs are byte-sized at the ABI.
+        Primitive::Bool => CType::UInt8,
+        Primitive::Int8 => CType::Int8,
+        Primitive::UInt8 => CType::UInt8,
+        Primitive::Int16 => CType::Int16,
+        Primitive::UInt16 => CType::UInt16,
+        Primitive::Int32 => CType::Int32,
+        Primitive::UInt32 => CType::UInt32,
+        Primitive::Int64 => CType::Int64,
+        Primitive::UInt64 => CType::UInt64,
+        // Float/Double aren't first-class in CType; render as
+        // size-equivalent named types so the decompile output at
+        // least says "float" / "double" instead of unk32 / unk64.
+        Primitive::Float => CType::Named("float".to_string()),
+        Primitive::Double => CType::Named("double".to_string()),
+        // `char` is `int8_t` in most ABIs; preserve the name so the
+        // user sees `char*` rather than `int8_t*` for string
+        // parameters, which is the whole point of having a named
+        // Char primitive separate from Int8.
+        Primitive::Char => CType::Named("char".to_string()),
+        Primitive::WChar => CType::Named("wchar_t".to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

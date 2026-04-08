@@ -9,7 +9,7 @@ pub mod varnames;
 
 pub use emit::AnnotatedLine;
 pub use stackframe::{FrameLayout, StackSlot};
-pub use type_archive::TypeArchive;
+pub use type_archive::{FunctionType, TypeArchive};
 
 use reghidra_ir::IrFunction;
 use std::sync::Arc;
@@ -35,12 +35,36 @@ pub struct DecompileContext {
     /// as the canonical identifier in storage and xrefs.
     pub current_function_display_name: Option<String>,
     /// Bundled type archives matching the current binary's format and
-    /// architecture. Consumed in later Phase 5c PRs for arity capping on
-    /// stack-arg collapse, typed `VarDecl` emission, and return-type
-    /// propagation. Carried by `Arc` so the context can be cheaply
-    /// constructed per-function without cloning the underlying archive.
-    /// Empty during PR 2 — the field is wired in but not yet read.
+    /// architecture. Consumed by the Phase 5c typing consumers (arity
+    /// capping on stack-arg collapse, typed `VarDecl` emission, and
+    /// return-type propagation). Carried by `Arc` so the context can
+    /// be cheaply constructed per-function without cloning the
+    /// underlying archive.
     pub type_archives: Vec<Arc<TypeArchive>>,
+}
+
+impl DecompileContext {
+    /// Look up a function prototype across the loaded [`TypeArchive`]s
+    /// in order, returning the first match. Used by arity capping,
+    /// typed `VarDecl` emission, and (future) return-type propagation
+    /// as a single primitive so they all key off the same name-resolution
+    /// rule: first archive wins on collision.
+    ///
+    /// The lookup key is whatever string the caller already has for
+    /// the function — typically the display name from
+    /// [`Self::function_names`] at the call site or the IR function's
+    /// canonical `name` at the current-function boundary. Callers
+    /// should NOT pre-demangle the key; archives are keyed on the
+    /// same form the naming pipeline produces (mangled for C++,
+    /// unmangled for C).
+    pub fn lookup_prototype(&self, name: &str) -> Option<&FunctionType> {
+        for archive in &self.type_archives {
+            if let Some(f) = archive.functions.get(name) {
+                return Some(f);
+            }
+        }
+        None
+    }
 }
 
 /// Output of [`decompile`]: the rendered C-like pseudocode plus the frame
@@ -64,6 +88,25 @@ pub struct DecompileAnnotated {
     pub frame_layout: FrameLayout,
 }
 
+/// Look up the prototype for the function being decompiled. Tries the
+/// display name first (so user renames are honored — if a user
+/// renamed a function to a known archive name, that should resolve)
+/// then falls back to the IR's canonical name. Returns `None` when
+/// neither is found; that's the common case for user-defined
+/// functions and is fine — the typing layer just leaves slots as
+/// `Unknown(size)`.
+fn current_function_prototype<'a>(
+    ir: &IrFunction,
+    ctx: &'a DecompileContext,
+) -> Option<&'a FunctionType> {
+    if let Some(display) = ctx.current_function_display_name.as_deref() {
+        if let Some(proto) = ctx.lookup_prototype(display) {
+            return Some(proto);
+        }
+    }
+    ctx.lookup_prototype(&ir.name)
+}
+
 /// Decompile an IR function into C-like pseudocode.
 pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> DecompileOutput {
     // Step 1: Build expressions from IR ops
@@ -76,8 +119,11 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> DecompileOutput {
     // derefs into named local_/arg_ slots, drops the prologue bookkeeping,
     // and emits VarDecl statements at the top for each discovered slot.
     // Runs BEFORE rename_variables so the rbp/rsp detection sees the raw
-    // register names the expression builder emits.
-    let (body, frame_layout) = stackframe::analyze_and_rewrite(body);
+    // register names the expression builder emits. The current function's
+    // prototype (if known to the bundled type archives) is passed in so
+    // arg slots can be typed from the prototype's parameter list.
+    let prototype = current_function_prototype(ir, ctx);
+    let (body, frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
 
     // Step 4: Assign variable names (with user overrides applied as a final pass)
     let body = varnames::rename_variables(body, &ctx.variable_names);
@@ -97,7 +143,8 @@ pub fn decompile_annotated(
 ) -> DecompileAnnotated {
     let block_stmts = expr_builder::build_statements(ir, ctx);
     let body = structuring::structure(ir, &block_stmts, ctx);
-    let (body, frame_layout) = stackframe::analyze_and_rewrite(body);
+    let prototype = current_function_prototype(ir, ctx);
+    let (body, frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
     let body = varnames::rename_variables(body, &ctx.variable_names);
     let variable_names = varnames::collect_displayed_names(&body);
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
