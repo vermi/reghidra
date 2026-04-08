@@ -5,6 +5,7 @@ mod app;
 mod context_menu;
 mod help;
 mod palette;
+mod syntax;
 mod theme;
 mod undo;
 mod views;

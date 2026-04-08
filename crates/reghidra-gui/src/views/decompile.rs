@@ -269,38 +269,34 @@ fn render_interactive_line(
     function_addrs: &std::collections::HashSet<u64>,
 ) {
     let text = &line.text;
-    let trimmed = text.trim();
 
     let mut tokens = tokenize_line(text, func_name_to_addr, label_name_to_addr, var_names);
 
     if tokens.is_empty() {
-        // No interactive tokens — plain label
-        let color = theme.colorize_decompile_line(text);
-        ui.label(
-            RichText::new(text.as_str())
-                .text_style(mono.clone())
-                .color(color),
-        );
+        // No interactive tokens — just syntax-highlight the whole line.
+        if text.is_empty() {
+            ui.label(" ");
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            emit_syntax_spans(ui, text, 0, text.len(), mono, theme);
+        });
         return;
     }
 
     ui.horizontal(|ui| {
         tokens.sort_by_key(|t| t.start);
+        ui.spacing_mut().item_spacing.x = 0.0;
 
         let mut pos = 0;
         for token in &tokens {
-            // Plain text before this token
+            // Plain text before this token — tokenize it with the C
+            // syntax lexer so keywords/types/numbers/strings/operators
+            // each get their own category color instead of the whole
+            // span being rendered in one "default" color.
             if token.start > pos {
-                let before = &text[pos..token.start];
-                if !before.is_empty() {
-                    let color = theme.colorize_decompile_line(trimmed);
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label(
-                        RichText::new(before)
-                            .text_style(mono.clone())
-                            .color(color),
-                    );
-                }
+                emit_syntax_spans(ui, text, pos, token.start, mono, theme);
             }
 
             // Clickable token
@@ -367,20 +363,46 @@ fn render_interactive_line(
             pos = token.end;
         }
 
-        // Remaining text after last token
+        // Remaining text after the last clickable token — syntax-tokenize
+        // so trailing expressions (operators, numbers, punctuation) still
+        // get per-token colors.
         if pos < text.len() {
-            let after = &text[pos..];
-            if !after.is_empty() {
-                let color = theme.colorize_decompile_line(trimmed);
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.label(
-                    RichText::new(after)
-                        .text_style(mono.clone())
-                        .color(color),
-                );
-            }
+            emit_syntax_spans(ui, text, pos, text.len(), mono, theme);
         }
     });
+}
+
+/// Render the slice `text[start..end]` as a sequence of syntax-colored
+/// labels. Each lexeme from `syntax::tokenize_c_syntax` becomes one
+/// `ui.label` with its category's color. Whitespace tokens are emitted
+/// too so visual spacing is preserved.
+fn emit_syntax_spans(
+    ui: &mut Ui,
+    text: &str,
+    start: usize,
+    end: usize,
+    mono: &egui::TextStyle,
+    theme: &crate::theme::Theme,
+) {
+    use crate::syntax::SyntaxKind;
+    let slice = &text[start..end];
+    let toks = crate::syntax::tokenize_c_syntax(slice);
+    for t in toks {
+        let piece = &slice[t.start..t.end];
+        // Whitespace is rendered via a raw str literal so egui doesn't
+        // collapse leading/trailing spaces. For everything else we color
+        // through the theme palette.
+        if t.kind == SyntaxKind::Whitespace {
+            ui.label(RichText::new(piece).text_style(mono.clone()));
+        } else {
+            let color = theme.decomp_color(t.kind);
+            ui.label(
+                RichText::new(piece)
+                    .text_style(mono.clone())
+                    .color(color),
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

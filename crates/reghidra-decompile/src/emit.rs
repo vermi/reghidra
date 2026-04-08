@@ -31,13 +31,34 @@ pub fn emit_function_annotated(
     let mut lines = Vec::new();
     let mut current_addr: Option<u64> = None;
 
+    // C-correct empty parameter list. `void foo()` and `void foo(void)`
+    // mean different things in strict C (the former is an "unspecified
+    // prototype" holdover from K&R C), and the UChicago style guide we
+    // follow calls out the latter as the correct declaration form.
     lines.push(AnnotatedLine {
-        text: format!("void {name}() {{"),
+        text: format!("void {name}(void) {{"),
         addr: None,
     });
 
-    for stmt in body {
+    // Count the leading VarDecl statements so we can emit a blank line
+    // between the variables block and the function body. This is a
+    // readability rule — Ghidra/IDA both visually separate the declaration
+    // block, and without it the decomp view reads as a dense wall of code.
+    let leading_decls = body
+        .iter()
+        .take_while(|s| matches!(s, Stmt::VarDecl { .. }))
+        .count();
+
+    for (idx, stmt) in body.iter().enumerate() {
         emit_stmt_annotated(&mut lines, stmt, 1, &mut current_addr, label_names);
+        // After the last VarDecl (and only if there's body code after it),
+        // insert a blank separator line.
+        if idx + 1 == leading_decls && leading_decls > 0 && leading_decls < body.len() {
+            lines.push(AnnotatedLine {
+                text: String::new(),
+                addr: None,
+            });
+        }
     }
 
     lines.push(AnnotatedLine {
@@ -229,15 +250,48 @@ fn emit_expr(expr: &Expr) -> String {
             format!("({}){}", typ, emit_expr(e))
         }
         Expr::Deref(e, _typ) => {
-            format!("*({})", emit_expr(e))
+            // Per the UChicago C style guide: "No spaces around dereference
+            // (*), dot (.), or arrow (->) operators." For a bare variable
+            // or a similarly tight operand the parens are also noise, so
+            // elide them and emit `*var` instead of `*(var)`. For anything
+            // more complex (binary op, cast, etc.) keep the parens so
+            // precedence stays unambiguous.
+            if needs_no_deref_parens(e) {
+                format!("*{}", emit_expr(e))
+            } else {
+                format!("*({})", emit_expr(e))
+            }
         }
         Expr::AddrOf(e) => {
-            format!("&({})", emit_expr(e))
+            if needs_no_deref_parens(e) {
+                format!("&{}", emit_expr(e))
+            } else {
+                format!("&({})", emit_expr(e))
+            }
         }
         Expr::Ternary(c, a, b) => {
             format!("{} ? {} : {}", emit_expr(c), emit_expr(a), emit_expr(b))
         }
     }
+}
+
+/// True if `expr` is "tight" enough that wrapping it in parens after a
+/// unary `*` or `&` adds only noise. Variables, indices, members, and
+/// already-parenthesised things (calls, derefs, string literals, ints)
+/// qualify. Binary ops and casts do not — they need the parens for the
+/// reader to track precedence.
+fn needs_no_deref_parens(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Var(_)
+            | Expr::IntLit(_, _)
+            | Expr::StringLit(_)
+            | Expr::Call(..)
+            | Expr::Index(..)
+            | Expr::Member(..)
+            | Expr::Deref(..)
+            | Expr::AddrOf(..)
+    )
 }
 
 fn emit_expr_with_parens(expr: &Expr, parent_op: &BinOp, is_left: bool) -> String {

@@ -167,6 +167,21 @@ reghidra/
 - Test with real binaries in `tests/fixtures/`
 - Never mention AI tools in commit messages or code comments
 
+## Decompile output style
+We follow the UChicago C style guide (https://uchicago-cs.github.io/student-resource-guide/style-guide/c.html) as the reference for generated pseudocode:
+- 4-space indentation (no tabs). `reghidra-decompile/src/emit.rs` hard-codes this.
+- K&R brace style (`void foo(void) {` on same line, closing `}` on its own).
+- Empty parameter lists are `(void)`, not `()` — K&R `()` means "unspecified prototype" in strict C.
+- Space after control keywords (`if (cond)`, `while (cond)`), space around binary operators, no space around `*`/`&`/`.`/`->` in their unary/postfix forms (we strip parens around simple deref/addrof operands via `needs_no_deref_parens` in emit.rs).
+- Blank line between the leading `VarDecl` block and the rest of the function body so the variables section is visually distinct.
+- No compound one-line statements — every body is a brace block.
+- Block comments use `/* ... */`; line comments (`//`) only for annotations we explicitly emit.
+
+## Decompile syntax highlighting
+- Token-level coloring, not per-line. `reghidra-gui/src/syntax.rs` is the C lexer — every rendered decomp line is split into `SyntaxKind` spans (Keyword, Type, Number, String, Operator, Punctuation, Comment, Return, Goto, Identifier, Whitespace) and each span is painted with the theme's matching color. Do not regress this to per-line colorizing — it was literally a wall of code before.
+- The rendering path is `render_interactive_line` → `emit_syntax_spans` in `views/decompile.rs`. The clickable-token pass (`tokenize_line`) still overlays on top so function calls / labels / hex addresses / variable references stay interactive with their own colors.
+- Theme palette for dark mode is Nord-inspired (Nord Frost for types, Nord Aurora purple for keywords, Aurora orange for numbers, Aurora green for strings, Snow Storm for operators/default, Polar Night gray for comments). Light mode uses Solarized equivalents. When adding a new `SyntaxKind` remember to update both `Theme::dark` and `Theme::light` plus the `decomp_color` match, and extend the hand-curated keyword/type lists in `syntax::CONTROL_KEYWORDS` and `syntax::C_TYPE_KEYWORDS` (kept in sorted order for `binary_search`).
+
 ## Analysis pipeline notes
 - `functions::detect_functions` is a two-pass design: (1) entry discovery from all sources (binary entry, symbols, call targets, gated tail-call jmps, prologues, PE `.pdata`, Guard CF), (2) per-entry CFG reachability walk via `cfg::build_cfg_from_entry` that stops at rets, indirect branches, and other known entries. Function size/instruction count come from `ControlFlowGraph::extent()` — do not fall back to linear walks. CFGs are built once during detection and reused by xrefs/IR lifting.
 - Adding a new entry source? Feed it into `collect_extra_entries` in `analysis.rs` with a `FunctionSource` variant, not into `detect_functions` directly.
