@@ -144,6 +144,89 @@ impl CType {
     }
 }
 
+/// Parse a free-form user-supplied C type string into a [`CType`].
+///
+/// Intended for the "Set Type" context-menu popup, where the user
+/// types a type name like `HANDLE`, `uint32_t`, or `char*` into a
+/// plain text box. The parser is deliberately permissive:
+///
+/// - Whitespace is trimmed and `const` / `volatile` / `restrict`
+///   qualifiers are stripped — they're display noise as far as the
+///   decompile output is concerned.
+/// - `struct ` / `union ` / `enum ` tag prefixes are stripped so
+///   `struct FILE` and `FILE` map to the same type.
+/// - Trailing `*`s become `CType::Pointer` wrappings (so `char**`
+///   is two levels of pointer).
+/// - Recognized primitive names (`void`, `int`, `uint32_t`,
+///   `int64_t`, `size_t`, `float`, `double`, `bool`, and the
+///   common Windows aliases `BYTE`/`WORD`/`DWORD`/`QWORD`) resolve
+///   to the matching [`CType`] variant.
+/// - Anything else becomes `CType::Named(base)`, which the emit
+///   layer just prints verbatim. This is the fallback for named
+///   types the user expects the archive to resolve (`HANDLE`,
+///   `LPCSTR`, `PROCESS_INFORMATION`, etc.).
+///
+/// Returns `None` for empty input (the caller should treat that as
+/// "clear the override" rather than "set the empty type"), or for
+/// input that ended up completely empty after qualifier stripping.
+pub fn parse_user_ctype(raw: &str) -> Option<CType> {
+    let mut s = raw.trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    for q in ["const ", "volatile ", "restrict "] {
+        while let Some(idx) = s.find(q) {
+            s.replace_range(idx..idx + q.len(), "");
+        }
+    }
+    for tag in ["struct ", "union ", "enum "] {
+        while let Some(idx) = s.find(tag) {
+            s.replace_range(idx..idx + tag.len(), "");
+        }
+    }
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Count trailing `*`s for pointer depth. Allow whitespace between
+    // the base type and the first `*` (`char *` is the same as `char*`).
+    let trimmed = s.trim_end_matches(|c: char| c == '*' || c.is_whitespace());
+    let ptr_depth = s[trimmed.len()..].chars().filter(|c| *c == '*').count();
+    let base = trimmed.trim();
+    if base.is_empty() && ptr_depth == 0 {
+        return None;
+    }
+
+    let mut inner = match base {
+        "void" => CType::Void,
+        "bool" | "_Bool" => CType::Unknown(1), // no Bool variant; treat as 1-byte
+        "char" | "signed char" => CType::Int8,
+        "unsigned char" | "BYTE" | "byte" => CType::UInt8,
+        "int8_t" => CType::Int8,
+        "uint8_t" => CType::UInt8,
+        "short" | "short int" | "signed short" | "int16_t" => CType::Int16,
+        "unsigned short" | "WORD" | "uint16_t" => CType::UInt16,
+        "int" | "signed int" | "long" | "signed long" | "int32_t" => CType::Int32,
+        "unsigned" | "unsigned int" | "unsigned long" | "DWORD" | "uint32_t" => CType::UInt32,
+        "long long" | "signed long long" | "__int64" | "int64_t" => CType::Int64,
+        "unsigned long long" | "QWORD" | "__uint64" | "uint64_t" | "size_t" | "SIZE_T" => {
+            CType::UInt64
+        }
+        "float" => CType::Unknown(4),
+        "double" | "long double" => CType::Unknown(8),
+        "" => {
+            // All `*`s, no base — treat as `void*`.
+            CType::Void
+        }
+        other => CType::Named(other.to_string()),
+    };
+    for _ in 0..ptr_depth {
+        inner = CType::Pointer(Box::new(inner));
+    }
+    Some(inner)
+}
+
 impl std::fmt::Display for CType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -194,6 +277,83 @@ impl std::fmt::Display for UnaryOp {
             UnaryOp::Neg => write!(f, "-"),
             UnaryOp::BitNot => write!(f, "~"),
             UnaryOp::LogNot => write!(f, "!"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_user_ctype_primitives() {
+        assert!(matches!(parse_user_ctype("void"), Some(CType::Void)));
+        assert!(matches!(parse_user_ctype("int"), Some(CType::Int32)));
+        assert!(matches!(parse_user_ctype("uint32_t"), Some(CType::UInt32)));
+        assert!(matches!(parse_user_ctype("int64_t"), Some(CType::Int64)));
+        assert!(matches!(parse_user_ctype("size_t"), Some(CType::UInt64)));
+        assert!(matches!(parse_user_ctype("DWORD"), Some(CType::UInt32)));
+    }
+
+    #[test]
+    fn parse_user_ctype_named_fallback() {
+        match parse_user_ctype("HANDLE") {
+            Some(CType::Named(n)) => assert_eq!(n, "HANDLE"),
+            other => panic!("expected Named(HANDLE), got {other:?}"),
+        }
+        match parse_user_ctype("PROCESS_INFORMATION") {
+            Some(CType::Named(n)) => assert_eq!(n, "PROCESS_INFORMATION"),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_ctype_pointers() {
+        // char* → Pointer(Int8)
+        match parse_user_ctype("char*") {
+            Some(CType::Pointer(inner)) => assert!(matches!(*inner, CType::Int8)),
+            other => panic!("got {other:?}"),
+        }
+        // HANDLE* → Pointer(Named(HANDLE))
+        match parse_user_ctype("HANDLE*") {
+            Some(CType::Pointer(inner)) => {
+                assert!(matches!(*inner, CType::Named(ref n) if n == "HANDLE"))
+            }
+            other => panic!("got {other:?}"),
+        }
+        // char** → Pointer(Pointer(Int8))
+        match parse_user_ctype("char**") {
+            Some(CType::Pointer(inner)) => match *inner {
+                CType::Pointer(i2) => assert!(matches!(*i2, CType::Int8)),
+                _ => panic!("expected nested Pointer"),
+            },
+            _ => panic!("expected Pointer"),
+        }
+    }
+
+    #[test]
+    fn parse_user_ctype_qualifier_stripping() {
+        // `const char*` should parse as if `const` weren't there.
+        match parse_user_ctype("const char*") {
+            Some(CType::Pointer(inner)) => assert!(matches!(*inner, CType::Int8)),
+            other => panic!("got {other:?}"),
+        }
+        // `struct FILE` → Named("FILE")
+        match parse_user_ctype("struct FILE") {
+            Some(CType::Named(n)) => assert_eq!(n, "FILE"),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_ctype_whitespace_and_empty() {
+        assert!(parse_user_ctype("").is_none());
+        assert!(parse_user_ctype("   ").is_none());
+        assert!(matches!(parse_user_ctype("  int  "), Some(CType::Int32)));
+        // `char *` (space before `*`) should still be Pointer(Int8).
+        match parse_user_ctype("char *") {
+            Some(CType::Pointer(inner)) => assert!(matches!(*inner, CType::Int8)),
+            other => panic!("got {other:?}"),
         }
     }
 }
