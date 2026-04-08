@@ -5,20 +5,67 @@ use reghidra_ir::IrFunction;
 use std::collections::HashMap;
 
 /// Convert IR blocks into statement lists keyed by block address.
+///
+/// # Cross-block pending tracking (PR 4d)
+///
+/// The pending stack-write queue (used for x86-32 stdcall/cdecl argument
+/// setup) needs to flow across basic-block boundaries when the boundary
+/// is part of an *extended basic block* — i.e. a chain of blocks where
+/// every consecutive pair has the predecessor as the single successor and
+/// the successor as the single predecessor. Within an extended basic
+/// block there's no branching, so a `push` in block N can legitimately
+/// be the argument setup for a `call` in block N+1.
+///
+/// This matters in real Win32 code. The canonical termination idiom:
+///
+/// ```text
+/// block 0x4015a8:  push exit_code; call GetCurrentProcess  ; 0-arg
+/// block 0x4015b3:  push eax;       call TerminateProcess   ; 2-arg
+/// block 0x4015ba:  leave;          ret
+/// ```
+///
+/// is split across three basic blocks because the lifter starts a new
+/// block on every call. The two pushes belong to *different* calls and
+/// are in *different* blocks, but the linear chain means cross-block
+/// tracking can recover the full `TerminateProcess(eax, exit_code)`
+/// argument list.
+///
+/// Implementation: blocks are processed in address order (a stable
+/// approximation of topological order for non-loop CFGs). Each block
+/// looks up its sole predecessor's end-of-block pending state and
+/// inherits it when the chain rule holds. At end-of-block, the
+/// pending state is preserved (not flushed) when a sole successor
+/// will inherit it. Joins, branches, and back-edges all reset to an
+/// empty pending queue, which is the safe behavior — we never
+/// propagate args across paths whose execution isn't guaranteed.
 pub fn build_statements(
     ir: &IrFunction,
     ctx: &DecompileContext,
 ) -> HashMap<u64, Vec<Stmt>> {
     let mut result = HashMap::new();
 
-    for block in &ir.blocks {
+    // Process blocks in address order. This is stable for non-loop CFGs
+    // (forward jumps go to higher addresses, so predecessors are
+    // processed before successors). Loops with back-edges fall through
+    // to "no inherit" because the back-edge predecessor hasn't been
+    // processed yet — that's safe, just conservative.
+    let mut block_order: Vec<&_> = ir.blocks.iter().collect();
+    block_order.sort_by_key(|b| b.address);
+
+    // End-of-block pending state, keyed by block address. Successors
+    // that satisfy the chain rule inherit from this map.
+    let mut end_pending: HashMap<u64, Vec<(VarNode, VarNode)>> = HashMap::new();
+
+    for block in block_order {
         let mut stmts = Vec::new();
         // Deferred stack writes that look like x86-32 stdcall/cdecl argument
         // setup (`push x; push y; call f`). We hold onto them until we see a
         // Call (where they become arguments) or any other instruction (where
         // we flush them as plain `*(rsp) = x` statements — i.e. they weren't
-        // call args after all).
-        let mut pending_stack_writes: Vec<(VarNode, VarNode)> = Vec::new();
+        // call args after all). Initialized from the sole linear-chain
+        // predecessor's end state when the chain rule holds.
+        let mut pending_stack_writes: Vec<(VarNode, VarNode)> =
+            inherit_pending(block.address, ctx, &end_pending);
 
         for insn in &block.instructions {
             // Intercept stores to the stack pointer before the main match
@@ -28,6 +75,17 @@ pub fn build_statements(
                     pending_stack_writes.push((addr.clone(), src.clone()));
                     continue;
                 }
+            }
+
+            // Stack pointer delta bookkeeping (`rsp = rsp ± const`) is
+            // emitted by the lifter as part of every push/pop. It must
+            // NOT trigger a pending-stack-write flush — otherwise a
+            // push sequence that crosses a block boundary would see
+            // its inherited pending state dumped the moment the first
+            // push-half (`rsp -= 8`) arrives. Skip silently; the
+            // stackframe pass drops these anyway.
+            if is_stack_pointer_delta(&insn.op) {
+                continue;
             }
 
             // For any non-Call instruction, the pushes we saw weren't call
@@ -183,9 +241,18 @@ pub fn build_statements(
             }
         }
 
-        // Flush any stack writes still pending at the end of the block
-        // (e.g. a trailing push with no following call in this block).
-        flush_stack_writes(&mut stmts, &mut pending_stack_writes);
+        // End of block: decide whether to flush pending or to preserve
+        // it for a successor block. We preserve only when there's
+        // exactly one successor AND that successor has only this block
+        // as its predecessor — the linear-chain rule. Anything else
+        // (joins, branches, terminators) flushes immediately so the
+        // pushes still appear in the rendered output as plain
+        // `*(rsp) = x` stores rather than getting lost.
+        if successor_will_inherit(block.address, ctx) {
+            end_pending.insert(block.address, pending_stack_writes);
+        } else {
+            flush_stack_writes(&mut stmts, &mut pending_stack_writes);
+        }
         result.insert(block.address, stmts);
     }
 
@@ -202,10 +269,72 @@ fn is_stack_pointer(vn: &VarNode) -> bool {
     vn.offset == 4 || vn.offset == 31
 }
 
+/// Is this a stack pointer bookkeeping op (`rsp = rsp ± const`) emitted
+/// by the lifter as part of every push/pop? These must not trigger a
+/// pending-stack-write flush; otherwise a `push` sequence that crosses
+/// a block boundary would see its inherited state dumped when the
+/// first push-half (`rsp -= 8`) arrives in the new block.
+fn is_stack_pointer_delta(op: &IrOp) -> bool {
+    match op {
+        IrOp::IntSub { dst, a, b } | IrOp::IntAdd { dst, a, b } => {
+            is_stack_pointer(dst)
+                && is_stack_pointer(a)
+                && b.space == VarSpace::Constant
+        }
+        _ => false,
+    }
+}
+
 /// Emit any deferred stack writes as plain `*(rsp) = value` assignments.
 /// Called when we decide the pushes weren't actually call-argument setup.
 /// These always have a register address (the stack pointer), so they
 /// never hit the global-data rewrite path in `memory_access_expr`.
+/// Inherit the pending stack-write queue from a sole linear-chain
+/// predecessor. Returns the predecessor's end-of-block pending state
+/// when:
+///
+/// - The current block has exactly one predecessor in the CFG, AND
+/// - That predecessor has exactly one successor in the CFG, AND
+/// - The predecessor was already processed (its `end_pending` entry
+///   exists — guaranteed by address-order iteration on non-loop CFGs).
+///
+/// Otherwise returns an empty vec — joins, branches, entry blocks,
+/// and back-edge targets all start with an empty pending queue.
+fn inherit_pending(
+    block_addr: u64,
+    ctx: &DecompileContext,
+    end_pending: &HashMap<u64, Vec<(VarNode, VarNode)>>,
+) -> Vec<(VarNode, VarNode)> {
+    let preds = ctx.predecessors.get(&block_addr);
+    let Some(preds) = preds else { return Vec::new() };
+    if preds.len() != 1 {
+        return Vec::new();
+    }
+    let pred_addr = preds[0];
+    let pred_succs = ctx.successors.get(&pred_addr);
+    let Some(pred_succs) = pred_succs else { return Vec::new() };
+    if pred_succs.len() != 1 {
+        return Vec::new();
+    }
+    end_pending.get(&pred_addr).cloned().unwrap_or_default()
+}
+
+/// Returns true when `block_addr`'s sole successor will inherit the
+/// pending queue via [`inherit_pending`]. Used at end-of-block to
+/// decide whether to flush or preserve. Mirror of [`inherit_pending`]'s
+/// chain rule looked from the predecessor side.
+fn successor_will_inherit(block_addr: u64, ctx: &DecompileContext) -> bool {
+    let succs = ctx.successors.get(&block_addr);
+    let Some(succs) = succs else { return false };
+    if succs.len() != 1 {
+        return false;
+    }
+    let succ_addr = succs[0];
+    let succ_preds = ctx.predecessors.get(&succ_addr);
+    let Some(succ_preds) = succ_preds else { return false };
+    succ_preds.len() == 1
+}
+
 fn flush_stack_writes(stmts: &mut Vec<Stmt>, pending: &mut Vec<(VarNode, VarNode)>) {
     for (addr, src) in pending.drain(..) {
         let lhs = Expr::Deref(
@@ -336,6 +465,28 @@ fn drain_pending_for_call(
 /// output anyway). When the arg list is longer (e.g. variadic), the
 /// excess args pass through untyped because the variadic tail has no
 /// declared type.
+///
+/// # Retype invariant (future PR 5)
+///
+/// The cast wrapper here is *derived*, not authoritative: it exists
+/// only because the source expression's type (the slot, the register,
+/// the literal) is currently too weak to match the declared parameter
+/// type. Once the Phase 5c PR 5 right-click "Set Type" UI lands, if a
+/// user retypes the source to match (or be assignment-compatible
+/// with) the declared parameter type, this cast should *disappear* —
+/// rendering `TerminateProcess(hProc, exit_code)` instead of
+/// `TerminateProcess((HANDLE)hProc, (DWORD)exit_code)`. The cast is
+/// visual compensation for a typing gap; closing the gap should erase
+/// the compensation.
+///
+/// Implementation sketch for PR 5: thread a "source type context" into
+/// this function (from `FrameLayout.slots` for slot-backed args, from
+/// a register-type map for register-backed args, from literal inference
+/// for integer-literal args). When the source type is
+/// assignment-compatible with `proto_arg.ty`, skip the `Expr::Cast`
+/// wrap. Strict equality is too narrow (uint32_t → DWORD should be
+/// cast-free); width + signedness + named-alias resolution via the
+/// archive's `types` map is the right predicate.
 fn annotate_call_args(
     args: Vec<Expr>,
     prototype: Option<&crate::type_archive::FunctionType>,

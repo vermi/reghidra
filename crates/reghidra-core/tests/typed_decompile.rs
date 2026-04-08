@@ -154,4 +154,17 @@ fn pe_fixture_typed_calls_show_archive_types() {
         decomp.contains("TerminateProcess((HANDLE)"),
         "expected TerminateProcess to receive a HANDLE-typed arg, got:\n{decomp}"
     );
+
+    // PR 4d: the second arg (exit code 0xc0000409) is pushed in a
+    // different basic block than the call itself — TerminateProcess's
+    // push sequence crosses a block boundary. Cross-block pending
+    // propagation (linear-chain rule) is what makes this arg survive
+    // to the rendered output. If we regress cross-block tracking,
+    // the arg list will shrink to just the HANDLE and this assertion
+    // will fail before the GUI does.
+    assert!(
+        decomp.contains("0xc0000409"),
+        "expected TerminateProcess second arg (exit code 0xc0000409) \
+         to survive cross-block pending propagation, got:\n{decomp}"
+    );
 }
