@@ -142,7 +142,7 @@ impl ReghidraApp {
             annotation_popup: AnnotationPopup::new(),
             input_mode: InputMode::Normal,
             g_pending: false,
-            layout: ViewLayout::Single,
+            layout: ViewLayout::SplitVertical,
             secondary_view: MainView::Decompile,
             focused_pane: 0,
             context_menu_addr: None,

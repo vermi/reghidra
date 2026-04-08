@@ -1,7 +1,6 @@
-use crate::analysis::functions::Function;
 use crate::disasm::DisassembledInstruction;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A basic block: a straight-line sequence of instructions with
 /// one entry point and one exit point.
@@ -74,25 +73,98 @@ impl ControlFlowGraph {
     pub fn block_count(&self) -> usize {
         self.blocks.len()
     }
+
+    /// Compute the function's address extent and instruction count from its
+    /// reachable basic blocks.
+    ///
+    /// Returns `(size, instruction_count)` where `size` is
+    /// `max_block_end - entry` and `instruction_count` is the total number
+    /// of instructions across all blocks.
+    pub fn extent(&self) -> (u64, usize) {
+        let mut max_end = self.entry;
+        let mut count = 0usize;
+        for block in self.blocks.values() {
+            if block.end_address > max_end {
+                max_end = block.end_address;
+            }
+            count += block.instructions.len();
+        }
+        (max_end.saturating_sub(self.entry), count)
+    }
 }
 
-/// Build a control flow graph for a function.
-pub fn build_cfg(
-    function: &Function,
+/// Build a control flow graph for a function via reachability from its entry.
+///
+/// Starting at `entry`, this follows control flow (fallthrough, direct
+/// branches, conditional branches) and stops at:
+///   - `ret` instructions
+///   - indirect branches (successor unknown)
+///   - any branch target that happens to be another `known_entries` entry
+///     (treated as a tail call to a separate function)
+///
+/// `calls` do not transfer control *within* the function — they fall through
+/// to the instruction after the call.
+pub fn build_cfg_from_entry(
+    entry: u64,
     all_instructions: &[DisassembledInstruction],
+    known_entries: &BTreeSet<u64>,
+    addr_to_idx: &HashMap<u64, usize>,
 ) -> ControlFlowGraph {
-    let func_start = function.entry_address;
-    let func_end = function.entry_address + function.size;
+    // ------------------------------------------------------------------
+    // Step 1: reachability walk — collect every instruction address
+    // that belongs to this function.
+    // ------------------------------------------------------------------
+    let mut reachable: BTreeSet<u64> = BTreeSet::new();
+    let mut stack: Vec<u64> = vec![entry];
 
-    // Extract instructions belonging to this function
-    let func_insns: Vec<&DisassembledInstruction> = all_instructions
-        .iter()
-        .filter(|i| i.address >= func_start && i.address < func_end)
-        .collect();
+    while let Some(addr) = stack.pop() {
+        if reachable.contains(&addr) {
+            continue;
+        }
+        let Some(&idx) = addr_to_idx.get(&addr) else {
+            continue;
+        };
+        reachable.insert(addr);
+        let insn = &all_instructions[idx];
 
-    if func_insns.is_empty() {
+        if super::functions::is_return_instruction(&insn.mnemonic) {
+            continue;
+        }
+
+        let fallthrough = insn.address + insn.bytes.len() as u64;
+
+        if super::functions::is_unconditional_jump_mnemonic(&insn.mnemonic) {
+            if let Some(target) = super::functions::parse_branch_target(&insn.operands) {
+                if target == entry || !known_entries.contains(&target) {
+                    stack.push(target);
+                }
+            }
+            // Indirect jump (no imm target) is a sink.
+            // No fallthrough after an unconditional jump.
+            continue;
+        }
+
+        if is_conditional_branch(&insn.mnemonic) {
+            if let Some(target) = super::functions::parse_branch_target(&insn.operands) {
+                if target == entry || !known_entries.contains(&target) {
+                    stack.push(target);
+                }
+            }
+            if fallthrough == entry || !known_entries.contains(&fallthrough) {
+                stack.push(fallthrough);
+            }
+            continue;
+        }
+
+        // Default (including call): fall through.
+        if fallthrough == entry || !known_entries.contains(&fallthrough) {
+            stack.push(fallthrough);
+        }
+    }
+
+    if reachable.is_empty() {
         return ControlFlowGraph {
-            entry: func_start,
+            entry,
             blocks: BTreeMap::new(),
             edges: Vec::new(),
             successors: HashMap::new(),
@@ -100,47 +172,73 @@ pub fn build_cfg(
         };
     }
 
-    // Step 1: Identify block leaders (first instruction of each basic block)
+    // ------------------------------------------------------------------
+    // Step 2: identify block leaders within the reachable set.
+    // ------------------------------------------------------------------
+    let reachable_vec: Vec<u64> = reachable.iter().copied().collect();
     let mut leaders: HashSet<u64> = HashSet::new();
-    leaders.insert(func_start); // Function entry is always a leader
+    leaders.insert(entry);
 
-    for (i, insn) in func_insns.iter().enumerate() {
+    for &addr in &reachable_vec {
+        let idx = addr_to_idx[&addr];
+        let insn = &all_instructions[idx];
+        let fallthrough = insn.address + insn.bytes.len() as u64;
+
         if is_branch(&insn.mnemonic) {
-            // Target of a branch is a leader
             if let Some(target) = super::functions::parse_branch_target(&insn.operands) {
-                if target >= func_start && target < func_end {
+                if reachable.contains(&target) {
                     leaders.insert(target);
                 }
             }
-
-            // Instruction after a branch is a leader (fallthrough)
-            if i + 1 < func_insns.len() {
-                leaders.insert(func_insns[i + 1].address);
+            if reachable.contains(&fallthrough) {
+                leaders.insert(fallthrough);
             }
-        }
-
-        if is_return(&insn.mnemonic) {
-            // Instruction after a return is a leader
-            if i + 1 < func_insns.len() {
-                leaders.insert(func_insns[i + 1].address);
+        } else if super::functions::is_return_instruction(&insn.mnemonic) {
+            if reachable.contains(&fallthrough) {
+                leaders.insert(fallthrough);
             }
         }
     }
 
-    // Step 2: Build basic blocks
+    // ------------------------------------------------------------------
+    // Step 3: build blocks. Each block extends from its leader through
+    // contiguous reachable instructions, stopping at the next leader or
+    // at a terminator.
+    // ------------------------------------------------------------------
     let mut sorted_leaders: Vec<u64> = leaders.into_iter().collect();
     sorted_leaders.sort();
 
     let mut blocks: BTreeMap<u64, BasicBlock> = BTreeMap::new();
-
     for (li, &leader) in sorted_leaders.iter().enumerate() {
-        let next_leader = sorted_leaders.get(li + 1).copied().unwrap_or(func_end);
+        let next_leader = sorted_leaders.get(li + 1).copied();
 
-        let block_insns: Vec<DisassembledInstruction> = func_insns
-            .iter()
-            .filter(|i| i.address >= leader && i.address < next_leader)
-            .map(|i| (*i).clone())
-            .collect();
+        let mut block_insns: Vec<DisassembledInstruction> = Vec::new();
+        let Some(&start_idx) = addr_to_idx.get(&leader) else {
+            continue;
+        };
+        let mut cur_idx = start_idx;
+
+        loop {
+            if cur_idx >= all_instructions.len() {
+                break;
+            }
+            let insn = &all_instructions[cur_idx];
+            if !reachable.contains(&insn.address) {
+                break;
+            }
+            if let Some(nl) = next_leader {
+                if insn.address >= nl {
+                    break;
+                }
+            }
+            let is_terminator = is_branch(&insn.mnemonic)
+                || super::functions::is_return_instruction(&insn.mnemonic);
+            block_insns.push(insn.clone());
+            if is_terminator {
+                break;
+            }
+            cur_idx += 1;
+        }
 
         if block_insns.is_empty() {
             continue;
@@ -159,7 +257,9 @@ pub fn build_cfg(
         );
     }
 
-    // Step 3: Build edges
+    // ------------------------------------------------------------------
+    // Step 4: build edges between blocks.
+    // ------------------------------------------------------------------
     let mut edges = Vec::new();
     let mut successors: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut predecessors: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -173,75 +273,69 @@ pub fn build_cfg(
             None => continue,
         };
 
-        if is_return(&last_insn.mnemonic) {
-            // No successors for return
+        if super::functions::is_return_instruction(&last_insn.mnemonic) {
             continue;
         }
 
-        if is_unconditional_jump(&last_insn.mnemonic) {
+        if super::functions::is_unconditional_jump_mnemonic(&last_insn.mnemonic) {
             if let Some(target) = super::functions::parse_branch_target(&last_insn.operands) {
                 if blocks.contains_key(&target) {
-                    edges.push(CfgEdge {
-                        from: block_addr,
-                        to: target,
-                        kind: EdgeKind::Unconditional,
-                    });
-                    successors.entry(block_addr).or_default().push(target);
-                    predecessors.entry(target).or_default().push(block_addr);
+                    add_edge(
+                        &mut edges,
+                        &mut successors,
+                        &mut predecessors,
+                        block_addr,
+                        target,
+                        EdgeKind::Unconditional,
+                    );
                 }
             }
             continue;
         }
 
         if is_conditional_branch(&last_insn.mnemonic) {
-            // True branch (taken)
             if let Some(target) = super::functions::parse_branch_target(&last_insn.operands) {
                 if blocks.contains_key(&target) {
-                    edges.push(CfgEdge {
-                        from: block_addr,
-                        to: target,
-                        kind: EdgeKind::ConditionalTrue,
-                    });
-                    successors.entry(block_addr).or_default().push(target);
-                    predecessors.entry(target).or_default().push(block_addr);
+                    add_edge(
+                        &mut edges,
+                        &mut successors,
+                        &mut predecessors,
+                        block_addr,
+                        target,
+                        EdgeKind::ConditionalTrue,
+                    );
                 }
             }
-
-            // False branch (fallthrough)
             let fallthrough = block.end_address;
             if blocks.contains_key(&fallthrough) {
-                edges.push(CfgEdge {
-                    from: block_addr,
-                    to: fallthrough,
-                    kind: EdgeKind::ConditionalFalse,
-                });
-                successors.entry(block_addr).or_default().push(fallthrough);
-                predecessors
-                    .entry(fallthrough)
-                    .or_default()
-                    .push(block_addr);
+                add_edge(
+                    &mut edges,
+                    &mut successors,
+                    &mut predecessors,
+                    block_addr,
+                    fallthrough,
+                    EdgeKind::ConditionalFalse,
+                );
             }
             continue;
         }
 
-        // Default: fallthrough to next block
+        // Default: fallthrough to next block (covers call and ordinary insn).
         let fallthrough = block.end_address;
         if blocks.contains_key(&fallthrough) {
-            edges.push(CfgEdge {
-                from: block_addr,
-                to: fallthrough,
-                kind: EdgeKind::Unconditional,
-            });
-            successors.entry(block_addr).or_default().push(fallthrough);
-            predecessors
-                .entry(fallthrough)
-                .or_default()
-                .push(block_addr);
+            add_edge(
+                &mut edges,
+                &mut successors,
+                &mut predecessors,
+                block_addr,
+                fallthrough,
+                EdgeKind::Unconditional,
+            );
         }
     }
 
     ControlFlowGraph {
-        entry: func_start,
+        entry,
         blocks,
         edges,
         successors,
@@ -249,12 +343,23 @@ pub fn build_cfg(
     }
 }
 
-fn is_branch(mnemonic: &str) -> bool {
-    is_unconditional_jump(mnemonic) || is_conditional_branch(mnemonic) || is_call(mnemonic)
+fn add_edge(
+    edges: &mut Vec<CfgEdge>,
+    successors: &mut HashMap<u64, Vec<u64>>,
+    predecessors: &mut HashMap<u64, Vec<u64>>,
+    from: u64,
+    to: u64,
+    kind: EdgeKind,
+) {
+    edges.push(CfgEdge { from, to, kind });
+    successors.entry(from).or_default().push(to);
+    predecessors.entry(to).or_default().push(from);
 }
 
-fn is_unconditional_jump(mnemonic: &str) -> bool {
-    matches!(mnemonic, "jmp" | "b" | "j" | "ba")
+fn is_branch(mnemonic: &str) -> bool {
+    super::functions::is_unconditional_jump_mnemonic(mnemonic)
+        || is_conditional_branch(mnemonic)
+        || is_call(mnemonic)
 }
 
 fn is_conditional_branch(mnemonic: &str) -> bool {
@@ -267,15 +372,16 @@ fn is_conditional_branch(mnemonic: &str) -> bool {
     if m.starts_with("b.") || m.starts_with("cb") || m.starts_with("tb") {
         return true;
     }
-    matches!(m, "beq" | "bne" | "blt" | "bgt" | "ble" | "bge"
-        | "blo" | "bhi" | "bls" | "bhs" | "bmi" | "bpl"
-        | "bvs" | "bvc" | "bcc" | "bcs")
-}
-
-fn is_return(mnemonic: &str) -> bool {
     matches!(
-        mnemonic,
-        "ret" | "retq" | "retn" | "retf" | "iret" | "iretd" | "iretq"
+        m,
+        "beq" | "bne"
+            | "blt" | "bgt"
+            | "ble" | "bge"
+            | "blo" | "bhi"
+            | "bls" | "bhs"
+            | "bmi" | "bpl"
+            | "bvs" | "bvc"
+            | "bcc" | "bcs"
     )
 }
 

@@ -14,6 +14,61 @@ pub struct BinaryInfo {
     pub entry_point: u64,
     pub is_64bit: bool,
     pub is_big_endian: bool,
+    /// PE only: CodeView debug info pointing at an external PDB, if present.
+    pub pdb_info: Option<PdbInfo>,
+    /// PE only: MSVC toolchain fingerprint parsed from the Rich Header.
+    pub rich_header: Option<RichHeader>,
+}
+
+/// PE CodeView RSDS record — identifies the matching PDB file for this binary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdbInfo {
+    /// Little-endian GUID from the RSDS record.
+    pub guid: [u8; 16],
+    /// Age (increments each time the PDB is rewritten).
+    pub age: u32,
+    /// Path recorded in the debug directory (usually the absolute build-time path).
+    pub path: String,
+}
+
+impl PdbInfo {
+    /// Filename portion of the recorded path (handles both `/` and `\`).
+    pub fn file_name(&self) -> &str {
+        let sep = self.path.rfind(|c| c == '\\' || c == '/');
+        match sep {
+            Some(i) => &self.path[i + 1..],
+            None => &self.path,
+        }
+    }
+
+    /// Symbol-server path component: `<GUID as 32 upper hex><age as hex>`.
+    /// Note: the GUID is serialized with the first 8 bytes in native (little-endian
+    /// mixed) field order as Microsoft symbol servers expect.
+    pub fn symsrv_guid_age(&self) -> String {
+        let g = &self.guid;
+        format!(
+            "{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:X}",
+            g[3], g[2], g[1], g[0],
+            g[5], g[4],
+            g[7], g[6],
+            g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15],
+            self.age,
+        )
+    }
+}
+
+/// MSVC toolchain fingerprint from the PE Rich Header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RichHeader {
+    /// Each entry: (product/compiler id, build number, use count).
+    pub entries: Vec<RichEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RichEntry {
+    pub prod_id: u16,
+    pub build: u16,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +132,12 @@ pub struct LoadedBinary {
     pub strings: Vec<DetectedString>,
     /// ELF: PLT stub address → import name. PE: IAT entry address → import name.
     pub import_addr_map: HashMap<u64, String>,
+    /// PE x64 only: function start addresses from the .pdata exception table.
+    /// Empty on other formats / architectures.
+    pub pdata_function_starts: Vec<u64>,
+    /// PE only: function start addresses from the Guard CF function table
+    /// (for CFG-enabled binaries). Empty on other formats.
+    pub guard_cf_function_starts: Vec<u64>,
 }
 
 /// A string found in the binary.
@@ -232,6 +293,8 @@ impl LoadedBinary {
             entry_point: elf.entry,
             is_64bit: elf.is_64,
             is_big_endian,
+            pdb_info: None,
+            rich_header: None,
         };
 
         let sections: Vec<Section> = elf
@@ -332,6 +395,8 @@ impl LoadedBinary {
             exports,
             strings,
             import_addr_map,
+            pdata_function_starts: Vec::new(),
+            guard_cf_function_starts: Vec::new(),
         })
     }
 
@@ -388,6 +453,12 @@ impl LoadedBinary {
 
         let image_base = pe.image_base as u64;
 
+        // Extract CodeView PDB info from the debug directory, if present.
+        let pdb_info = extract_pdb_info(pe);
+
+        // Parse the MS-undocumented Rich Header for MSVC toolchain fingerprint.
+        let rich_header = parse_rich_header(data);
+
         let info = BinaryInfo {
             path: path.to_path_buf(),
             format: BinaryFormat::Pe,
@@ -395,6 +466,8 @@ impl LoadedBinary {
             entry_point: image_base + pe.entry as u64,
             is_64bit,
             is_big_endian: false,
+            pdb_info,
+            rich_header,
         };
 
         let sections: Vec<Section> = pe
@@ -497,6 +570,18 @@ impl LoadedBinary {
             }
         }
 
+        // Mine the x64 .pdata exception table for authoritative function starts.
+        let pdata_function_starts = if is_64bit {
+            extract_pdata_function_starts(pe, image_base)
+        } else {
+            Vec::new()
+        };
+
+        // Guard CF function table parsing is not implemented yet; the Load
+        // Config Directory layout is version-dependent and needs a
+        // version-aware decoder. Tracked as a follow-up.
+        let guard_cf_function_starts = Vec::new();
+
         Ok(Self {
             info,
             data: data.to_vec(),
@@ -506,6 +591,8 @@ impl LoadedBinary {
             exports,
             strings,
             import_addr_map,
+            pdata_function_starts,
+            guard_cf_function_starts,
         })
     }
 
@@ -556,6 +643,8 @@ impl LoadedBinary {
             entry_point: macho.entry,
             is_64bit,
             is_big_endian,
+            pdb_info: None,
+            rich_header: None,
         };
 
         let mut sections = Vec::new();
@@ -641,6 +730,8 @@ impl LoadedBinary {
             exports,
             strings,
             import_addr_map: HashMap::new(),
+            pdata_function_starts: Vec::new(),
+            guard_cf_function_starts: Vec::new(),
         })
     }
 
@@ -687,4 +778,121 @@ impl LoadedBinary {
         dedup_auto_names(&mut result);
         result
     }
+}
+
+// ---------------------------------------------------------------------------
+// PE-specific metadata mining
+// ---------------------------------------------------------------------------
+
+/// Extract CodeView PDB info (GUID/age/path) from a PE's debug directory.
+fn extract_pdb_info(pe: &goblin::pe::PE) -> Option<PdbInfo> {
+    let debug = pe.debug_data.as_ref()?;
+    let cv = debug.codeview_pdb70_debug_info.as_ref()?;
+    let filename_end = cv
+        .filename
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(cv.filename.len());
+    let path = String::from_utf8_lossy(&cv.filename[..filename_end]).to_string();
+    Some(PdbInfo {
+        guid: cv.signature,
+        age: cv.age,
+        path,
+    })
+}
+
+/// Extract function start addresses (absolute VAs) from the .pdata exception
+/// table on x64 PE binaries. Each RUNTIME_FUNCTION entry corresponds to a
+/// top-level function (or a chained unwind entry, which we filter out via
+/// unwind info parsing done by the caller — here we just return begin_address).
+fn extract_pdata_function_starts(pe: &goblin::pe::PE, image_base: u64) -> Vec<u64> {
+    let Some(exc) = pe.exception_data.as_ref() else {
+        return Vec::new();
+    };
+    let mut starts: Vec<u64> = Vec::with_capacity(exc.len());
+    for rf in exc.functions().flatten() {
+        let va = image_base + rf.begin_address as u64;
+        starts.push(va);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
+/// Parse the PE Rich Header. The Rich Header is an undocumented block between
+/// the DOS stub and the PE header, added by the Microsoft linker. It records
+/// the MSVC compiler/linker/tool versions that contributed to the binary.
+///
+/// Format (in the file, before XOR-decoding):
+///   `DanS` marker (XOR-key XOR 0x536E6144) ... entries ... `Rich` marker
+///   followed by the 32-bit XOR key.
+fn parse_rich_header(data: &[u8]) -> Option<RichHeader> {
+    // The Rich header lives in the DOS stub region, i.e. before e_lfanew.
+    // We only need to scan the first ~1KB.
+    if data.len() < 0x80 {
+        return None;
+    }
+    let scan_end = usize::min(data.len(), 0x400);
+    let window = &data[..scan_end];
+
+    // Locate the "Rich" marker.
+    let rich_pos = find_sub(window, b"Rich")?;
+    if rich_pos + 8 > window.len() {
+        return None;
+    }
+    let key = u32::from_le_bytes(window[rich_pos + 4..rich_pos + 8].try_into().ok()?);
+
+    // Walk backward from the Rich marker, XOR-decoding u32s, until we hit
+    // the decoded "DanS" marker.
+    if rich_pos < 4 {
+        return None;
+    }
+    let mut offset = rich_pos;
+    let mut decoded: Vec<u32> = Vec::new();
+    while offset >= 4 {
+        offset -= 4;
+        let raw = u32::from_le_bytes(window[offset..offset + 4].try_into().ok()?);
+        let dec = raw ^ key;
+        decoded.push(dec);
+        if dec == 0x536E_6144 {
+            // "DanS"
+            break;
+        }
+        if decoded.len() > 1024 {
+            return None; // runaway
+        }
+    }
+
+    // The decoded sequence (in reverse) is: entries..., 0, 0, 0, DanS.
+    // Reverse to natural order, skip "DanS" and the three zero-pads.
+    decoded.reverse();
+    let body = decoded.strip_prefix(&[0x536E_6144, 0, 0, 0])?;
+    if body.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    for pair in body.chunks_exact(2) {
+        let comp_id = pair[0];
+        let count = pair[1];
+        let prod_id = (comp_id >> 16) as u16;
+        let build = (comp_id & 0xFFFF) as u16;
+        entries.push(RichEntry {
+            prod_id,
+            build,
+            count,
+        });
+    }
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(RichHeader { entries })
+    }
+}
+
+fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }

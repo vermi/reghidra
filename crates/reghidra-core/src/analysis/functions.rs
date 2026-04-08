@@ -1,7 +1,9 @@
+use crate::analysis::cfg::{self, ControlFlowGraph};
+use crate::arch::Architecture;
 use crate::binary::{LoadedBinary, SymbolKind};
 use crate::disasm::DisassembledInstruction;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 /// A detected function in the binary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,115 +24,108 @@ pub enum FunctionSource {
     EntryPoint,
     /// Target of a CALL instruction.
     CallTarget,
+    /// Target of an unconditional JMP (tail call).
+    TailCallTarget,
     /// Heuristic prologue pattern match.
     Prologue,
     /// Auto-named by heuristic analysis (thunk, wrapper, string-ref, API pattern).
     AutoNamed,
     /// Identified by FLIRT signature matching.
     Signature,
+    /// From PE .pdata exception table (x64).
+    PData,
+    /// From PE Guard CF function table.
+    GuardCf,
 }
 
-/// Detect functions using multiple strategies.
+/// Detect functions using multiple strategies and compute their CFGs.
+///
+/// Two-pass design:
+///   1. Discover candidate entry points from every available source
+///      (binary entry, symbols, call targets, gated tail-call jmp targets,
+///      prologue patterns, and any extra entries from the caller).
+///   2. For each entry, build a CFG via reachability (stopping at other
+///      known entries, returns, and indirect branches) and derive the
+///      function's true address span from that CFG.
 pub fn detect_functions(
     binary: &LoadedBinary,
     instructions: &[DisassembledInstruction],
-) -> Vec<Function> {
-    let mut entry_points: BTreeSet<u64> = BTreeSet::new();
-    let mut names: std::collections::HashMap<u64, (String, FunctionSource)> =
-        std::collections::HashMap::new();
+    extra_entries: &[(u64, String, FunctionSource)],
+) -> (Vec<Function>, HashMap<u64, ControlFlowGraph>) {
+    // ------------------------------------------------------------------
+    // Pass 1: entry discovery
+    // ------------------------------------------------------------------
+    let mut entries: BTreeSet<u64> = BTreeSet::new();
+    let mut names: HashMap<u64, (String, FunctionSource)> = HashMap::new();
 
-    // 1. Entry point
-    if binary.info.entry_point != 0 {
-        entry_points.insert(binary.info.entry_point);
-        names.insert(
-            binary.info.entry_point,
-            ("_start".to_string(), FunctionSource::EntryPoint),
-        );
+    // 0. Caller-supplied high-confidence entries (e.g. PE .pdata, Guard CF).
+    for (addr, name, source) in extra_entries {
+        if *addr == 0 {
+            continue;
+        }
+        entries.insert(*addr);
+        names.entry(*addr).or_insert_with(|| (name.clone(), *source));
     }
 
-    // 2. Symbol table functions
+    // 1. Binary entry point
+    if binary.info.entry_point != 0 {
+        entries.insert(binary.info.entry_point);
+        names
+            .entry(binary.info.entry_point)
+            .or_insert_with(|| ("_start".to_string(), FunctionSource::EntryPoint));
+    }
+
+    // 2. Symbol-table functions
     for sym in &binary.symbols {
         if sym.kind == SymbolKind::Function && sym.address != 0 {
-            entry_points.insert(sym.address);
-            // Only set name if we don't already have one, or if this is from symbols
+            entries.insert(sym.address);
             names
                 .entry(sym.address)
                 .or_insert_with(|| (sym.name.clone(), FunctionSource::Symbol));
         }
     }
 
-    // 3. Call targets from disassembly
-    for insn in instructions {
-        if is_call_instruction(&insn.mnemonic) {
-            if let Some(target) = parse_branch_target(&insn.operands) {
-                // Verify the target is within an executable section
-                if binary.executable_sections().iter().any(|s| {
-                    target >= s.virtual_address
-                        && target < s.virtual_address + s.virtual_size
-                }) {
-                    entry_points.insert(target);
-                    names
-                        .entry(target)
-                        .or_insert_with(|| {
-                            (format!("sub_{target:x}"), FunctionSource::CallTarget)
-                        });
-                }
-            }
-        }
-    }
+    // Build an address→index map once; reused by branch-target gating,
+    // prologue detection, and the CFG builder below.
+    let addr_to_idx: HashMap<u64, usize> = instructions
+        .iter()
+        .enumerate()
+        .map(|(i, insn)| (insn.address, i))
+        .collect();
 
-    // 4. Prologue pattern detection
-    detect_prologues(binary, instructions, &mut entry_points, &mut names);
+    // 3. Direct-call targets and 4. gated tail-call jmp targets.
+    collect_branch_targets(
+        binary,
+        instructions,
+        &addr_to_idx,
+        &mut entries,
+        &mut names,
+    );
 
-    // Build instruction address index for fast lookup
-    let insn_addrs: Vec<u64> = instructions.iter().map(|i| i.address).collect();
+    // 5. Heuristic prologue detection (now also catches MSVC hotpatch prologues).
+    detect_prologues(binary, instructions, &mut entries, &mut names);
 
-    // Build functions with size estimation
-    let entry_vec: Vec<u64> = entry_points.iter().copied().collect();
+    // ------------------------------------------------------------------
+    // Pass 2: CFG-reachability-based extent
+    // ------------------------------------------------------------------
     let mut functions = Vec::new();
+    let mut cfgs: HashMap<u64, ControlFlowGraph> = HashMap::new();
 
-    for (i, &entry) in entry_vec.iter().enumerate() {
-        // Find the instruction index for this entry
-        let start_idx = match insn_addrs.binary_search(&entry) {
-            Ok(idx) => idx,
-            Err(_) => continue, // Entry doesn't correspond to a real instruction
-        };
-
-        // Estimate function end: scan to the next function entry or a final
-        // return instruction.  We don't stop at the *first* ret because
-        // functions with multiple exit paths (early returns, conditional
-        // cleanup, etc.) have valid code after the first ret.
-        let next_entry = entry_vec.get(i + 1).copied();
-        let mut end_addr = entry;
-        let mut insn_count = 0;
-        let mut last_ret_end = None;
-
-        for idx in start_idx..instructions.len() {
-            let insn = &instructions[idx];
-
-            // Stop if we've reached the next function
-            if let Some(next) = next_entry {
-                if insn.address >= next {
-                    break;
-                }
-            }
-
-            end_addr = insn.address + insn.bytes.len() as u64;
-            insn_count += 1;
-
-            if is_return_instruction(&insn.mnemonic) {
-                last_ret_end = Some((end_addr, insn_count));
-            }
+    for &entry in &entries {
+        // Drop entries that don't land on a real instruction (e.g. alignment
+        // padding, imported-function thunks in data, or decoding gaps).
+        if !addr_to_idx.contains_key(&entry) {
+            continue;
         }
 
-        // If we stopped because of the next function entry (not end of
-        // instructions), use that boundary.  Otherwise, if we found at
-        // least one ret, trim to the last one to avoid trailing padding.
-        if next_entry.is_none() || next_entry.is_some_and(|n| end_addr < n) {
-            if let Some((ret_end, ret_count)) = last_ret_end {
-                end_addr = ret_end;
-                insn_count = ret_count;
-            }
+        let cfg = cfg::build_cfg_from_entry(entry, instructions, &entries, &addr_to_idx);
+        if cfg.blocks.is_empty() {
+            continue;
+        }
+
+        let (size, insn_count) = cfg.extent();
+        if size == 0 {
+            continue;
         }
 
         let (name, source) = names
@@ -138,60 +133,64 @@ pub fn detect_functions(
             .cloned()
             .unwrap_or_else(|| (format!("sub_{entry:x}"), FunctionSource::Prologue));
 
-        let size = end_addr.saturating_sub(entry);
-        if size > 0 {
-            functions.push(Function {
-                entry_address: entry,
-                size,
-                name,
-                source,
-                instruction_count: insn_count,
-            });
-        }
+        functions.push(Function {
+            entry_address: entry,
+            size,
+            name,
+            source,
+            instruction_count: insn_count,
+        });
+        cfgs.insert(entry, cfg);
     }
 
     functions.sort_by_key(|f| f.entry_address);
-    functions
+    (functions, cfgs)
 }
 
-/// Detect common function prologues in executable sections.
-fn detect_prologues(
+/// Collect `call imm` targets (always) and `jmp imm` targets (gated) as
+/// function entries.
+///
+/// A `jmp imm` is promoted to a function entry only if one of the following
+/// holds for the target address:
+///   (a) the preceding instruction is a terminator (ret / unconditional jmp /
+///       int3 / ud2), *or*
+///   (b) the target begins with a recognized function prologue.
+///
+/// This captures tail-called helpers (e.g. MSVC `__report_gsfailure`) while
+/// avoiding splitting functions on ordinary intra-function jumps.
+fn collect_branch_targets(
     binary: &LoadedBinary,
     instructions: &[DisassembledInstruction],
-    entry_points: &mut BTreeSet<u64>,
-    names: &mut std::collections::HashMap<u64, (String, FunctionSource)>,
+    addr_to_idx: &HashMap<u64, usize>,
+    entries: &mut BTreeSet<u64>,
+    names: &mut HashMap<u64, (String, FunctionSource)>,
 ) {
-    // Look for common prologue patterns that aren't already known functions
-    for (i, insn) in instructions.iter().enumerate() {
-        if entry_points.contains(&insn.address) {
-            continue;
-        }
-
-        let is_prologue = match binary.info.architecture {
-            crate::arch::Architecture::X86_32 | crate::arch::Architecture::X86_64 => {
-                is_x86_prologue(insn, instructions.get(i + 1))
+    for insn in instructions {
+        if is_call_instruction(&insn.mnemonic) {
+            if let Some(target) = parse_branch_target(&insn.operands) {
+                if target != 0 && is_in_executable_section(binary, target) {
+                    entries.insert(target);
+                    names
+                        .entry(target)
+                        .or_insert_with(|| (format!("sub_{target:x}"), FunctionSource::CallTarget));
+                }
             }
-            crate::arch::Architecture::Arm64 => is_arm64_prologue(insn),
-            crate::arch::Architecture::Arm32 => is_arm32_prologue(insn),
-            _ => false,
-        };
-
-        if is_prologue {
-            // Extra check: is the preceding instruction a return or unconditional jump?
-            // This helps avoid false positives in the middle of functions
-            if i > 0 {
-                let prev = &instructions[i - 1];
-                if is_return_instruction(&prev.mnemonic)
-                    || is_unconditional_jump(&prev.mnemonic)
-                    || prev.mnemonic == "int3"
-                    || prev.mnemonic == "nop"
-                    || prev.mnemonic == "ud2"
+        } else if is_unconditional_jump_mnemonic(&insn.mnemonic) {
+            if let Some(target) = parse_branch_target(&insn.operands) {
+                if target != 0
+                    && is_in_executable_section(binary, target)
+                    && is_likely_tail_call_target(
+                        target,
+                        addr_to_idx,
+                        instructions,
+                        binary.info.architecture,
+                    )
                 {
-                    entry_points.insert(insn.address);
-                    names.entry(insn.address).or_insert_with(|| {
+                    entries.insert(target);
+                    names.entry(target).or_insert_with(|| {
                         (
-                            format!("sub_{:x}", insn.address),
-                            FunctionSource::Prologue,
+                            format!("sub_{target:x}"),
+                            FunctionSource::TailCallTarget,
                         )
                     });
                 }
@@ -200,11 +199,114 @@ fn detect_prologues(
     }
 }
 
+/// True if promoting a `jmp` target to a function entry is justified.
+fn is_likely_tail_call_target(
+    target: u64,
+    addr_to_idx: &HashMap<u64, usize>,
+    instructions: &[DisassembledInstruction],
+    arch: Architecture,
+) -> bool {
+    let Some(&idx) = addr_to_idx.get(&target) else {
+        return false;
+    };
+
+    // (a) Preceding instruction is a terminator.
+    if idx > 0 {
+        let prev = &instructions[idx - 1];
+        if is_return_instruction(&prev.mnemonic)
+            || is_unconditional_jump_mnemonic(&prev.mnemonic)
+            || prev.mnemonic == "int3"
+            || prev.mnemonic == "ud2"
+        {
+            return true;
+        }
+    } else {
+        // First instruction in the stream — nothing to contradict.
+        return true;
+    }
+
+    // (b) Target begins with a recognized prologue.
+    let insn = &instructions[idx];
+    let next = instructions.get(idx + 1);
+    match arch {
+        Architecture::X86_32 | Architecture::X86_64 => is_x86_prologue(insn, next),
+        Architecture::Arm64 => is_arm64_prologue(insn),
+        Architecture::Arm32 => is_arm32_prologue(insn),
+        _ => false,
+    }
+}
+
+fn is_in_executable_section(binary: &LoadedBinary, addr: u64) -> bool {
+    binary
+        .executable_sections()
+        .iter()
+        .any(|s| addr >= s.virtual_address && addr < s.virtual_address + s.virtual_size)
+}
+
+/// Detect common function prologues in executable sections.
+fn detect_prologues(
+    binary: &LoadedBinary,
+    instructions: &[DisassembledInstruction],
+    entry_points: &mut BTreeSet<u64>,
+    names: &mut HashMap<u64, (String, FunctionSource)>,
+) {
+    for (i, insn) in instructions.iter().enumerate() {
+        if entry_points.contains(&insn.address) {
+            continue;
+        }
+
+        let is_prologue = match binary.info.architecture {
+            Architecture::X86_32 | Architecture::X86_64 => {
+                is_x86_prologue(insn, instructions.get(i + 1))
+            }
+            Architecture::Arm64 => is_arm64_prologue(insn),
+            Architecture::Arm32 => is_arm32_prologue(insn),
+            _ => false,
+        };
+
+        if !is_prologue {
+            continue;
+        }
+
+        // Require the immediately preceding instruction to be a hard
+        // terminator. This avoids promoting mid-function prologue lookalikes
+        // (e.g. an intra-function `push ebp; mov ebp, esp` pair used to set
+        // up a nested frame).
+        if i == 0 {
+            entry_points.insert(insn.address);
+            names.entry(insn.address).or_insert_with(|| {
+                (
+                    format!("sub_{:x}", insn.address),
+                    FunctionSource::Prologue,
+                )
+            });
+            continue;
+        }
+
+        let prev = &instructions[i - 1];
+        let prev_is_terminator = is_return_instruction(&prev.mnemonic)
+            || is_unconditional_jump_mnemonic(&prev.mnemonic)
+            || prev.mnemonic == "int3"
+            || prev.mnemonic == "nop"
+            || prev.mnemonic == "ud2";
+
+        if prev_is_terminator {
+            entry_points.insert(insn.address);
+            names.entry(insn.address).or_insert_with(|| {
+                (
+                    format!("sub_{:x}", insn.address),
+                    FunctionSource::Prologue,
+                )
+            });
+        }
+    }
+}
+
 fn is_x86_prologue(
     insn: &DisassembledInstruction,
     next: Option<&DisassembledInstruction>,
 ) -> bool {
-    // push rbp/ebp; mov rbp/ebp, rsp/esp
+    // push rbp/ebp ; mov rbp/ebp, rsp/esp
     if insn.mnemonic == "push" && (insn.operands == "rbp" || insn.operands == "ebp") {
         if let Some(next) = next {
             if next.mnemonic == "mov"
@@ -221,6 +323,21 @@ fn is_x86_prologue(
     // endbr64/endbr32 (CET prologues)
     if insn.mnemonic == "endbr64" || insn.mnemonic == "endbr32" {
         return true;
+    }
+    // MSVC x86 hotpatch prologue: mov edi, edi ; {push ebp | sub esp, N}
+    // The 2-byte `mov edi, edi` is emitted by MSVC (/hotpatch) so that live
+    // patches can replace it with a short jump to a trampoline.
+    if insn.mnemonic == "mov" && insn.operands == "edi, edi" {
+        if let Some(n1) = next {
+            if n1.mnemonic == "push" && (n1.operands == "ebp" || n1.operands == "rbp") {
+                return true;
+            }
+            if n1.mnemonic == "sub"
+                && (n1.operands.starts_with("esp,") || n1.operands.starts_with("rsp,"))
+            {
+                return true;
+            }
+        }
     }
     false
 }
@@ -256,7 +373,7 @@ fn is_call_instruction(mnemonic: &str) -> bool {
     )
 }
 
-fn is_return_instruction(mnemonic: &str) -> bool {
+pub(crate) fn is_return_instruction(mnemonic: &str) -> bool {
     matches!(mnemonic, "ret" | "retq" | "retn" | "bx lr" | "jr ra")
         || mnemonic == "retf"
         || mnemonic == "iret"
@@ -264,7 +381,7 @@ fn is_return_instruction(mnemonic: &str) -> bool {
         || mnemonic == "iretq"
 }
 
-fn is_unconditional_jump(mnemonic: &str) -> bool {
+pub(crate) fn is_unconditional_jump_mnemonic(mnemonic: &str) -> bool {
     matches!(mnemonic, "jmp" | "b" | "j" | "ba")
 }
 
