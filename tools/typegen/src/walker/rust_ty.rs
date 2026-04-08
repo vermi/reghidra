@@ -81,6 +81,13 @@ pub fn rust_type_to_ref(ty: &Type, ctx: TypeCtx) -> TypeRef {
         // `()` — unit, i.e. void return.
         Type::Tuple(t) if t.elems.is_empty() => TypeRef::Primitive(Primitive::Void),
 
+        // `!` — never type, used in `extern fn _exit(status: c_int) -> !`
+        // and similar noreturn declarations. Reghidra has no noreturn
+        // marker yet, so degrade to void; the caller will treat the
+        // function as void-returning, which is the correct C ABI mapping
+        // for a noreturn function.
+        Type::Never(_) => TypeRef::Primitive(Primitive::Void),
+
         // `path::to::Name` — could be a primitive scalar or a named
         // type. The primitive match is order-sensitive because some
         // scalars (e.g. `c_char`, `c_void`) show up as path-qualified
