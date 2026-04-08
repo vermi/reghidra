@@ -341,9 +341,20 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                         new_hovered = Some(insn.address);
                     }
 
-                    // Right-click context menu — make the row sense clicks so
-                    // the menu can attach to it.
+                    // Make the whole row sense clicks. This serves two
+                    // purposes:
+                    //   1. Attaches the right-click context menu to the row.
+                    //   2. Catches left-clicks anywhere on the row (address,
+                    //      bytes, operands, whitespace) and navigates to the
+                    //      instruction. Without this, only the narrow address
+                    //      link was navigable — and in practice the outer
+                    //      `.interact(Sense::click())` swallowed the click
+                    //      before the inner link saw it, so clicking the
+                    //      disasm row appeared to do nothing.
                     let resp = resp.interact(egui::Sense::click());
+                    if resp.clicked() {
+                        navigate_to = Some(insn.address);
+                    }
                     let is_func_entry =
                         project.analysis.function_at(insn.address).is_some();
                     let rename_kind = if is_func_entry {
