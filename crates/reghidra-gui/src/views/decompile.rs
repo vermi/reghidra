@@ -438,6 +438,39 @@ fn tokenize_line(
         }
     }
 
+    // 1b. Global data references: "g_dat_XXXX" — extract the hex tail and
+    //     make the whole identifier a clickable hex address. These are
+    //     emitted by the decompiler for bare constant-address Loads/Stores
+    //     (see `memory_access_expr` in reghidra-decompile::expr_builder).
+    let mut search_from = 0;
+    while let Some(pos) = text[search_from..].find("g_dat_") {
+        let abs_pos = search_from + pos;
+        // Whole-word check on the left — don't match inside a larger ident.
+        let before_ok = abs_pos == 0
+            || !text.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                && text.as_bytes()[abs_pos - 1] != b'_';
+        if before_ok {
+            let hex_start = abs_pos + 6;
+            let hex_end = text[hex_start..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .map(|p| hex_start + p)
+                .unwrap_or(text.len());
+            if hex_end > hex_start {
+                if let Ok(addr) = u64::from_str_radix(&text[hex_start..hex_end], 16) {
+                    tokens.push(ClickableToken {
+                        start: abs_pos,
+                        end: hex_end,
+                        target_addr: addr,
+                        kind: TokenKind::HexAddress,
+                    });
+                }
+            }
+            search_from = hex_end.max(abs_pos + 6);
+        } else {
+            search_from = abs_pos + 6;
+        }
+    }
+
     // 2. Goto/label references: "label_XXXX"
     let mut search_from = 0;
     while let Some(pos) = text[search_from..].find("label_") {
