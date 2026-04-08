@@ -1,14 +1,40 @@
 use crate::analysis::bundled_sigs;
 use crate::analysis::flirt::FlirtDatabase;
 use crate::analysis::AnalysisResults;
-use crate::binary::LoadedBinary;
+use crate::arch::Architecture;
+use crate::binary::{BinaryFormat, BinaryInfo, LoadedBinary};
 use crate::disasm::{DisassembledInstruction, Disassembler};
 use crate::error::CoreError;
-use crate::types::{self as type_archives, TypeArchive};
+use reghidra_decompile::type_archive::{self, TypeArchive};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Archive stems to load for a given binary format and architecture. This
+/// lives in `reghidra-core` rather than `reghidra-decompile::type_archive`
+/// because it's the only place [`BinaryFormat`] and [`Architecture`] are
+/// in scope — the decompile crate sits below core in the dep graph.
+fn archive_stems_for(info: &BinaryInfo) -> Vec<&'static str> {
+    match (info.format, info.architecture) {
+        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64", "ucrt"],
+        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86", "ucrt"],
+        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64", "ucrt"],
+        (BinaryFormat::Elf, _) => vec!["posix"],
+        (BinaryFormat::MachO, _) => vec!["posix"],
+        _ => vec![],
+    }
+}
+
+/// Load all type archives matching a binary's format and architecture.
+/// Missing archives are silently skipped — expected during early Phase 5c
+/// PRs when the `types/` tree is empty or partial.
+fn load_type_archives(info: &BinaryInfo) -> Vec<Arc<TypeArchive>> {
+    archive_stems_for(info)
+        .into_iter()
+        .filter_map(type_archive::load_embedded)
+        .collect()
+}
 
 /// A reghidra project: a loaded binary with its analysis results.
 pub struct Project {
@@ -76,7 +102,7 @@ impl Project {
         // early Phase 5c PRs; the loader tolerates that and returns an empty
         // vec. Nothing in the pipeline consumes these yet — they're wired
         // in by later PRs (arity capping, typed VarDecls, retype UI).
-        let type_archives = type_archives::load_bundled(&binary.info);
+        let type_archives = load_type_archives(&binary.info);
 
         Ok(Self {
             binary,
@@ -278,9 +304,14 @@ impl Project {
             label_names: self.label_names.clone(),
             variable_names: var_names_for_func,
             current_function_display_name: self.current_function_display_name(entry, &ir.name),
+            type_archives: self.type_archives.clone(),
         };
 
-        Some(reghidra_decompile::decompile(ir, &ctx))
+        // The FrameLayout returned here is currently discarded at the
+        // project boundary — consumers that need it (arity capping, typed
+        // decls, retype UI) are wired up in later Phase 5c PRs and will
+        // grow their own project-level accessors at that time.
+        Some(reghidra_decompile::decompile(ir, &ctx).text)
     }
 
     /// Decompile the function at the given entry address, returning annotated
@@ -321,9 +352,12 @@ impl Project {
             label_names: self.label_names.clone(),
             variable_names: var_names_for_func,
             current_function_display_name: self.current_function_display_name(entry, &ir.name),
+            type_archives: self.type_archives.clone(),
         };
 
-        Some(reghidra_decompile::decompile_annotated(ir, &ctx))
+        // Same frame-layout discard as `decompile` above — see that comment.
+        let annotated = reghidra_decompile::decompile_annotated(ir, &ctx);
+        Some((annotated.lines, annotated.variable_names))
     }
 
     /// Get all detected functions with display names.

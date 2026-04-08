@@ -2866,7 +2866,6 @@ dependencies = [
  "include_dir",
  "log",
  "msvc-demangler",
- "postcard",
  "reghidra-decompile",
  "reghidra-ir",
  "serde",
@@ -2878,7 +2877,9 @@ dependencies = [
 name = "reghidra-decompile"
 version = "1.4.0"
 dependencies = [
+ "include_dir",
  "log",
+ "postcard",
  "reghidra-ir",
  "serde",
  "thiserror 2.0.18",

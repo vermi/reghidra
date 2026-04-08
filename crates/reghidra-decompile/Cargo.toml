@@ -8,3 +8,5 @@ reghidra-ir = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 log = { workspace = true }
+include_dir = { workspace = true }
+postcard = { workspace = true }

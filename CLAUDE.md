@@ -44,7 +44,10 @@ reghidra/
 │   │       ├── stackframe.rs           # Frame detection, local_/arg_ slots, prologue cleanup
 │   │       ├── structuring.rs          # CFG → if/else/while/goto
 │   │       ├── varnames.rs             # Register/temp renaming, canonical_reg_name
-│   │       ├── types.rs                # (stub — replaced in Phase 5c)
+│   │       ├── types.rs                # Varnode → CType inference (stub)
+│   │       ├── type_archive/           # Phase 5c: bundled type archives
+│   │       │   ├── mod.rs              # TypeArchive, FunctionType, TypeRef, load_embedded
+│   │       │   └── archive.rs          # postcard (de)serialization + version gate
 │   │       └── emit.rs                 # AST → C-like text (style + blank-line separators)
 │   ├── reghidra-gui/
 │   │   └── src/
