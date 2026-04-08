@@ -16,17 +16,39 @@
 //! serde defaults).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Must match `reghidra_decompile::type_archive::ARCHIVE_VERSION`.
 pub const ARCHIVE_VERSION: u32 = 1;
+
+// Why `BTreeMap` here but `HashMap` on the runtime side?
+//
+// This is the TOOL side: it serializes archives into bytes that get
+// checked into the repo and diffed by the CI drift check. `HashMap`'s
+// iteration order is randomized per-process (SipHash with a random
+// seed), so two runs of the tool with identical input would produce
+// different byte sequences and the drift check would fail spuriously
+// on every CI run. `BTreeMap` iterates in sorted key order, giving
+// byte-stable output.
+//
+// The runtime side (`reghidra-decompile::type_archive`) deserializes
+// these bytes into its own maps. Postcard's wire format for both
+// `HashMap<K, V>` and `BTreeMap<K, V>` is the same: a length-prefixed
+// sequence of (K, V) pairs. So the runtime can use whichever
+// collection is ergonomic there (currently `HashMap` — no ordering
+// needs at lookup time) without affecting the archive format or
+// breaking compatibility with the tool-produced bytes.
+//
+// If you change the runtime side to `BTreeMap`, nothing here needs
+// to change. If you change this side to `HashMap`, CI drift checks
+// will start failing on every run and you'll have a bad time.
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TypeArchive {
     pub name: String,
     pub version: u32,
-    pub functions: HashMap<String, FunctionType>,
-    pub types: HashMap<String, TypeDef>,
+    pub functions: BTreeMap<String, FunctionType>,
+    pub types: BTreeMap<String, TypeDef>,
 }
 
 impl TypeArchive {
@@ -34,8 +56,8 @@ impl TypeArchive {
         Self {
             name: name.into(),
             version: ARCHIVE_VERSION,
-            functions: HashMap::new(),
-            types: HashMap::new(),
+            functions: BTreeMap::new(),
+            types: BTreeMap::new(),
         }
     }
 }
