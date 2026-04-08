@@ -36,6 +36,7 @@
 //!   `rbp`/`rsp` (not `frame_pointer` or whatever a rename might produce).
 
 use crate::ast::{BinOp, CType, Expr, Stmt};
+use crate::type_archive::{type_ref_to_ctype, FunctionType};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -74,7 +75,22 @@ pub struct FrameLayout {
 /// Analyze the function body, rewrite recognized stack accesses, drop the
 /// prologue bookkeeping, and prepend `VarDecl` statements for the discovered
 /// slots. Returns the rewritten body and the layout that was built.
-pub fn analyze_and_rewrite(body: Vec<Stmt>) -> (Vec<Stmt>, FrameLayout) {
+///
+/// `prototype` is an optional prototype for the *current* function from
+/// the bundled type archive. When provided, the discovered positive-offset
+/// slots (the function's incoming arguments on x86-32 cdecl/stdcall) are
+/// matched against the prototype's parameter list in declaration order,
+/// and each slot's `ctype` is populated from the prototype. This makes
+/// the prepended `VarDecl`s render with concrete types like
+/// `HANDLE arg_8;` instead of `unk32 arg_8;`. Slot *names* are NOT
+/// rewritten in this PR — using the prototype's parameter names
+/// (`HANDLE hProcess`) requires a body-level rename pass that's
+/// scoped for a follow-up. Slot offsets without a matching prototype
+/// arg keep their `Unknown(size)` type as before.
+pub fn analyze_and_rewrite(
+    body: Vec<Stmt>,
+    prototype: Option<&FunctionType>,
+) -> (Vec<Stmt>, FrameLayout) {
     let mut layout = FrameLayout::default();
 
     // Step 1: look for the canonical `rbp = rsp` assignment anywhere in the
@@ -108,12 +124,64 @@ pub fn analyze_and_rewrite(body: Vec<Stmt>) -> (Vec<Stmt>, FrameLayout) {
     // references it anymore).
     let body = strip_prologue_and_dead_temps(body, &temp_offsets, &surviving_temp_uses);
 
-    // Step 5: emit `VarDecl` statements at the top of the body for every
+    // Step 5: apply prototype types to incoming-argument slots, if a
+    // prototype is available. Done before VarDecl emission so the
+    // emitted decls pick up the typed `ctype` automatically.
+    if let Some(proto) = prototype {
+        apply_prototype_arg_types(&mut layout, proto);
+    }
+
+    // Step 6: emit `VarDecl` statements at the top of the body for every
     // slot we discovered. These give users a visible "variables list" like
     // Ghidra's, and become the handle for retyping in Phase 5c.
     let body = prepend_var_decls(body, &layout);
 
     (body, layout)
+}
+
+/// Walk the discovered positive-offset (incoming-argument) slots in
+/// ascending offset order and pair them with the prototype's parameter
+/// list, assigning each slot's `ctype` from the corresponding
+/// prototype arg.
+///
+/// On x86-32 cdecl/stdcall, the caller pushes arguments right-to-left
+/// before the call, so the callee sees them at consecutive `ebp+8`,
+/// `ebp+c`, `ebp+10`, ... offsets in declaration order. The walker
+/// pairs them positionally — slot at smallest positive offset → arg
+/// 0, next → arg 1, and so on. This is correct for the common case
+/// where every argument fits in a single 4-byte stack slot. For
+/// large argument types (`int64_t`, structs > 4 bytes), the
+/// alignment between slots and prototype args drifts after the first
+/// such argument; the walker stops typing slots beyond the drift
+/// rather than misattributing types past it.
+///
+/// On x86-64 (both Win64 and SysV), most arguments arrive in
+/// registers and don't appear as positive-offset stack slots at all.
+/// The mapping is correct for the few stack-resident args (7th
+/// onwards on SysV, after the shadow space on Win64), but most
+/// prototype args have no slot to type. Functions whose first six
+/// args fit in registers therefore see no benefit from this pass on
+/// x64 — the wins are concentrated in 32-bit Win32 binaries, which
+/// are the most common reverse-engineering target anyway.
+fn apply_prototype_arg_types(layout: &mut FrameLayout, proto: &FunctionType) {
+    // Collect arg-slot offsets in ascending order. `BTreeMap`'s
+    // natural iteration is sorted, so we just need to skip the
+    // negatives (locals).
+    let arg_offsets: Vec<i64> = layout
+        .slots
+        .keys()
+        .copied()
+        .filter(|k| *k > 0)
+        .collect();
+
+    // Pair slots with prototype args positionally. Stop on the
+    // shorter of the two — extra slots stay as `Unknown(size)` and
+    // extra prototype args have no slot to attach to.
+    for (slot_offset, proto_arg) in arg_offsets.iter().zip(proto.args.iter()) {
+        if let Some(slot) = layout.slots.get_mut(slot_offset) {
+            slot.ctype = Some(type_ref_to_ctype(&proto_arg.ty));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +647,7 @@ mod tests {
         // No `rbp = rsp` assignment anywhere — pass should return the body
         // unchanged and an empty layout.
         let body = vec![assign(var("eax"), int(1))];
-        let (out, layout) = analyze_and_rewrite(body.clone());
+        let (out, layout) = analyze_and_rewrite(body.clone(), None);
         assert!(!layout.has_frame_pointer);
         assert!(layout.slots.is_empty());
         assert_eq!(out.len(), body.len());
@@ -598,7 +666,7 @@ mod tests {
                 var("eax"),
             ),
         ];
-        let (out, layout) = analyze_and_rewrite(body);
+        let (out, layout) = analyze_and_rewrite(body, None);
         assert!(layout.has_frame_pointer);
         assert_eq!(layout.slots.len(), 1);
         let slot = layout.slots.values().next().unwrap();
@@ -623,7 +691,7 @@ mod tests {
             ),
             assign(deref(var("t0")), var("eax")),
         ];
-        let (out, layout) = analyze_and_rewrite(body);
+        let (out, layout) = analyze_and_rewrite(body, None);
         assert!(layout.has_frame_pointer);
         let slot = layout.slots.get(&8).expect("slot at +8 should exist");
         assert_eq!(slot.name, "arg_8");
@@ -646,7 +714,7 @@ mod tests {
                 deref(Expr::Binary(BinOp::Add, Box::new(var("rbp")), Box::new(int(8)))),
             ),
         ];
-        let (out, layout) = analyze_and_rewrite(body);
+        let (out, layout) = analyze_and_rewrite(body, None);
         assert_eq!(layout.slots.len(), 2);
         let decl_count = out.iter().filter(|s| matches!(s, Stmt::VarDecl { .. })).count();
         assert_eq!(decl_count, 2);
@@ -665,7 +733,7 @@ mod tests {
                 deref(Expr::Binary(BinOp::Sub, Box::new(var("rbp")), Box::new(int(0x10)))),
             ),
         ];
-        let (_, layout) = analyze_and_rewrite(body);
+        let (_, layout) = analyze_and_rewrite(body, None);
         let slot = layout.slots.get(&-0x10).unwrap();
         assert_eq!(slot.ref_count, 2);
     }
@@ -686,7 +754,85 @@ mod tests {
             // Here t0 is used as a value, not as a deref address.
             assign(var("eax"), var("t0")),
         ];
-        let (out, _layout) = analyze_and_rewrite(body);
+        let (out, _layout) = analyze_and_rewrite(body, None);
         assert!(has_var(&out, "t0"), "t0 defn was dropped but it has a live non-address use");
+    }
+
+    /// When a prototype is supplied for the current function, the
+    /// stackframe pass should pair its arg slots with the prototype's
+    /// parameter list (smallest positive offset → arg 0, etc.) and
+    /// populate each slot's `ctype` from the corresponding prototype
+    /// arg's type. The slot *names* stay as `arg_8`/`arg_c`/etc. for
+    /// PR 4 — name renaming is a follow-up — but the prepended
+    /// `VarDecl`s now carry concrete types.
+    #[test]
+    fn prototype_arg_types_propagate_to_slots() {
+        use crate::type_archive::{
+            ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn, Primitive,
+            TypeRef,
+        };
+
+        // Two args: arg[0] is HANDLE (Named), arg[1] is uint32_t.
+        let proto = ArchiveFn {
+            name: "TerminateProcess".to_string(),
+            args: vec![
+                ArchiveArg {
+                    name: "hProcess".to_string(),
+                    ty: TypeRef::Named("HANDLE".to_string()),
+                },
+                ArchiveArg {
+                    name: "uExitCode".to_string(),
+                    ty: TypeRef::Primitive(Primitive::UInt32),
+                },
+            ],
+            return_type: TypeRef::Primitive(Primitive::Bool),
+            calling_convention: CallingConvention::Stdcall,
+            is_variadic: false,
+        };
+
+        // Body that touches arg_8 and arg_c.
+        let body = vec![
+            assign(var("rbp"), var("rsp")),
+            assign(
+                var("eax"),
+                deref(Expr::Binary(BinOp::Add, Box::new(var("rbp")), Box::new(int(8)))),
+            ),
+            assign(
+                var("edx"),
+                deref(Expr::Binary(BinOp::Add, Box::new(var("rbp")), Box::new(int(0xc)))),
+            ),
+        ];
+        let (out, layout) = analyze_and_rewrite(body, Some(&proto));
+
+        // Two arg slots discovered.
+        let arg_slots: Vec<&StackSlot> =
+            layout.slots.values().filter(|s| s.offset > 0).collect();
+        assert_eq!(arg_slots.len(), 2);
+
+        // First slot (offset 8) should be Named("HANDLE").
+        let slot8 = layout.slots.get(&8).expect("arg slot at +8");
+        match &slot8.ctype {
+            Some(CType::Named(n)) => assert_eq!(n, "HANDLE"),
+            other => panic!("arg_8 ctype should be Named(HANDLE), got {other:?}"),
+        }
+
+        // Second slot (offset 12) should be UInt32.
+        let slot_c = layout.slots.get(&0xc).expect("arg slot at +c");
+        assert!(matches!(slot_c.ctype, Some(CType::UInt32)));
+
+        // The prepended VarDecls should carry these types.
+        let decl_for = |name: &str| -> Option<&Stmt> {
+            out.iter().find(|s| {
+                matches!(s, Stmt::VarDecl { name: n, .. } if n == name)
+            })
+        };
+        assert!(decl_for("arg_8").is_some(), "arg_8 VarDecl missing");
+        assert!(decl_for("arg_c").is_some(), "arg_c VarDecl missing");
+        if let Some(Stmt::VarDecl { ctype, .. }) = decl_for("arg_8") {
+            assert!(matches!(ctype, CType::Named(n) if n == "HANDLE"));
+        }
+        if let Some(Stmt::VarDecl { ctype, .. }) = decl_for("arg_c") {
+            assert!(matches!(ctype, CType::UInt32));
+        }
     }
 }

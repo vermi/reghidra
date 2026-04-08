@@ -111,14 +111,35 @@ pub fn build_statements(
                         .get(target)
                         .cloned()
                         .unwrap_or_else(|| format!("sub_{target:x}"));
-                    let args = drain_pending_as_args(&mut pending_stack_writes);
+                    // Arity cap: if the callee has a known prototype in
+                    // the bundled type archives, truncate the pending
+                    // stack writes to that fixed arity so unrelated
+                    // over-pushes from earlier code don't get
+                    // misattributed as arguments to this call. Variadic
+                    // functions opt out — we can't safely cap them.
+                    let max_args = ctx
+                        .lookup_prototype(&func_name)
+                        .filter(|p| !p.is_variadic)
+                        .map(|p| p.args.len());
+                    let args = drain_pending_for_call(
+                        &mut stmts,
+                        &mut pending_stack_writes,
+                        max_args,
+                    );
                     stmts.push(Stmt::ExprStmt(Expr::Call(
                         Box::new(Expr::Var(func_name)),
                         args,
                     )));
                 }
                 IrOp::CallInd { target } => {
-                    let args = drain_pending_as_args(&mut pending_stack_writes);
+                    // Indirect calls can't be looked up in the archive —
+                    // we don't know the target statically. Fall through
+                    // to the uncapped drain.
+                    let args = drain_pending_for_call(
+                        &mut stmts,
+                        &mut pending_stack_writes,
+                        None,
+                    );
                     stmts.push(Stmt::ExprStmt(Expr::Call(
                         Box::new(varnode_to_expr(target)),
                         args,
@@ -236,13 +257,55 @@ fn memory_access_expr(addr: &VarNode, size: u8, ctx: &DecompileContext) -> Expr 
 /// Pushes happen in reverse order relative to the source-level argument
 /// list (the first argument is the *last* push before the call), so we
 /// reverse here to restore source order.
-fn drain_pending_as_args(pending: &mut Vec<(VarNode, VarNode)>) -> Vec<Expr> {
-    let args: Vec<Expr> = pending
+/// Convert the pending stack-write queue into an argument list for a
+/// Call, honoring an optional arity cap.
+///
+/// Pending writes are in chronological order: the oldest push is at
+/// index 0, the most recent push is at the end. On x86 cdecl /
+/// stdcall, arguments are pushed right-to-left, so the LAST push
+/// chronologically is arg1 and the FIRST push is argN. Reversing
+/// gives source order [arg1, arg2, ..., argN].
+///
+/// When `max_args` is `Some(n)` and the queue has more than `n`
+/// entries, the excess is almost always unrelated: a previous push
+/// that wasn't consumed by its intended call because our lifter
+/// doesn't track which push belongs to which callee. Rather than
+/// misattribute those pushes as args to the current call (the
+/// Phase 5b `GetCurrentProcess(0xc0000409)` / `TerminateProcess`
+/// regression), we flush the overflow as plain `*(rsp) = x` store
+/// statements so the code still parses and readers can see what
+/// the extra push was carrying. Only the last `n` items get consumed
+/// as arguments.
+///
+/// `max_args = None` disables the cap — used for indirect calls
+/// (unknown target) and for direct calls whose target isn't in the
+/// bundled archives.
+fn drain_pending_for_call(
+    stmts: &mut Vec<Stmt>,
+    pending: &mut Vec<(VarNode, VarNode)>,
+    max_args: Option<usize>,
+) -> Vec<Expr> {
+    if let Some(cap) = max_args {
+        if pending.len() > cap {
+            // Flush the overflow (oldest pushes first) as plain
+            // stores. The cap-sized tail stays in the queue and gets
+            // drained below.
+            let overflow_len = pending.len() - cap;
+            let overflow: Vec<(VarNode, VarNode)> = pending.drain(..overflow_len).collect();
+            for (addr, src) in overflow {
+                let lhs = Expr::Deref(
+                    Box::new(varnode_to_expr(&addr)),
+                    CType::from_size(src.size, false),
+                );
+                stmts.push(Stmt::Assign(lhs, varnode_to_expr(&src)));
+            }
+        }
+    }
+    pending
         .drain(..)
         .rev()
         .map(|(_, src)| varnode_to_expr(&src))
-        .collect();
-    args
+        .collect()
 }
 
 fn emit_binop(stmts: &mut Vec<Stmt>, dst: &VarNode, a: &VarNode, b: &VarNode, op: BinOp) {
@@ -500,6 +563,188 @@ mod tests {
                 assert_eq!(name, "GetLastError");
             }
             other => panic!("expected function-name Var rhs, got {other:?}"),
+        }
+    }
+
+    /// Regression test for the Phase 5b "GetCurrentProcess(0xc0000409);
+    /// TerminateProcess" misattribution case. Prior to arity capping,
+    /// a stray push that wasn't consumed by its real target would get
+    /// merged into the arg list of the next call whose arity happened
+    /// to match, producing output like `GetCurrentProcess(0xc0000409)`
+    /// even though `GetCurrentProcess` is a 0-arg function.
+    ///
+    /// With arity capping, the zero-arg call sees the overflow,
+    /// flushes it as a plain `*(esp) = ...` store, and consumes no
+    /// args from the queue. The subsequent 2-arg call then reads the
+    /// args it actually expects.
+    #[test]
+    fn arity_cap_flushes_overflow_and_caps_args() {
+        use crate::type_archive::{
+            ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn,
+            Primitive, TypeArchive, TypeRef,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        // Build a minimal archive with GetCurrentProcess (0 args) and
+        // TerminateProcess (2 args).
+        let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
+        functions.insert(
+            "GetCurrentProcess".to_string(),
+            ArchiveFn {
+                name: "GetCurrentProcess".to_string(),
+                args: vec![],
+                return_type: TypeRef::Primitive(Primitive::UInt64),
+                calling_convention: CallingConvention::Win64,
+                is_variadic: false,
+            },
+        );
+        functions.insert(
+            "TerminateProcess".to_string(),
+            ArchiveFn {
+                name: "TerminateProcess".to_string(),
+                args: vec![
+                    ArchiveArg {
+                        name: "hProcess".to_string(),
+                        ty: TypeRef::Primitive(Primitive::UInt64),
+                    },
+                    ArchiveArg {
+                        name: "uExitCode".to_string(),
+                        ty: TypeRef::Primitive(Primitive::UInt32),
+                    },
+                ],
+                return_type: TypeRef::Primitive(Primitive::Bool),
+                calling_convention: CallingConvention::Win64,
+                is_variadic: false,
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".to_string(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types: HashMap::new(),
+        });
+
+        // IR mimicking the Phase 5b regression:
+        //   push 0xc0000409        ; leftover push from earlier code
+        //   call GetCurrentProcess  ; 0-arg function
+        //   push 0xdeadbeef         ; real arg 2 to TerminateProcess
+        //   push 0xfeedface         ; real arg 1 to TerminateProcess
+        //   call TerminateProcess   ; 2-arg function
+        let ir = mk_ir(vec![
+            IrOp::Store {
+                addr: rsp4(),
+                src: VarNode::constant(0xc0000409, 4),
+            },
+            IrOp::Call { target: 0x2000 },
+            IrOp::Store {
+                addr: rsp4(),
+                src: VarNode::constant(0xdeadbeef, 4),
+            },
+            IrOp::Store {
+                addr: rsp4(),
+                src: VarNode::constant(0xfeedface, 4),
+            },
+            IrOp::Call { target: 0x3000 },
+        ]);
+
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x2000, "GetCurrentProcess".to_string());
+        ctx.function_names.insert(0x3000, "TerminateProcess".to_string());
+        ctx.type_archives = vec![archive];
+
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+
+        // Expected sequence:
+        //   1. *(esp) = 0xc0000409     (overflow flushed by 0-arg cap)
+        //   2. GetCurrentProcess()     (called with zero args)
+        //   3. TerminateProcess(0xfeedface, 0xdeadbeef)
+        assert_eq!(
+            stmts.len(),
+            3,
+            "expected [overflow store, GetCurrentProcess(), TerminateProcess(...)], got {stmts:#?}"
+        );
+        assert!(
+            matches!(stmts[0], Stmt::Assign(..)),
+            "first stmt should be the flushed overflow push, got {:?}",
+            stmts[0]
+        );
+        match &stmts[1] {
+            Stmt::ExprStmt(Expr::Call(callee, args)) => {
+                assert!(
+                    matches!(**callee, Expr::Var(ref n) if n == "GetCurrentProcess")
+                );
+                assert!(
+                    args.is_empty(),
+                    "GetCurrentProcess should have 0 args, got {args:?}"
+                );
+            }
+            other => panic!("expected GetCurrentProcess call, got {other:?}"),
+        }
+        match &stmts[2] {
+            Stmt::ExprStmt(Expr::Call(callee, args)) => {
+                assert!(
+                    matches!(**callee, Expr::Var(ref n) if n == "TerminateProcess")
+                );
+                assert_eq!(args.len(), 2, "TerminateProcess should have 2 args");
+            }
+            other => panic!("expected TerminateProcess call, got {other:?}"),
+        }
+    }
+
+    /// Variadic functions (printf, etc.) opt out of arity capping:
+    /// we can't safely cap them because the trailing `...` can consume
+    /// an arbitrary number of pushed args. Verify that a variadic
+    /// prototype in the archive does NOT trigger the cap.
+    #[test]
+    fn variadic_functions_skip_arity_cap() {
+        use crate::type_archive::{
+            CallingConvention, FunctionType as ArchiveFn, Primitive, TypeArchive, TypeRef,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
+        functions.insert(
+            "printf".to_string(),
+            ArchiveFn {
+                name: "printf".to_string(),
+                // Fixed arity of 1 (the format string) + variadic tail.
+                args: vec![crate::type_archive::ArgType {
+                    name: "fmt".to_string(),
+                    ty: TypeRef::Pointer(Box::new(TypeRef::Primitive(Primitive::Char))),
+                }],
+                return_type: TypeRef::Primitive(Primitive::Int32),
+                calling_convention: CallingConvention::Cdecl,
+                is_variadic: true,
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".to_string(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types: HashMap::new(),
+        });
+
+        // push 3; push 2; push 1; call printf — all three should become args.
+        let ir = mk_ir(vec![
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(3, 4) },
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(2, 4) },
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(1, 4) },
+            IrOp::Call { target: 0x2000 },
+        ]);
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x2000, "printf".to_string());
+        ctx.type_archives = vec![archive];
+
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        assert_eq!(stmts.len(), 1, "expected single Call stmt, got {stmts:#?}");
+        if let Stmt::ExprStmt(Expr::Call(_, args)) = &stmts[0] {
+            assert_eq!(args.len(), 3, "variadic printf should get all 3 args, not capped to 1");
+        } else {
+            panic!("expected Call, got {:?}", stmts[0]);
         }
     }
 }

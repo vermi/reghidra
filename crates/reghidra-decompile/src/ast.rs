@@ -101,6 +101,12 @@ pub enum CType {
     Int64,
     UInt64,
     Pointer(Box<CType>),
+    /// Named type from the bundled archives (e.g. `HANDLE`, `DWORD`,
+    /// `LPCSTR`, or `size_t`). The name is what gets rendered in the
+    /// decompile output verbatim — consumers that need to know the
+    /// underlying width should resolve the name via the archive's
+    /// `types` map on demand rather than carrying the expansion here.
+    Named(String),
     /// Unknown type with a byte size
     Unknown(u8),
 }
@@ -128,6 +134,11 @@ impl CType {
             CType::Int16 | CType::UInt16 => 2,
             CType::Int32 | CType::UInt32 => 4,
             CType::Int64 | CType::UInt64 | CType::Pointer(_) => 8,
+            // Named types fall through to 0 because the decompile
+            // emit layer doesn't use the width — it just prints the
+            // name. Callers that need an actual size for layout
+            // should resolve the name via the archive's `types` map.
+            CType::Named(_) => 0,
             CType::Unknown(s) => *s,
         }
     }
@@ -146,6 +157,7 @@ impl std::fmt::Display for CType {
             CType::Int64 => write!(f, "int64_t"),
             CType::UInt64 => write!(f, "uint64_t"),
             CType::Pointer(inner) => write!(f, "{inner}*"),
+            CType::Named(name) => write!(f, "{name}"),
             CType::Unknown(s) => write!(f, "unk{}", s * 8),
         }
     }
