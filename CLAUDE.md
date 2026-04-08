@@ -131,7 +131,7 @@ reghidra/
 - [x] Help discoverable via command palette (Cmd+K → "Help")
 - [x] Status bar hint for help shortcut
 
-### Phase 5b — Decompiler Quality (in progress on `feature/ida-sigs-and-til`)
+### Phase 5b — Decompiler Quality (in progress on `feature/decompiler-quality-v2`)
 - [x] Merge IDA FLIRT sig packs (86 added) into bundled `signatures/` tree, IDA-precedence ordering at load time
 - [x] Fix FLIRT `IDASIG_FUNCTION_UNRESOLVED_COLLISION` (0x08) so collision-placeholder names don't leak through as `?`
 - [x] Resolve PE IAT call targets (`call [imm]` x86-32 and `call [rip+disp]` x86-64) — emits `Call { target: iat_addr }` and `project::decompile` merges `binary.import_addr_map` into `function_names`
@@ -142,9 +142,9 @@ reghidra/
 - [ ] Stack frame analysis: turn `*(rsp)` / `*(rbp+N)` references into named locals/params, eliminate the last visible `rsp`/`rbp` from output
 - [ ] Type library loader (Ghidra GDT format preferred; .til parser is undocumented and licensing is grey). Wins: arity capping for stack-arg collapsing (avoids over-attribution like `GetCurrentProcess(0xc0000409)` when followed by `TerminateProcess`), and typed parameter display
 - [ ] Global data naming: `0x40dfd8` → `g_dat_40dfd8` or PDB symbol where available
-- [ ] RMW memory destinations in `lift_binop`/`lift_inc_dec`/`lift_not`/`lift_neg` (latent bug — they still call `parse_operand` and use the result as both source and destination, which produces nonsense for memory operands)
+- [x] RMW memory destinations in `lift_binop`/`lift_xor`/`lift_inc_dec`/`lift_not`/`lift_neg` — new `rmw_begin`/`rmw_end` helpers load current value into a temp, perform the op on the temp, and store the result back. Register destinations unchanged (no spurious Load/Store).
+- [x] `leave`/`pushfd`/`pushfq`/`popfd`/`popfq` lifter intrinsics (previously `/* unimpl */`)
 - [ ] MSVC C++ name demangling for display (e.g. `?strtoxl@@YAKPAUlocaleinfo_struct@@PBDPAPBDHH@Z`) — try the `msvc-demangler` crate; keep mangled name as canonical
-- [ ] `pushfd`/`leave` lifter intrinsics (currently `/* unimpl */`)
 
 ### Phase 6 — Extensibility + Scripting
 - [ ] Lua scripting API

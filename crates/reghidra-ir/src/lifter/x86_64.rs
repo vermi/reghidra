@@ -97,6 +97,9 @@ fn lift_instruction(ctx: &mut LiftContext, insn: &DisasmInput) {
         "nop" | "endbr64" | "endbr32" => {
             ctx.emit(IrOp::Nop);
         }
+        "leave" | "leaveq" => lift_leave(ctx),
+        "pushfd" | "pushfq" | "pushf" => lift_pushf(ctx),
+        "popfd" | "popfq" | "popf" => lift_popf(ctx),
         "cdqe" => {
             // sign extend eax to rax
             let eax = VarNode::reg(regs::RAX, 4);
@@ -217,6 +220,42 @@ fn lift_push(ctx: &mut LiftContext, operands: &str) {
     ctx.emit(IrOp::Store { addr: rsp, src });
 }
 
+/// `leave` == `mov rsp, rbp; pop rbp`. Restores the caller's frame pointer
+/// and tears down the current stack frame in one instruction.
+fn lift_leave(ctx: &mut LiftContext) {
+    let rsp = VarNode::reg(regs::RSP, 8);
+    let rbp = VarNode::reg(regs::RBP, 8);
+    let eight = VarNode::constant(8, 8);
+    // rsp = rbp
+    ctx.emit(IrOp::Copy { dst: rsp.clone(), src: rbp.clone() });
+    // rbp = *rsp
+    ctx.emit(IrOp::Load { dst: rbp, addr: rsp.clone() });
+    // rsp += 8
+    ctx.emit(IrOp::IntAdd { dst: rsp.clone(), a: rsp, b: eight });
+}
+
+/// `pushf`/`pushfd`/`pushfq` — push the flags register onto the stack.
+fn lift_pushf(ctx: &mut LiftContext) {
+    let rsp = VarNode::reg(regs::RSP, 8);
+    let flags = VarNode::reg(regs::RFLAGS, 8);
+    let eight = VarNode::constant(8, 8);
+    // rsp -= 8
+    ctx.emit(IrOp::IntSub { dst: rsp.clone(), a: rsp.clone(), b: eight });
+    // *rsp = flags
+    ctx.emit(IrOp::Store { addr: rsp, src: flags });
+}
+
+/// `popf`/`popfd`/`popfq` — pop the flags register from the stack.
+fn lift_popf(ctx: &mut LiftContext) {
+    let rsp = VarNode::reg(regs::RSP, 8);
+    let flags = VarNode::reg(regs::RFLAGS, 8);
+    let eight = VarNode::constant(8, 8);
+    // flags = *rsp
+    ctx.emit(IrOp::Load { dst: flags, addr: rsp.clone() });
+    // rsp += 8
+    ctx.emit(IrOp::IntAdd { dst: rsp.clone(), a: rsp, b: eight });
+}
+
 fn lift_pop(ctx: &mut LiftContext, operands: &str) {
     let rsp = VarNode::reg(regs::RSP, 8);
     let eight = VarNode::constant(8, 8);
@@ -278,6 +317,41 @@ fn write_operand(ctx: &mut LiftContext, s: &str, value: VarNode) {
     }
 }
 
+/// Begin a read-modify-write operation on `dst_str`.
+///
+/// Returns `(dst_var, store_addr)`:
+/// - For register destinations: `dst_var` is the register varnode and
+///   `store_addr` is `None`. Subsequent IR ops writing to `dst_var` update
+///   the register directly.
+/// - For memory destinations: `dst_var` is a fresh temp preloaded with the
+///   current memory value, and `store_addr` is the effective address.
+///   Callers must pass `store_addr` to `rmw_end` after computing the new
+///   value into `dst_var` to emit the writeback Store.
+///
+/// This is the correct way to handle x86 RMW forms like `add [mem], reg` or
+/// `inc [mem]`; using `parse_operand` alone on a memory destination yields
+/// an address-as-value varnode which cannot be a write target.
+fn rmw_begin(ctx: &mut LiftContext, dst_str: &str) -> (VarNode, Option<VarNode>) {
+    if is_memory_operand(dst_str) {
+        let size = memory_operand_size(dst_str).unwrap_or(8);
+        let addr = parse_operand(ctx, dst_str);
+        let tmp = ctx.new_temp(size);
+        ctx.emit(IrOp::Load { dst: tmp.clone(), addr: addr.clone() });
+        (tmp, Some(addr))
+    } else {
+        (parse_operand(ctx, dst_str), None)
+    }
+}
+
+/// Finish a read-modify-write operation by emitting a Store if the
+/// destination was a memory operand. For register destinations this is a
+/// no-op (the IR op already wrote the register directly).
+fn rmw_end(ctx: &mut LiftContext, dst_var: VarNode, store_addr: Option<VarNode>) {
+    if let Some(addr) = store_addr {
+        ctx.emit(IrOp::Store { addr, src: dst_var });
+    }
+}
+
 fn lift_binop(ctx: &mut LiftContext, operands: &str, op: BinOp) {
     let (dst_str, src_str) = match split_operands(operands) {
         Some(v) => v,
@@ -287,21 +361,26 @@ fn lift_binop(ctx: &mut LiftContext, operands: &str, op: BinOp) {
         }
     };
 
-    let dst = parse_operand(ctx, dst_str);
-    let src = parse_operand(ctx, src_str);
+    // Read source value (loads through memory operands automatically).
+    let src = read_operand(ctx, src_str);
+    // Read-modify-write the destination: for register destinations this is
+    // just the register varnode; for memory it's a fresh temp preloaded from
+    // the effective address, with a trailing Store emitted by rmw_end.
+    let (dst, store_addr) = rmw_begin(ctx, dst_str);
 
     let a = dst.clone();
     let ir_op = match op {
-        BinOp::Add => IrOp::IntAdd { dst, a, b: src },
-        BinOp::Sub => IrOp::IntSub { dst, a, b: src },
-        BinOp::SMul => IrOp::IntSMul { dst, a, b: src },
-        BinOp::And => IrOp::IntAnd { dst, a, b: src },
-        BinOp::Or => IrOp::IntOr { dst, a, b: src },
-        BinOp::Shl => IrOp::IntShl { dst, a, b: src },
-        BinOp::Shr => IrOp::IntShr { dst, a, b: src },
-        BinOp::Sar => IrOp::IntSar { dst, a, b: src },
+        BinOp::Add => IrOp::IntAdd { dst: dst.clone(), a, b: src },
+        BinOp::Sub => IrOp::IntSub { dst: dst.clone(), a, b: src },
+        BinOp::SMul => IrOp::IntSMul { dst: dst.clone(), a, b: src },
+        BinOp::And => IrOp::IntAnd { dst: dst.clone(), a, b: src },
+        BinOp::Or => IrOp::IntOr { dst: dst.clone(), a, b: src },
+        BinOp::Shl => IrOp::IntShl { dst: dst.clone(), a, b: src },
+        BinOp::Shr => IrOp::IntShr { dst: dst.clone(), a, b: src },
+        BinOp::Sar => IrOp::IntSar { dst: dst.clone(), a, b: src },
     };
     ctx.emit(ir_op);
+    rmw_end(ctx, dst, store_addr);
 }
 
 fn lift_xor(ctx: &mut LiftContext, operands: &str) {
@@ -313,35 +392,45 @@ fn lift_xor(ctx: &mut LiftContext, operands: &str) {
         }
     };
 
-    let dst = parse_operand(ctx, dst_str);
-    let src = parse_operand(ctx, src_str);
-
-    // xor reg, reg => zero idiom
-    if dst == src {
-        ctx.emit(IrOp::Copy { dst, src: VarNode::constant(0, src.size) });
-    } else {
+    // xor reg, reg => zero idiom (only meaningful for non-memory operands)
+    if !is_memory_operand(dst_str) && !is_memory_operand(src_str) {
+        let dst = parse_operand(ctx, dst_str);
+        let src = parse_operand(ctx, src_str);
+        if dst == src {
+            ctx.emit(IrOp::Copy { dst, src: VarNode::constant(0, src.size) });
+            return;
+        }
         ctx.emit(IrOp::IntXor { dst: dst.clone(), a: dst, b: src });
+        return;
     }
+
+    let src = read_operand(ctx, src_str);
+    let (dst, store_addr) = rmw_begin(ctx, dst_str);
+    ctx.emit(IrOp::IntXor { dst: dst.clone(), a: dst.clone(), b: src });
+    rmw_end(ctx, dst, store_addr);
 }
 
 fn lift_not(ctx: &mut LiftContext, operands: &str) {
-    let dst = parse_operand(ctx, operands.trim());
-    ctx.emit(IrOp::IntNot { dst: dst.clone(), src: dst });
+    let (dst, store_addr) = rmw_begin(ctx, operands.trim());
+    ctx.emit(IrOp::IntNot { dst: dst.clone(), src: dst.clone() });
+    rmw_end(ctx, dst, store_addr);
 }
 
 fn lift_neg(ctx: &mut LiftContext, operands: &str) {
-    let dst = parse_operand(ctx, operands.trim());
-    ctx.emit(IrOp::IntNeg { dst: dst.clone(), src: dst });
+    let (dst, store_addr) = rmw_begin(ctx, operands.trim());
+    ctx.emit(IrOp::IntNeg { dst: dst.clone(), src: dst.clone() });
+    rmw_end(ctx, dst, store_addr);
 }
 
 fn lift_inc_dec(ctx: &mut LiftContext, operands: &str, is_inc: bool) {
-    let dst = parse_operand(ctx, operands.trim());
+    let (dst, store_addr) = rmw_begin(ctx, operands.trim());
     let one = VarNode::constant(1, dst.size);
     if is_inc {
-        ctx.emit(IrOp::IntAdd { dst: dst.clone(), a: dst, b: one });
+        ctx.emit(IrOp::IntAdd { dst: dst.clone(), a: dst.clone(), b: one });
     } else {
-        ctx.emit(IrOp::IntSub { dst: dst.clone(), a: dst, b: one });
+        ctx.emit(IrOp::IntSub { dst: dst.clone(), a: dst.clone(), b: one });
     }
+    rmw_end(ctx, dst, store_addr);
 }
 
 fn lift_cmp(ctx: &mut LiftContext, operands: &str) {
@@ -751,6 +840,66 @@ mod tests {
             }
             other => panic!("expected Load, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn leave_emits_rsp_rbp_restore() {
+        // `leave` == mov rsp, rbp; pop rbp. Expect Copy rsp<-rbp, Load rbp<-*rsp, IntAdd rsp+=8.
+        let ops = lift_one("leave", "");
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Copy { .. })), "missing Copy in {:?}", ops);
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Load { .. })), "missing Load in {:?}", ops);
+        assert!(ops.iter().any(|op| matches!(op, IrOp::IntAdd { .. })), "missing IntAdd in {:?}", ops);
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Unimplemented { .. })));
+    }
+
+    #[test]
+    fn pushfd_emits_store_to_stack() {
+        let ops = lift_one("pushfd", "");
+        assert!(ops.iter().any(|op| matches!(op, IrOp::IntSub { .. })), "missing rsp decrement in {:?}", ops);
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Store { .. })), "missing Store in {:?}", ops);
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Unimplemented { .. })));
+    }
+
+    #[test]
+    fn add_memory_destination_is_rmw() {
+        // `add dword ptr [0x40dfd8], eax` must load the current value, add,
+        // then store back — NOT compute with the address value as both
+        // source and destination.
+        let ops = lift_one("add", "dword ptr [0x40dfd8], eax");
+        // Expect: Load temp <- [0x40dfd8], IntAdd temp = temp + eax, Store [0x40dfd8] = temp
+        let has_load = ops.iter().any(|op| matches!(op, IrOp::Load { addr, .. } if addr.space == VarSpace::Constant && addr.offset == 0x40dfd8));
+        let has_store = ops.iter().any(|op| matches!(op, IrOp::Store { addr, .. } if addr.space == VarSpace::Constant && addr.offset == 0x40dfd8));
+        let has_add = ops.iter().any(|op| matches!(op, IrOp::IntAdd { .. }));
+        assert!(has_load, "expected Load from memory destination, ops={:?}", ops);
+        assert!(has_add, "expected IntAdd, ops={:?}", ops);
+        assert!(has_store, "expected Store writeback to memory destination, ops={:?}", ops);
+    }
+
+    #[test]
+    fn inc_memory_destination_is_rmw() {
+        let ops = lift_one("inc", "dword ptr [0x40dfd8]");
+        let has_load = ops.iter().any(|op| matches!(op, IrOp::Load { addr, .. } if addr.space == VarSpace::Constant && addr.offset == 0x40dfd8));
+        let has_store = ops.iter().any(|op| matches!(op, IrOp::Store { addr, .. } if addr.space == VarSpace::Constant && addr.offset == 0x40dfd8));
+        let has_add = ops.iter().any(|op| matches!(op, IrOp::IntAdd { .. }));
+        assert!(has_load && has_add && has_store, "expected RMW Load/IntAdd/Store, got {:?}", ops);
+    }
+
+    #[test]
+    fn not_memory_destination_is_rmw() {
+        let ops = lift_one("not", "dword ptr [0x40dfd8]");
+        let has_load = ops.iter().any(|op| matches!(op, IrOp::Load { .. }));
+        let has_not = ops.iter().any(|op| matches!(op, IrOp::IntNot { .. }));
+        let has_store = ops.iter().any(|op| matches!(op, IrOp::Store { .. }));
+        assert!(has_load && has_not && has_store, "expected RMW Load/IntNot/Store, got {:?}", ops);
+    }
+
+    #[test]
+    fn add_register_destination_unchanged() {
+        // Register destinations should NOT gain spurious Load/Store ops.
+        let ops = lift_one("add", "rax, rcx");
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Load { .. })));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Store { .. })));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::IntAdd { .. })));
     }
 
     #[test]
