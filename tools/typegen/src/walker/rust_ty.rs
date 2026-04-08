@@ -22,23 +22,58 @@
 use crate::model::{Primitive, TypeRef};
 use syn::{Expr, Lit, PathArguments, Type, TypePath, TypePtr};
 
+/// Target ABI parameters that influence primitive type sizing. Rust's
+/// `c_long`, `usize`, and `isize` don't map to fixed widths — they
+/// depend on the target's data model (LP64 on Linux/macOS, LLP64 on
+/// Windows, 32-bit on x86). The walker threads one of these through
+/// every `rust_type_to_ref` call so sized aliases resolve consistently
+/// for the archive being generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeCtx {
+    /// Size in bytes of a pointer on the target (4 or 8). Drives
+    /// `usize` / `isize` mapping.
+    pub pointer_width: u8,
+    /// Whether `c_long` is 32 or 64 bits. Linux/macOS 64-bit are LP64
+    /// and use 64. Windows 64-bit is LLP64 and uses 32. x86-32 uses
+    /// 32 everywhere. Split out from `pointer_width` because the two
+    /// aren't perfectly correlated.
+    pub c_long_bits: u8,
+}
+
+impl TypeCtx {
+    /// LP64: 64-bit pointers + 64-bit `long`. Linux and macOS x86-64
+    /// and ARM64. Matches what `libc.rtarch` expects.
+    pub const LP64: Self = Self { pointer_width: 8, c_long_bits: 64 };
+    /// LLP64: 64-bit pointers + 32-bit `long`. Windows x86-64 and ARM64.
+    /// Consumed by the windows-sys walker (module `walker::windows`).
+    #[allow(dead_code)] // used by windows walker
+    pub const LLP64: Self = Self { pointer_width: 8, c_long_bits: 32 };
+    /// ILP32: 32-bit pointers + 32-bit `long`. 32-bit x86, both
+    /// Windows and Linux. Consumed by the windows-sys walker when
+    /// building the `windows-x86.rtarch` archive.
+    #[allow(dead_code)] // used by windows walker
+    pub const ILP32: Self = Self { pointer_width: 4, c_long_bits: 32 };
+}
+
 /// Convert a Rust `syn::Type` to a Reghidra [`TypeRef`]. Returns a
 /// `Named` fallback for anything the mapper doesn't recognize, using
 /// the printed path so the archive still has something meaningful to
 /// display.
-pub fn rust_type_to_ref(ty: &Type) -> TypeRef {
+pub fn rust_type_to_ref(ty: &Type, ctx: TypeCtx) -> TypeRef {
     match ty {
         // `*const T` / `*mut T` — Reghidra's model doesn't distinguish
         // mutability on pointers because the decompile layer has no
         // safe way to recover it from machine code anyway. We keep the
         // pointee type and drop the qualifier.
-        Type::Ptr(TypePtr { elem, .. }) => TypeRef::Pointer(Box::new(rust_type_to_ref(elem))),
+        Type::Ptr(TypePtr { elem, .. }) => {
+            TypeRef::Pointer(Box::new(rust_type_to_ref(elem, ctx)))
+        }
 
         // `[T; N]` — fixed-size array. `N` must be a literal; anything
         // else falls back to Named because our model can't represent
         // symbolic array lengths.
         Type::Array(arr) => {
-            let elem = rust_type_to_ref(&arr.elem);
+            let elem = rust_type_to_ref(&arr.elem, ctx);
             let len = array_len(&arr.len).unwrap_or(0);
             TypeRef::Array(Box::new(elem), len)
         }
@@ -50,13 +85,13 @@ pub fn rust_type_to_ref(ty: &Type) -> TypeRef {
         // type. The primitive match is order-sensitive because some
         // scalars (e.g. `c_char`, `c_void`) show up as path-qualified
         // references to `core::ffi::*`.
-        Type::Path(tp) => path_to_ref(tp),
+        Type::Path(tp) => path_to_ref(tp, ctx),
 
         // Reference types (`&T`, `&mut T`) don't appear in extern "C"
         // signatures but can show up in helper type aliases inside a
         // binding crate. Treat them as pointers to match how the ABI
         // would lower them.
-        Type::Reference(r) => TypeRef::Pointer(Box::new(rust_type_to_ref(&r.elem))),
+        Type::Reference(r) => TypeRef::Pointer(Box::new(rust_type_to_ref(&r.elem, ctx))),
 
         // Anything else — function pointers without a named alias,
         // `Box<T>`, trait objects, etc. — becomes an opaque Named
@@ -72,7 +107,7 @@ pub fn rust_type_to_ref(ty: &Type) -> TypeRef {
 /// the set of `core::ffi::*` / `std::ffi::*` scalars plus the standard
 /// Rust builtins (`i32`, `u64`, `bool`, …) and falls back to
 /// [`TypeRef::Named`] with the final path segment.
-fn path_to_ref(tp: &TypePath) -> TypeRef {
+fn path_to_ref(tp: &TypePath, ctx: TypeCtx) -> TypeRef {
     // A path like `core::ffi::c_char` parses into multiple segments.
     // For the primitive match we only need the last segment's ident;
     // fully qualified vs single-ident forms both resolve here.
@@ -89,7 +124,7 @@ fn path_to_ref(tp: &TypePath) -> TypeRef {
     }
 
     let ident = last.ident.to_string();
-    if let Some(prim) = primitive_from_ident(&ident) {
+    if let Some(prim) = primitive_from_ident(&ident, ctx) {
         return TypeRef::Primitive(prim);
     }
 
@@ -105,11 +140,15 @@ fn path_to_ref(tp: &TypePath) -> TypeRef {
 /// - Rust builtins (`i8`..`u64`, `f32`, `f64`, `bool`, `usize`, `isize`)
 /// - `core::ffi` / `std::ffi` type aliases (`c_char`, `c_int`, ...)
 ///
+/// `ctx` resolves the width-sensitive aliases (`c_long`, `usize`,
+/// `isize`) against the target's data model — LP64 for Linux/macOS
+/// 64-bit, LLP64 for Windows 64-bit, ILP32 for 32-bit targets.
+///
 /// Returns `None` for anything unrecognized so the caller can fall
 /// through to the `Named` path.
-fn primitive_from_ident(ident: &str) -> Option<Primitive> {
+fn primitive_from_ident(ident: &str, ctx: TypeCtx) -> Option<Primitive> {
     Some(match ident {
-        // Rust core scalars
+        // Rust core scalars — fixed width regardless of target.
         "i8" => Primitive::Int8,
         "u8" => Primitive::UInt8,
         "i16" => Primitive::Int16,
@@ -122,14 +161,19 @@ fn primitive_from_ident(ident: &str) -> Option<Primitive> {
         "f64" => Primitive::Double,
         "bool" => Primitive::Bool,
 
-        // `usize`/`isize` aren't fixed-width. For the current archive
-        // targets (x86-64 Linux/macOS, x86-64 Windows) they're 64-bit,
-        // but the mapper doesn't know the target here. We pick UInt64
-        // as the safe default for binding crates that target 64-bit
-        // systems; the PR 3b Windows walker will need to revisit this
-        // for 32-bit Win32 archives.
-        "usize" => Primitive::UInt64,
-        "isize" => Primitive::Int64,
+        // Pointer-width sized aliases. Drives off `ctx.pointer_width`
+        // so a 32-bit archive correctly emits UInt32/Int32 and a
+        // 64-bit archive emits UInt64/Int64.
+        "usize" => if ctx.pointer_width == 8 {
+            Primitive::UInt64
+        } else {
+            Primitive::UInt32
+        },
+        "isize" => if ctx.pointer_width == 8 {
+            Primitive::Int64
+        } else {
+            Primitive::Int32
+        },
 
         // core::ffi aliases — these are the canonical names for
         // extern "C" parameter types in modern bindings.
@@ -141,13 +185,19 @@ fn primitive_from_ident(ident: &str) -> Option<Primitive> {
         "c_ushort" => Primitive::UInt16,
         "c_int" => Primitive::Int32,
         "c_uint" => Primitive::UInt32,
-        // `c_long` is 32 bits on 64-bit Windows but 64 bits on 64-bit
-        // Linux/macOS. The libc crate uses the LP64 convention
-        // (`c_long = i64` on 64-bit targets). Since PR 3 only targets
-        // libc, matching that convention is correct here; Windows
-        // archives in PR 3b will need a separate handling.
-        "c_long" => Primitive::Int64,
-        "c_ulong" => Primitive::UInt64,
+        // `c_long` is 32 bits on 64-bit Windows (LLP64) but 64 bits
+        // on 64-bit Linux/macOS (LP64). x86-32 is 32 everywhere.
+        // Resolved via ctx.c_long_bits.
+        "c_long" => if ctx.c_long_bits == 64 {
+            Primitive::Int64
+        } else {
+            Primitive::Int32
+        },
+        "c_ulong" => if ctx.c_long_bits == 64 {
+            Primitive::UInt64
+        } else {
+            Primitive::UInt32
+        },
         "c_longlong" => Primitive::Int64,
         "c_ulonglong" => Primitive::UInt64,
         "c_float" => Primitive::Float,

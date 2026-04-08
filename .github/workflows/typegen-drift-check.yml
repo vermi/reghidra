@@ -56,26 +56,50 @@ jobs:
             tools/typegen/target
           key: typegen-${{ runner.os }}-${{ hashFiles('tools/typegen/Cargo.lock') }}
 
-      - name: Regenerate posix.rtarch into scratch dir
+      - name: Regenerate all archives into scratch dir
         run: |
           mkdir -p /tmp/typegen-out
           cd tools/typegen
+          # POSIX / libc — target linux.
           cargo run --release --quiet -- \
-              --source libc \
-              --target linux \
+              --source libc --target linux \
               --out /tmp/typegen-out/posix.rtarch
+          # Windows / windows-sys — one archive per supported target.
+          # We deliberately regenerate all three even though most PRs
+          # will only touch one, because walker changes affect all
+          # outputs and missing any of them in the drift check would
+          # let stale variants slip through.
+          cargo run --release --quiet -- \
+              --source windows-sys --target windows-x64 \
+              --out /tmp/typegen-out/windows-x64.rtarch
+          cargo run --release --quiet -- \
+              --source windows-sys --target windows-x86 \
+              --out /tmp/typegen-out/windows-x86.rtarch
+          cargo run --release --quiet -- \
+              --source windows-sys --target windows-arm64 \
+              --out /tmp/typegen-out/windows-arm64.rtarch
 
-      - name: Diff against checked-in posix.rtarch
+      - name: Diff against checked-in archives
         run: |
-          if ! cmp -s types/posix.rtarch /tmp/typegen-out/posix.rtarch; then
-            echo "::error::types/posix.rtarch is out of sync with tools/typegen source."
-            echo "Checked-in size:      $(wc -c < types/posix.rtarch) bytes"
-            echo "Regenerated size:     $(wc -c < /tmp/typegen-out/posix.rtarch) bytes"
-            echo ""
-            echo "To fix, run locally and commit the updated archive:"
-            echo "  cd tools/typegen"
-            echo "  cargo run --release -- --source libc --target linux \\"
-            echo "      --out ../../types/posix.rtarch"
-            exit 1
-          fi
-          echo "types/posix.rtarch is current."
+          # A small shell helper keeps the per-archive diff logic
+          # in one place. On mismatch we print both sizes and the
+          # exact regeneration command so the fix is copy-pasteable.
+          check() {
+            local stem="$1"
+            local src_args="$2"
+            if ! cmp -s "types/${stem}.rtarch" "/tmp/typegen-out/${stem}.rtarch"; then
+              echo "::error::types/${stem}.rtarch is out of sync with tools/typegen source."
+              echo "  Checked-in size:   $(wc -c < "types/${stem}.rtarch") bytes"
+              echo "  Regenerated size:  $(wc -c < "/tmp/typegen-out/${stem}.rtarch") bytes"
+              echo ""
+              echo "  To fix, run locally and commit the updated archive:"
+              echo "    cd tools/typegen"
+              echo "    cargo run --release -- ${src_args} --out ../../types/${stem}.rtarch"
+              return 1
+            fi
+            echo "types/${stem}.rtarch is current."
+          }
+          check posix         "--source libc --target linux" || exit 1
+          check windows-x64   "--source windows-sys --target windows-x64" || exit 1
+          check windows-x86   "--source windows-sys --target windows-x86" || exit 1
+          check windows-arm64 "--source windows-sys --target windows-arm64" || exit 1

@@ -46,12 +46,14 @@ mapping. Current targets:
 
 | Stem              | Covers                                                |
 | ----------------- | ----------------------------------------------------- |
-| `windows-x64`     | Win32 / Win64 APIs from `windows-sys`                 |
-| `windows-x86`     | Same, 32-bit target                                   |
-| `windows-arm64`   | Same, ARM64 target                                    |
-| `ucrt`            | Microsoft Universal C Runtime                         |
 | `posix`           | POSIX / libc / pthread core from `libc`               |
+| `windows-x64`     | Win32 APIs from `windows-sys` (LLP64, Win64 ABI)      |
+| `windows-x86`     | Same, 32-bit target (ILP32, stdcall ABI)              |
+| `windows-arm64`   | Same, ARM64 target (LLP64, AAPCS64 ABI)               |
 
-Until PR 3 of Phase 5c lands, this directory is empty (just this README
-and a `.gitkeep`). The loader tolerates missing archives, so Reghidra
-builds and runs normally during the intermediate state.
+The UCRT surface that ships under `Win32::System::Console`,
+`Win32::System::Threading`, etc. is already covered by the
+`windows-*` archives, so there's no separate `ucrt.rtarch`. If a
+future PR splits the CRT out (e.g. to slim the main Windows blob),
+it should add the new stem to `archive_stems_for` in
+`crates/reghidra-core/src/project.rs`.

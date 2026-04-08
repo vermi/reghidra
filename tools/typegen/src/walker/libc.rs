@@ -37,7 +37,7 @@
 use crate::model::{
     ArgType, CallingConvention, FunctionType, TypeArchive, TypeDef, TypeDefKind, TypeRef,
 };
-use crate::walker::rust_ty::rust_type_to_ref;
+use crate::walker::rust_ty::{rust_type_to_ref, TypeCtx};
 use crate::Target;
 use anyhow::{anyhow, Context, Result};
 use cargo_metadata::MetadataCommand;
@@ -85,8 +85,14 @@ pub fn walk(src_dir: &Path, target: Target, archive_name: &str) -> Result<TypeAr
     let mut archive = TypeArchive::new(archive_name);
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
+    // Both supported libc targets (Linux and macOS) are LP64 on the
+    // architectures we care about (x86-64, ARM64). 32-bit libc archives
+    // aren't a current goal; if they become one, split this by
+    // (target_os, target_arch) and add an `--arch` CLI flag.
+    let type_ctx = TypeCtx::LP64;
+
     let lib_rs = src_dir.join("lib.rs");
-    walk_file(&lib_rs, target, &mut archive, &mut visited)
+    walk_file(&lib_rs, target, type_ctx, &mut archive, &mut visited)
         .with_context(|| format!("walking {}", lib_rs.display()))?;
 
     Ok(archive)
@@ -100,6 +106,7 @@ pub fn walk(src_dir: &Path, target: Target, archive_name: &str) -> Result<TypeAr
 fn walk_file(
     path: &Path,
     target: Target,
+    type_ctx: TypeCtx,
     archive: &mut TypeArchive,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<()> {
@@ -123,7 +130,7 @@ fn walk_file(
 
     let parent_dir = path.parent().unwrap_or_else(|| Path::new(""));
     for item in &file.items {
-        handle_item(item, parent_dir, target, archive, visited)?;
+        handle_item(item, parent_dir, target, type_ctx, archive, visited)?;
     }
     Ok(())
 }
@@ -135,14 +142,15 @@ fn handle_item(
     item: &Item,
     parent_dir: &Path,
     target: Target,
+    type_ctx: TypeCtx,
     archive: &mut TypeArchive,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     match item {
-        Item::Mod(m) => handle_mod(m, parent_dir, target, archive, visited)?,
-        Item::ForeignMod(fm) => handle_foreign_mod(fm, target, archive),
-        Item::Type(t) => handle_type_alias(t, target, archive),
-        Item::Macro(m) => handle_macro(m, parent_dir, target, archive, visited)?,
+        Item::Mod(m) => handle_mod(m, parent_dir, target, type_ctx, archive, visited)?,
+        Item::ForeignMod(fm) => handle_foreign_mod(fm, type_ctx, archive),
+        Item::Type(t) => handle_type_alias(t, target, type_ctx, archive),
+        Item::Macro(m) => handle_macro(m, parent_dir, target, type_ctx, archive, visited)?,
         // ItemStruct / ItemUnion / ItemEnum fall through to the stub.
         // PR 4 wires them in once the typed-decl consumers need field
         // layout info. Ignoring them for now keeps the archive size
@@ -178,6 +186,7 @@ fn handle_macro(
     m: &syn::ItemMacro,
     parent_dir: &Path,
     target: Target,
+    type_ctx: TypeCtx,
     archive: &mut TypeArchive,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<()> {
@@ -190,7 +199,7 @@ fn handle_macro(
         return Ok(());
     };
     match name.as_str() {
-        "cfg_if" => handle_cfg_if(&m.mac.tokens, parent_dir, target, archive, visited)?,
+        "cfg_if" => handle_cfg_if(&m.mac.tokens, parent_dir, target, type_ctx, archive, visited)?,
         // Struct/type declaration macros — defer to PR 4.
         "s" | "s_no_extra_traits" | "s_paren" | "extern_ty" | "prelude" => {}
         // Other macro invocations are opaque to us.
@@ -207,6 +216,7 @@ fn handle_cfg_if(
     tokens: &TokenStream,
     parent_dir: &Path,
     target: Target,
+    type_ctx: TypeCtx,
     archive: &mut TypeArchive,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<()> {
@@ -219,14 +229,14 @@ fn handle_cfg_if(
     for branch in &body.branches {
         if cfg_permits(&branch.attrs, target) {
             for item in &branch.items {
-                handle_item(item, parent_dir, target, archive, visited)?;
+                handle_item(item, parent_dir, target, type_ctx, archive, visited)?;
             }
             return Ok(());
         }
     }
     // No branch matched — take the else fallback if present.
     for item in &body.fallback {
-        handle_item(item, parent_dir, target, archive, visited)?;
+        handle_item(item, parent_dir, target, type_ctx, archive, visited)?;
     }
     Ok(())
 }
@@ -306,6 +316,7 @@ fn handle_mod(
     m: &ItemMod,
     parent_dir: &Path,
     target: Target,
+    type_ctx: TypeCtx,
     archive: &mut TypeArchive,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<()> {
@@ -317,7 +328,7 @@ fn handle_mod(
         // Inline module — recurse in place. The parent_dir stays the
         // same because inline modules don't change filesystem layout.
         for item in items {
-            handle_item(item, parent_dir, target, archive, visited)?;
+            handle_item(item, parent_dir, target, type_ctx, archive, visited)?;
         }
         return Ok(());
     }
@@ -337,7 +348,7 @@ fn handle_mod(
 
     for c in candidates {
         if c.exists() {
-            walk_file(&c, target, archive, visited)?;
+            walk_file(&c, target, type_ctx, archive, visited)?;
             return Ok(());
         }
     }
@@ -352,11 +363,11 @@ fn handle_mod(
 /// (e.g. `extern "system"`, `extern "stdcall"`) are recorded as
 /// `CallingConvention::Default` because libc only uses cdecl. The
 /// PR 3b windows-sys walker has its own ABI-aware logic.
-fn handle_foreign_mod(fm: &ItemForeignMod, _target: Target, archive: &mut TypeArchive) {
+fn handle_foreign_mod(fm: &ItemForeignMod, type_ctx: TypeCtx, archive: &mut TypeArchive) {
     let cc = abi_to_calling_convention(&fm.abi);
     for item in &fm.items {
         let ForeignItem::Fn(f) = item else { continue };
-        if let Some(func) = foreign_fn_to_model(f, cc) {
+        if let Some(func) = foreign_fn_to_model(f, cc, type_ctx) {
             archive.functions.insert(func.name.clone(), func);
         }
     }
@@ -365,7 +376,11 @@ fn handle_foreign_mod(fm: &ItemForeignMod, _target: Target, archive: &mut TypeAr
 /// Convert a single `ForeignItemFn` into our [`FunctionType`] model.
 /// Variadic functions (`fn foo(fmt: *const c_char, ...);`) are
 /// flagged via `is_variadic`; the fixed args come through normally.
-fn foreign_fn_to_model(f: &ForeignItemFn, cc: CallingConvention) -> Option<FunctionType> {
+fn foreign_fn_to_model(
+    f: &ForeignItemFn,
+    cc: CallingConvention,
+    type_ctx: TypeCtx,
+) -> Option<FunctionType> {
     let name = f.sig.ident.to_string();
     let is_variadic = f.sig.variadic.is_some();
 
@@ -386,13 +401,13 @@ fn foreign_fn_to_model(f: &ForeignItemFn, cc: CallingConvention) -> Option<Funct
         };
         args.push(ArgType {
             name: arg_name,
-            ty: rust_type_to_ref(&pat.ty),
+            ty: rust_type_to_ref(&pat.ty, type_ctx),
         });
     }
 
     let return_type = match &f.sig.output {
         ReturnType::Default => TypeRef::Primitive(crate::model::Primitive::Void),
-        ReturnType::Type(_, ty) => rust_type_to_ref(ty),
+        ReturnType::Type(_, ty) => rust_type_to_ref(ty, type_ctx),
     };
 
     Some(FunctionType {
@@ -408,12 +423,12 @@ fn foreign_fn_to_model(f: &ForeignItemFn, cc: CallingConvention) -> Option<Funct
 /// type aliases (`#[cfg(target_os = "...")]`) are filtered so we
 /// don't record a Linux-specific `time_t` alias when generating a
 /// macOS archive.
-fn handle_type_alias(t: &ItemType, target: Target, archive: &mut TypeArchive) {
+fn handle_type_alias(t: &ItemType, target: Target, type_ctx: TypeCtx, archive: &mut TypeArchive) {
     if !cfg_permits(&t.attrs, target) {
         return;
     }
     let name = t.ident.to_string();
-    let ty = rust_type_to_ref(&t.ty);
+    let ty = rust_type_to_ref(&t.ty, type_ctx);
     archive.types.insert(
         name.clone(),
         TypeDef {

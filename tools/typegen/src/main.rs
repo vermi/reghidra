@@ -54,6 +54,10 @@ enum SourceCrate {
     /// The `libc` crate. Plain `extern "C"` blocks under
     /// `src/unix/linux_like/linux/`, `src/unix/bsd/apple/`, etc.
     Libc,
+    /// The `windows-sys` crate. Function declarations use the
+    /// `windows_targets::link!` macro; struct/type definitions use
+    /// plain `#[repr(C)] pub struct` and `pub type`.
+    WindowsSys,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -62,6 +66,12 @@ enum Target {
     Linux,
     /// macOS / Apple Darwin.
     Macos,
+    /// Windows x86-64 (Win64 calling convention, LLP64).
+    WindowsX64,
+    /// Windows x86-32 (stdcall for Win32 APIs, ILP32).
+    WindowsX86,
+    /// Windows ARM64 (AAPCS64, LLP64).
+    WindowsArm64,
 }
 
 impl Target {
@@ -72,6 +82,21 @@ impl Target {
         match self {
             Target::Linux => "linux",
             Target::Macos => "macos",
+            Target::WindowsX64 | Target::WindowsX86 | Target::WindowsArm64 => "windows",
+        }
+    }
+
+    /// Downcast a generic [`Target`] into a [`walker::windows::WindowsTarget`]
+    /// for use with the windows-sys walker. Returns `None` for
+    /// non-Windows targets so the CLI can surface a clear error when
+    /// the user passes an incompatible `--source` + `--target` combo.
+    fn as_windows_target(self) -> Option<walker::windows::WindowsTarget> {
+        use walker::windows::WindowsTarget;
+        match self {
+            Target::WindowsX64 => Some(WindowsTarget::X86_64),
+            Target::WindowsX86 => Some(WindowsTarget::X86),
+            Target::WindowsArm64 => Some(WindowsTarget::Arm64),
+            _ => None,
         }
     }
 }
@@ -102,6 +127,19 @@ fn main() -> Result<()> {
             log::info!("walking libc source at {}", src_dir.display());
             walker::libc::walk(&src_dir, args.target, &name)
                 .context("walking libc source tree")?
+        }
+        SourceCrate::WindowsSys => {
+            let win_target = args.target.as_windows_target().ok_or_else(|| {
+                anyhow!(
+                    "source=windows-sys requires --target windows-x64 / windows-x86 / windows-arm64, got {:?}",
+                    args.target
+                )
+            })?;
+            let src_dir = walker::windows::find_source_dir()
+                .context("locating windows-sys source via cargo metadata")?;
+            log::info!("walking windows-sys source at {}", src_dir.display());
+            walker::windows::walk(&src_dir, win_target, &name)
+                .context("walking windows-sys source tree")?
         }
     };
 
