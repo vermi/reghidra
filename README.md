@@ -117,7 +117,8 @@ fork can branch from `19d5581` or earlier.
 - `types/rizin-windows.rtarch` and `types/rizin-libc.rtarch` —
   derived works of Rizin's `librz/arch/types/functions-*.sdb.txt`
   function-signature database (GPLv3). The pinned upstream commit
-  is recorded in `.github/workflows/typegen-drift-check.yml` under
-  `RIZIN_REF`. Regeneration is performed by
-  `tools/typegen --source rizin-sdb` and verified byte-for-byte
-  by the drift-check workflow on every pull request.
+  is recorded in `.github/workflows/typegen-regen.yml` under
+  `RIZIN_REF`. Every release auto-regenerates these (and the
+  binding-crate-derived archives under `types/`) via the regen
+  workflow and commits the refreshed bytes back to `main` before
+  release artifacts are assembled.

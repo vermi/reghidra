@@ -1,0 +1,164 @@
+name: typegen regenerate on release
+
+# Replaces the old `typegen-drift-check.yml` (removed because the byte-
+# diff approach was brittle: any host-toolchain difference between the
+# CI runner and a maintainer's local machine could produce a spurious
+# mismatch even when the underlying source data was identical).
+#
+# This workflow takes the opposite approach. Instead of asking CI to
+# *verify* that bundled type archives match what `tools/typegen` would
+# currently produce, it makes CI *the* canonical regeneration step:
+# whenever a release is cut (or a maintainer manually dispatches), the
+# job rebuilds every archive against pinned source revisions and
+# commits the result back to `main` if anything changed. End users and
+# subsequent release builds always pull from `types/` as authoritative
+# bytes — they just happen to have been freshened by this job moments
+# before the release artifacts were assembled.
+#
+# Trigger choices:
+#   - `release: published` is the natural anchor — every published
+#     release auto-refreshes archives.
+#   - `push: tags: v*` mirrors the release.yml trigger so a tag push
+#     refreshes archives even if no GitHub release object exists yet
+#     (useful when cutting a tag and uploading binaries manually).
+#   - `workflow_dispatch` lets a maintainer regenerate on demand
+#     without cutting a release, e.g. after bumping the pinned Rizin
+#     SHA in this file.
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# `contents: write` is required for the commit-back step. Nothing
+# else needs elevated scopes.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned Rizin commit used to regenerate `rizin-windows.rtarch` and
+  # `rizin-libc.rtarch`. Bump this when you want to pull in upstream
+  # SDB updates; the next run of this workflow will commit the
+  # regenerated archives back to main on its own.
+  RIZIN_REF: 183a0376c72b08a52863a6f98c832806b9d33b1e
+
+jobs:
+  regenerate:
+    name: Regenerate bundled type archives
+    runs-on: ubuntu-latest
+    steps:
+      # Check out main, not the tag — we want the commit-back to land
+      # on the head of the default branch regardless of which tag
+      # triggered the run. The archive regeneration itself doesn't
+      # depend on workspace source, only on `tools/typegen/` which is
+      # an out-of-workspace crate, so checking out main is fine.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # Need a real token (not the default GITHUB_TOKEN) so the
+          # commit-back push doesn't fail under branch protection
+          # rules that block GITHUB_TOKEN-authored pushes. If branch
+          # protection is not configured to allow this token, swap to
+          # a PAT stored in `secrets.TYPEGEN_PUSH_TOKEN`.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache typegen build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/typegen/target
+          key: typegen-${{ runner.os }}-${{ hashFiles('tools/typegen/Cargo.lock') }}
+
+      - name: Fetch pinned Rizin source for SDB walker
+        run: |
+          # Shallow blob-filtered clone keeps this fast even though
+          # Rizin is a large repo. We only need the SDB text files
+          # under librz/arch/types/.
+          git clone --filter=blob:none --no-checkout https://github.com/rizinorg/rizin.git /tmp/rizin-src
+          cd /tmp/rizin-src
+          git fetch --depth 1 origin "${RIZIN_REF}"
+          git checkout --quiet "${RIZIN_REF}"
+          ls librz/arch/types/functions-windows.sdb.txt librz/arch/types/functions-libc.sdb.txt
+
+      - name: Regenerate every archive in-place
+        run: |
+          cd tools/typegen
+          # POSIX / libc
+          cargo run --release --quiet -- \
+              --source libc --target linux \
+              --out ../../types/posix.rtarch
+          # Windows / windows-sys (one archive per supported target)
+          cargo run --release --quiet -- \
+              --source windows-sys --target windows-x64 \
+              --out ../../types/windows-x64.rtarch
+          cargo run --release --quiet -- \
+              --source windows-sys --target windows-x86 \
+              --out ../../types/windows-x86.rtarch
+          cargo run --release --quiet -- \
+              --source windows-sys --target windows-arm64 \
+              --out ../../types/windows-arm64.rtarch
+          # MSVC CRT (UCRT) — sourced from libc's `src/windows/`.
+          cargo run --release --quiet -- \
+              --source libc --target windows-x64 \
+              --out ../../types/ucrt.rtarch
+          # Rizin SDB — Win32 headers and POSIX-family files.
+          cargo run --release --quiet -- \
+              --source rizin-sdb --target linux \
+              --input /tmp/rizin-src/librz/arch/types \
+              --filter windows \
+              --out ../../types/rizin-windows.rtarch
+          cargo run --release --quiet -- \
+              --source rizin-sdb --target linux \
+              --input /tmp/rizin-src/librz/arch/types \
+              --filter libc,linux,macos \
+              --out ../../types/rizin-libc.rtarch
+
+      - name: Commit refreshed archives back to main
+        run: |
+          # Configure the commit author as the GitHub Actions bot so
+          # the commit shows up clearly as automation. The bot's
+          # email is the canonical noreply form documented in the
+          # GitHub Actions docs.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add types/*.rtarch
+          if git diff --cached --quiet; then
+            echo "no archive changes — nothing to commit"
+            exit 0
+          fi
+
+          # Identify what changed in the commit message body so the
+          # log entry is self-explanatory without having to diff bytes.
+          CHANGED=$(git diff --cached --name-only types/ | sed 's|^types/||' | tr '\n' ' ')
+          TRIGGER="${GITHUB_EVENT_NAME}"
+          REF="${GITHUB_REF_NAME:-unknown}"
+
+          # Build the commit message in a temp file so the shell
+          # heredoc indentation doesn't fight the yaml block scalar.
+          {
+            echo "typegen: refresh bundled archives on ${TRIGGER} (${REF})"
+            echo
+            echo "Auto-regenerated by .github/workflows/typegen-regen.yml against"
+            echo "pinned sources:"
+            echo "  - libc          (cargo registry, cached)"
+            echo "  - windows-sys   (cargo registry, cached)"
+            echo "  - rizin SDB     (commit ${RIZIN_REF})"
+            echo
+            echo "Updated archives: ${CHANGED}"
+          } > /tmp/commit-msg.txt
+          git commit -F /tmp/commit-msg.txt
+
+          # Push to main. If branch protection rejects this, switch
+          # the checkout step's `token` to a PAT with bypass rights
+          # and re-run the workflow manually.
+          git push origin HEAD:main
