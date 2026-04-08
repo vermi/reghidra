@@ -14,11 +14,17 @@ parameter names, return values, and struct layouts for imported APIs.
   they consume the ones checked in here. The `tools/typegen` crate lives in
   its own workspace outside the main cargo graph precisely so it can't be
   reached accidentally from a `cargo build` at the repo root.
-- **CI drift-checks this directory.** Pull requests that modify `types/`
-  or `tools/typegen/` trigger a workflow that regenerates each archive
-  into a scratch directory and fails if the checked-in bytes don't match.
-  Archive updates are therefore always a deliberate, reviewable commit by
-  a human — the CI job never pushes regenerated archives itself.
+- **CI auto-regenerates this directory on release.** The
+  `typegen-regen` workflow (`.github/workflows/typegen-regen.yml`)
+  triggers on `release: published`, on any `v*` tag push, and on
+  manual `workflow_dispatch`. It rebuilds every archive against
+  pinned source revisions and commits the refreshed bytes back to
+  `main` as `github-actions[bot]`. Maintainers do not need to
+  pre-regenerate locally before cutting a release — though doing
+  so is fine and the commit-back step will be a no-op if the bytes
+  already match. The earlier byte-diff drift-check workflow was
+  removed because host-toolchain differences between CI and local
+  builds produced spurious mismatches.
 
 ## Regenerating archives
 
@@ -57,8 +63,9 @@ the mapping. Current targets:
 The `rizin-*` archives are derived from
 [Rizin](https://github.com/rizinorg/rizin)'s `librz/arch/types/`
 SDB tree (GPLv3). The pinned upstream commit is recorded in
-`.github/workflows/typegen-drift-check.yml` under `RIZIN_REF`; bump
-that constant *and* commit the regenerated archives in the same PR.
+`.github/workflows/typegen-regen.yml` under `RIZIN_REF`; bump that
+constant and the next release (or a manual `workflow_dispatch` of
+the regen workflow) commits the refreshed archives on its own.
 At runtime they sit at the bottom of the precedence chain in
 `archive_stems_for`, filling gaps left by the binding-crate-derived
 archives — first-archive-wins ordering keeps `windows-x64` (etc.)
