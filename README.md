@@ -17,6 +17,8 @@ A Rust-based reverse engineering framework reimplementing Ghidra's core function
 - **Heuristic auto-naming** — IDA-style string labels (`s_EnterPassword`), function naming via thunk/wrapper/string-ref/API-pattern detection
 - **Interactive GUI** — synchronized disassembly, decompile, hex, CFG, IR, and xref views with dark/light themes
 - **Keyboard-driven workflow** — Vim-like navigation, command palette (Cmd+K), fuzzy search, inline annotations, undo/redo
+- **Right-click context menu** — navigate, comment, rename (functions, labels, variables), bookmark, show xrefs, copy address/string from any symbol across disasm, decompile, xrefs, and side panels
+- **Session persistence** — comments, renames, and bookmarks are saved to and loaded from session files
 
 ## Installation
 
