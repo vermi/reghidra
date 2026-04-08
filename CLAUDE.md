@@ -106,7 +106,7 @@ Planned (not yet pulled in):
 - [x] Control flow graph (basic blocks, interactive CFG view in GUI)
 - [x] Cross-references (code xrefs + data xrefs, click-to-navigate, xref panel)
 - [x] String detection with xrefs
-- [x] Import/export resolution panel
+- [x] Import/export resolution panel. **Mach-O note**: `from_single_macho` in `binary.rs` populates `import_addr_map` from two sources so that `call` instructions into external functions resolve to import names at decompile time. First, every entry in goblin's `imports()` (which yields `__got` / `__la_symbol_ptr` VAs) is inserted directly — this handles the `call qword ptr [rip + disp]` lift form the lifter already models as `Call { target: slot_addr }`. Second, on x86_64 the `__TEXT,__stubs` section is walked in 6-byte strides parsing `ff 25 disp32` (jmp rip-relative) instructions; each stub's rip-relative target is looked up in the already-populated map and if it resolves, `stub_addr → import_name` is inserted. This is what takes a stripped Mach-O fixture from "1 named function (_start), every external call unresolved" to "every direct `call stub_addr` renders as the right import name, and the auto-namer can then label calling wrappers (`fn_print_*`, `objc_getClass_wrapper`) because it can finally see what the callees are." Known remaining gap: pure indirect-through-register calls (`mov r15, [got_slot]; call r15`) still need to propagate the got slot's import name through the register, which today they don't — the lifter emits `CallInd` and the resolver doesn't follow register dataflow.
 - [x] Xref annotations inline in disassembly view
 - [x] Function headers in disassembly with xref counts
 
@@ -316,6 +316,27 @@ The existing `reghidra-decompile::ast::CType` is a simpler subset. The typing la
 - Test binary: `tests/fixtures/` — if a Windows PE with imports exists, use it. `CreateFileA`/`GetModuleHandleW`/etc. are the best canaries. If not, first task is to add a small Win32 PE fixture.
 - Unit test the archive loader with a tiny hand-written archive.
 - Integration test via `cargo test --workspace`: load a fixture, decompile a function that calls a known Win32 API, assert the rendered output contains the typed arg names.
+
+**Remaining Phase 5c work — priorities set by the user.** Target workload is PE-heavy with some ELF and Mach-O; ARM binaries are out of scope. Anything that improves PE and Unix-family decompile quality is high-value; anything ARM-specific is deprioritized.
+
+1. **Rizin type archive generation + wiring** — *next priority, one PR*. The PR 4h walker foundation is landed; what's missing is (a) a maintainer-run archive generation step against a Rizin checkout, (b) checked-in `.rtarch` blobs under `types/`, (c) wiring into `archive_stems_for` as a supplementary layer for PE and POSIX binaries, (d) drift-check workflow extension, (e) LICENSE update to call out the Rizin import. Policy decision needed up-front: one big `rizin-windows.rtarch` archive vs per-header? Precedence ordering vs existing `windows-*.rtarch` / `ucrt.rtarch` / `posix.rtarch`? Recommended: one archive per broad source file set (`rizin-windows.rtarch` from all `functions-windows_*.sdb.txt`, `rizin-libc.rtarch` from `functions-libc.sdb.txt`), inserted as lowest-precedence fallback so the existing authoritative sources still win on collisions. **Reminder**: Rizin does NOT have the MSVC CRT internals (`__SEH_prolog4`, `__EH4_*`, `__lockexit`, etc.) — that gap remains after this PR and is not closeable without PDB overlay.
+
+2. **Type system follow-ups — one PR**. Three closely related gaps from PR 5's minimum-viable cut:
+   - **Slot subsumption.** Retyping `arg_8` to `uint64_t` should consume `arg_c` on x86-32 (and analogously on x86-64 when the slot was previously narrow). Requires a widening pass in `FrameLayout::retype_slot` that walks sibling slots within `[offset, offset + new_size)` and marks them as subsumed (with a shadow table for undo/redo), plus rewriting references to subsumed slots. Scoped to `stackframe.rs` + the retype application path.
+   - **User retype flow-through to call-site types.** PR 4c's `annotate_call_args` wraps every arg in `Cast(declared_type, ..)` unconditionally; PR 5's user retype doesn't reach that path, so the cast fires even when the source expression's type now matches the declared parameter type. Implementation sketch lives in a doc comment on `annotate_call_args` in `expr_builder.rs` — thread a "source type context" through and skip the cast when assignment-compatible (width + signedness + named-alias resolution via archive `types` map).
+   - **Type picker UI instead of free-form text.** The Set Type popup currently takes any string; a follow-up can present a dropdown populated from the loaded archives' known `TypeRef::Named` set plus the primitive list. Improves discoverability for Windows API type names (`LPDWORD`, `LARGE_INTEGER`, etc.).
+
+3. **Mach-O symbol coverage improvements — nice-to-have, separate PR when you hit a real Mach-O target.** The stub resolution landed in the Mach-O naming fix already takes the common rip-relative and direct `call stub` forms. Next gaps:
+   - **ObjC metadata extraction.** `__objc_classlist` / `__objc_protolist` / `__objc_selrefs` carry class and selector names that could feed the auto-namer. Today a Mach-O ObjC binary gets `sub_XXXX` for every method because the decompiler never sees the `@selector` names.
+   - **Mach-O FLIRT signature coverage.** Current fallback maps `(MachO, x86_64) → elf/x86/64` sigs which cover glibc, not Apple's libsystem. A macOS-specific sig pack (sourced from whichever public SDK ships the dylibs) would catch the common runtime helpers (`objc_retain`, `objc_release`, `_dispatch_*`, etc.).
+   - **LC_FUNCTION_STARTS consumption.** Mach-O binaries often carry an authoritative list of function entry addresses in the `LC_FUNCTION_STARTS` load command even when the symbol table is stripped. Feeding that into `functions::detect_functions` as an additional entry source would raise the function count and quality.
+
+4. **ARM64 lifter / decompile polish — deprioritized.** The frame pointer detection landed in PR #17 handles the common setup, but:
+   - ARM64 `stp`/`ldp` pre-index writeback (`[sp, #-N]!`) isn't modeled by the lifter — the sp adjustment is silently dropped. Matters for FPO-style builds and for accurately tracking stack layout when rsp-delta tracking eventually lands.
+   - No ARM64 FLIRT sig coverage beyond the fallback ELF-arm-64 pack.
+   - Not a priority for the current workload. Park until an ARM target needs it.
+
+5. **PDB overlay — deprioritized per user decision.** Retained in item 8 below for reference. Revisit when a target binary actually ships a PDB and the naming/typing gap becomes the bottleneck.
 
 ### Phase 6 — Extensibility + Scripting
 - [ ] Lua scripting API
