@@ -18,6 +18,15 @@ pub enum ContextAction {
         func_entry: u64,
         displayed_name: String,
     },
+    /// Phase 5c PR 5: "Set Type..." on a local variable. Opens a
+    /// text-entry popup where the user types a C type name (e.g.
+    /// `HANDLE`, `uint32_t`, `char*`). The string is parsed at
+    /// decompile time via `parse_user_ctype` and applied to the
+    /// matching `VarDecl` by the final typing pass.
+    SetVariableType {
+        func_entry: u64,
+        displayed_name: String,
+    },
     ToggleBookmark(u64),
     ShowXrefs(u64),
 }
@@ -103,6 +112,13 @@ pub fn address_context_menu(
                         });
                         ui.close_menu();
                     }
+                    if ui.button("Set Type...").clicked() {
+                        *pending = Some(ContextAction::SetVariableType {
+                            func_entry,
+                            displayed_name: name.clone(),
+                        });
+                        ui.close_menu();
+                    }
                 }
             }
             RenameKind::None => {}
@@ -181,6 +197,21 @@ pub fn apply_context_action(app: &mut ReghidraApp, action: ContextAction) {
                 .and_then(|p| p.variable_names.get(&(func_entry, displayed_name.clone())))
                 .cloned();
             app.annotation_popup.open_rename_variable(
+                func_entry,
+                displayed_name,
+                existing.as_deref(),
+            );
+        }
+        ContextAction::SetVariableType {
+            func_entry,
+            displayed_name,
+        } => {
+            let existing = app
+                .project
+                .as_ref()
+                .and_then(|p| p.variable_types.get(&(func_entry, displayed_name.clone())))
+                .cloned();
+            app.annotation_popup.open_set_variable_type(
                 func_entry,
                 displayed_name,
                 existing.as_deref(),

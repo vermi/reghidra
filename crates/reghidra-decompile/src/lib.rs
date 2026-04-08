@@ -29,6 +29,20 @@ pub struct DecompileContext {
     pub label_names: std::collections::HashMap<u64, String>,
     /// User-renamed local variables: post-heuristic displayed name → user name.
     pub variable_names: std::collections::HashMap<String, String>,
+    /// User-supplied type overrides for local variables. Keyed on the
+    /// **displayed** name — the name the user sees in the decompile
+    /// output, which is whatever the renamer + user rename produced
+    /// (e.g. `hProcess` if the user renamed `arg_8`, or the raw slot
+    /// name like `arg_8` if they didn't). Value is a free-form type
+    /// string (`"HANDLE"`, `"uint32_t"`, `"char*"`) parsed at
+    /// apply-time via [`parse_user_ctype`].
+    ///
+    /// Applied as a final post-pass after both the stackframe rewrite
+    /// and the variable-renamer have produced the final displayed
+    /// names, so the user never has to fight a moving target: you
+    /// rename first, then retype, and the key the override lands on
+    /// is exactly what's on screen.
+    pub variable_types: std::collections::HashMap<String, String>,
     /// Optional display name for the current function. When set, `emit_function`
     /// prefers this over the IR function's canonical `name`. Used to show a
     /// demangled form (e.g. MSVC C++ signatures) while keeping the mangled name
@@ -177,7 +191,13 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> DecompileOutput {
     // stable post-canonicalization names (e.g. `result`, not `rax`).
     let body = expr_builder::type_call_returns(body, ctx);
 
-    // Step 6: Emit C-like code. Pass the prototype through so the
+    // Step 6: Apply user-supplied type overrides to VarDecls.
+    // Final typing pass — overrides everything earlier (archive
+    // prototype arg types, call-return auto-typing) because the
+    // user's explicit "Set Type" choice is authoritative.
+    let body = expr_builder::apply_user_variable_types(body, ctx);
+
+    // Step 7: Emit C-like code. Pass the prototype through so the
     // signature line shows real types (`int _fclose(FILE* arg0)`) for
     // FLIRT-matched CRT functions instead of the generic
     // `void _fclose(void)` fallback.
@@ -199,6 +219,7 @@ pub fn decompile_annotated(
     let (body, frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
     let body = varnames::rename_variables(body, &ctx.variable_names);
     let body = expr_builder::type_call_returns(body, ctx);
+    let body = expr_builder::apply_user_variable_types(body, ctx);
     let variable_names = varnames::collect_displayed_names(&body);
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
     let lines = emit::emit_function_annotated(display_name, &body, &ctx.label_names, prototype);

@@ -16,6 +16,12 @@ pub enum AnnotationKind {
         func_entry: u64,
         displayed_name: String,
     },
+    /// Variable type override. Same keying as [`Self::RenameVariable`]; the
+    /// user enters a free-form C type name (`HANDLE`, `uint32_t`, `char*`).
+    SetVariableType {
+        func_entry: u64,
+        displayed_name: String,
+    },
 }
 
 /// State for the annotation editing popup.
@@ -83,6 +89,25 @@ impl AnnotationPopup {
         self.needs_focus = true;
     }
 
+    /// Open a set-variable-type dialog. Mirrors
+    /// [`Self::open_rename_variable`] but commits into the
+    /// `variable_types` map instead of `variable_names`.
+    pub fn open_set_variable_type(
+        &mut self,
+        func_entry: u64,
+        displayed_name: String,
+        existing: Option<&str>,
+    ) {
+        self.open = true;
+        self.address = func_entry;
+        self.text = existing.unwrap_or("").to_string();
+        self.kind = AnnotationKind::SetVariableType {
+            func_entry,
+            displayed_name,
+        };
+        self.needs_focus = true;
+    }
+
     pub fn close(&mut self) {
         self.open = false;
         self.text.clear();
@@ -122,6 +147,9 @@ impl AnnotationPopup {
             AnnotationKind::RenameVariable { displayed_name, .. } => {
                 format!("Rename Variable '{displayed_name}'")
             }
+            AnnotationKind::SetVariableType { displayed_name, .. } => {
+                format!("Set Type for '{displayed_name}'")
+            }
         };
 
         let mut close_after = false;
@@ -143,6 +171,9 @@ impl AnnotationPopup {
 
                         let hint = match self.kind {
                             AnnotationKind::Comment => "Enter comment (empty to remove)...",
+                            AnnotationKind::SetVariableType { .. } => {
+                                "Enter type (e.g. HANDLE, uint32_t, char*; empty to reset)..."
+                            }
                             _ => "Enter new name (empty to reset)...",
                         };
 
@@ -231,6 +262,18 @@ fn build_action(
                 .get(&(*func_entry, displayed_name.clone()))
                 .cloned(),
             new_name: opt_string(text),
+        },
+        AnnotationKind::SetVariableType {
+            func_entry,
+            displayed_name,
+        } => Action::SetVariableType {
+            func_entry: *func_entry,
+            displayed_name: displayed_name.clone(),
+            old_type: project
+                .variable_types
+                .get(&(*func_entry, displayed_name.clone()))
+                .cloned(),
+            new_type: opt_string(text),
         },
     }
 }

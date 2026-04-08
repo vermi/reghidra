@@ -63,6 +63,14 @@ pub struct Project {
     /// User-renamed local variables, keyed by (function entry, displayed name).
     /// The "displayed name" is the post-heuristic name (e.g. "arg0", "var_1").
     pub variable_names: HashMap<(u64, String), String>,
+    /// User-supplied type overrides for local variables, keyed identically
+    /// to [`Self::variable_names`]. Values are free-form type strings
+    /// (`"HANDLE"`, `"uint32_t"`, `"char*"`) parsed via
+    /// `reghidra_decompile::ast::parse_user_ctype` at decompile time.
+    /// Empty = no override (the slot shows whichever type the heuristic/
+    /// archive/return-type passes inferred). Session-persisted alongside
+    /// renames.
+    pub variable_types: HashMap<(u64, String), String>,
     pub bookmarks: Vec<u64>,
     /// Bundled signature databases (auto-loaded on open).
     pub bundled_dbs: Vec<FlirtDatabase>,
@@ -127,6 +135,7 @@ impl Project {
             renamed_functions: HashMap::new(),
             label_names: HashMap::new(),
             variable_names: HashMap::new(),
+            variable_types: HashMap::new(),
             bookmarks: Vec::new(),
             bundled_dbs,
             user_dbs: Vec::new(),
@@ -242,6 +251,25 @@ impl Project {
         }
     }
 
+    /// Set a user type override for a local variable inside a function.
+    /// Keyed by the *currently displayed* name (post auto-rename and
+    /// user rename), matching what the user sees in the decompile view.
+    /// Empty type string clears the override and falls back to the
+    /// heuristic/archive type.
+    pub fn set_variable_type(
+        &mut self,
+        func_entry: u64,
+        displayed_name: String,
+        new_type: String,
+    ) {
+        let key = (func_entry, displayed_name);
+        if new_type.trim().is_empty() {
+            self.variable_types.remove(&key);
+        } else {
+            self.variable_types.insert(key, new_type);
+        }
+    }
+
     /// Build the display-name map used by the decompiler for call targets.
     ///
     /// User-renamed functions pass through unchanged (they're already in
@@ -311,6 +339,17 @@ impl Project {
                 }
             })
             .collect();
+        let var_types_for_func: HashMap<String, String> = self
+            .variable_types
+            .iter()
+            .filter_map(|((fe, displayed), user)| {
+                if *fe == entry {
+                    Some((displayed.clone(), user.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let ctx = reghidra_decompile::DecompileContext {
             function_names,
             string_literals,
@@ -318,6 +357,7 @@ impl Project {
             predecessors: cfg.predecessors.clone(),
             label_names: self.label_names.clone(),
             variable_names: var_names_for_func,
+            variable_types: var_types_for_func,
             current_function_display_name: self.current_function_display_name(entry, &ir.name),
             type_archives: self.type_archives.clone(),
         };
@@ -359,6 +399,17 @@ impl Project {
                 }
             })
             .collect();
+        let var_types_for_func: HashMap<String, String> = self
+            .variable_types
+            .iter()
+            .filter_map(|((fe, displayed), user)| {
+                if *fe == entry {
+                    Some((displayed.clone(), user.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let ctx = reghidra_decompile::DecompileContext {
             function_names,
             string_literals,
@@ -366,6 +417,7 @@ impl Project {
             predecessors: cfg.predecessors.clone(),
             label_names: self.label_names.clone(),
             variable_names: var_names_for_func,
+            variable_types: var_types_for_func,
             current_function_display_name: self.current_function_display_name(entry, &ir.name),
             type_archives: self.type_archives.clone(),
         };
@@ -414,6 +466,11 @@ impl Project {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            variable_types: self
+                .variable_types
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let json = serde_json::to_string_pretty(&session)
             .map_err(|e| CoreError::Other(format!("Failed to serialize session: {e}")))?;
@@ -433,6 +490,7 @@ impl Project {
         self.bookmarks = session.bookmarks;
         self.label_names = session.label_names;
         self.variable_names = session.variable_names.into_iter().collect();
+        self.variable_types = session.variable_types.into_iter().collect();
         Ok(())
     }
 
@@ -449,6 +507,7 @@ impl Project {
         project.bookmarks = session.bookmarks;
         project.label_names = session.label_names;
         project.variable_names = session.variable_names.into_iter().collect();
+        project.variable_types = session.variable_types.into_iter().collect();
         Ok(project)
     }
 }
@@ -466,4 +525,8 @@ pub struct Session {
     /// Stored as Vec because tuple keys aren't supported in JSON object keys.
     #[serde(default)]
     pub variable_names: Vec<((u64, String), String)>,
+    /// User type overrides for local variables. Same keying as
+    /// `variable_names`; values are free-form type strings.
+    #[serde(default)]
+    pub variable_types: Vec<((u64, String), String)>,
 }

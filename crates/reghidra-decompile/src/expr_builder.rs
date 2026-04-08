@@ -653,6 +653,66 @@ fn type_call_returns_stmt(
     }
 }
 
+/// Final typing pass: apply user-supplied type overrides to
+/// `VarDecl` statements. Walks the body (recursively into nested
+/// blocks) and replaces each `VarDecl.ctype` whose `name` has an
+/// entry in `ctx.variable_types`. Values are parsed via
+/// [`crate::ast::parse_user_ctype`]; unparseable strings (empty
+/// after qualifier stripping) leave the original type untouched.
+///
+/// Runs as the final body transformation before emit so that:
+///
+/// 1. The key matches the *displayed* name the user sees — after
+///    both the auto-rename and any user rename — which is the same
+///    key the "Set Type..." context menu captures.
+/// 2. Any type-carrying pass that runs earlier (stackframe's
+///    prototype-driven arg typing, `type_call_returns`'s first-call
+///    return-type promotion) gets overridden by the user's choice,
+///    consistent with the "user retype is authoritative" precedence
+///    rule.
+///
+/// No-op fast path when `variable_types` is empty, so binaries
+/// without any user retypes pay zero cost.
+pub fn apply_user_variable_types(stmts: Vec<Stmt>, ctx: &DecompileContext) -> Vec<Stmt> {
+    if ctx.variable_types.is_empty() {
+        return stmts;
+    }
+    apply_user_variable_types_inner(stmts, ctx)
+}
+
+fn apply_user_variable_types_inner(stmts: Vec<Stmt>, ctx: &DecompileContext) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .map(|s| apply_user_variable_types_stmt(s, ctx))
+        .collect()
+}
+
+fn apply_user_variable_types_stmt(stmt: Stmt, ctx: &DecompileContext) -> Stmt {
+    match stmt {
+        Stmt::VarDecl { name, ctype, init } => {
+            let new_ctype = ctx
+                .variable_types
+                .get(&name)
+                .and_then(|s| crate::ast::parse_user_ctype(s))
+                .unwrap_or(ctype);
+            Stmt::VarDecl { name, ctype: new_ctype, init }
+        }
+        Stmt::If { cond, then_body, else_body } => Stmt::If {
+            cond,
+            then_body: apply_user_variable_types_inner(then_body, ctx),
+            else_body: apply_user_variable_types_inner(else_body, ctx),
+        },
+        Stmt::While { cond, body } => Stmt::While {
+            cond,
+            body: apply_user_variable_types_inner(body, ctx),
+        },
+        Stmt::Loop { body } => Stmt::Loop {
+            body: apply_user_variable_types_inner(body, ctx),
+        },
+        other => other,
+    }
+}
+
 fn emit_binop(stmts: &mut Vec<Stmt>, dst: &VarNode, a: &VarNode, b: &VarNode, op: BinOp) {
     stmts.push(Stmt::Assign(
         varnode_to_expr(dst),
@@ -760,6 +820,7 @@ mod tests {
             predecessors: Default::default(),
             label_names: Default::default(),
             variable_names: Default::default(),
+            variable_types: Default::default(),
             current_function_display_name: None,
             type_archives: Vec::new(),
         }
@@ -1375,6 +1436,70 @@ mod tests {
             "void-returning call should stay ExprStmt, got {:?}",
             stmts[0]
         );
+    }
+
+    /// User-supplied type overrides in `ctx.variable_types` should
+    /// replace the ctype on the matching `VarDecl` and leave other
+    /// statements alone. The key is the displayed variable name.
+    #[test]
+    fn user_type_override_applies_to_vardecl() {
+        use crate::ast::CType;
+        let stmts = vec![
+            Stmt::VarDecl {
+                name: "arg_8".into(),
+                ctype: CType::Unknown(4),
+                init: None,
+            },
+            Stmt::VarDecl {
+                name: "local_4".into(),
+                ctype: CType::Unknown(4),
+                init: None,
+            },
+            Stmt::Return(None),
+        ];
+        let mut ctx = empty_ctx();
+        ctx.variable_types.insert("arg_8".into(), "HANDLE".into());
+        ctx.variable_types.insert("local_4".into(), "char*".into());
+        let out = apply_user_variable_types(stmts, &ctx);
+        match &out[0] {
+            Stmt::VarDecl { ctype, .. } => {
+                assert!(matches!(ctype, CType::Named(n) if n == "HANDLE"));
+            }
+            other => panic!("expected VarDecl, got {other:?}"),
+        }
+        match &out[1] {
+            Stmt::VarDecl { ctype, .. } => {
+                // `char*` → Pointer(Int8)
+                match ctype {
+                    CType::Pointer(inner) => assert!(matches!(**inner, CType::Int8)),
+                    other => panic!("expected Pointer, got {other:?}"),
+                }
+            }
+            other => panic!("expected VarDecl, got {other:?}"),
+        }
+        assert!(matches!(&out[2], Stmt::Return(None)));
+    }
+
+    /// Empty override string should be treated as "no override" —
+    /// the pass should leave the existing ctype untouched. (The
+    /// Project::set_variable_type method also removes empty
+    /// entries, so this mostly guards against stale empty strings
+    /// from a hand-edited session file.)
+    #[test]
+    fn empty_user_type_string_leaves_ctype_untouched() {
+        use crate::ast::CType;
+        let stmts = vec![Stmt::VarDecl {
+            name: "arg_8".into(),
+            ctype: CType::UInt32,
+            init: None,
+        }];
+        let mut ctx = empty_ctx();
+        ctx.variable_types.insert("arg_8".into(), "   ".into());
+        let out = apply_user_variable_types(stmts, &ctx);
+        match &out[0] {
+            Stmt::VarDecl { ctype, .. } => assert!(matches!(ctype, CType::UInt32)),
+            other => panic!("got {other:?}"),
+        }
     }
 
     /// The `type_call_returns` post-rename pass converts the first

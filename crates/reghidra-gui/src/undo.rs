@@ -24,6 +24,16 @@ pub enum Action {
         old_name: Option<String>,
         new_name: Option<String>,
     },
+    /// Phase 5c PR 5: user type override on a local variable. Reversed
+    /// by swapping old/new. Decompile output must be invalidated on
+    /// apply (the displayed type changes), so this action is counted
+    /// by `action_affects_decompile`.
+    SetVariableType {
+        func_entry: u64,
+        displayed_name: String,
+        old_type: Option<String>,
+        new_type: Option<String>,
+    },
     AddBookmark {
         address: u64,
     },
@@ -104,6 +114,7 @@ fn action_affects_decompile(a: &Action) -> bool {
         Action::RenameFunction { .. }
             | Action::RenameLabel { .. }
             | Action::RenameVariable { .. }
+            | Action::SetVariableType { .. }
     )
 }
 
@@ -143,6 +154,18 @@ fn apply_action(action: &Action, project: &mut Project) {
                 *func_entry,
                 displayed_name.clone(),
                 new_name.clone().unwrap_or_default(),
+            );
+        }
+        Action::SetVariableType {
+            func_entry,
+            displayed_name,
+            new_type,
+            ..
+        } => {
+            project.set_variable_type(
+                *func_entry,
+                displayed_name.clone(),
+                new_type.clone().unwrap_or_default(),
             );
         }
         Action::AddBookmark { address } => {
@@ -196,6 +219,17 @@ fn reverse_action(action: &Action) -> Action {
             old_name: new_name.clone(),
             new_name: old_name.clone(),
         },
+        Action::SetVariableType {
+            func_entry,
+            displayed_name,
+            old_type,
+            new_type,
+        } => Action::SetVariableType {
+            func_entry: *func_entry,
+            displayed_name: displayed_name.clone(),
+            old_type: new_type.clone(),
+            new_type: old_type.clone(),
+        },
         Action::AddBookmark { address } => Action::RemoveBookmark { address: *address },
         Action::RemoveBookmark { address } => Action::AddBookmark { address: *address },
     }
@@ -207,6 +241,7 @@ fn action_description(action: &Action) -> &str {
         Action::RenameFunction { .. } => "Rename Function",
         Action::RenameLabel { .. } => "Rename Label",
         Action::RenameVariable { .. } => "Rename Variable",
+        Action::SetVariableType { .. } => "Set Variable Type",
         Action::AddBookmark { .. } => "Add Bookmark",
         Action::RemoveBookmark { .. } => "Remove Bookmark",
     }
