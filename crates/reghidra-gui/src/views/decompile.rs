@@ -40,13 +40,14 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     };
 
     let func_entry = func.entry_address;
-    // Header display uses the demangled form (and user rename if present);
-    // the raw mangled name stays canonical in storage.
+    // The top label just identifies the function — use the short form so
+    // a long C++ signature doesn't bloat the header. The decompiled body
+    // itself (rendered by emit_function) already shows the full signature.
     let func_name = project
         .renamed_functions
         .get(&func_entry)
         .cloned()
-        .unwrap_or_else(|| reghidra_core::demangle::display_name(&func.name).into_owned());
+        .unwrap_or_else(|| reghidra_core::demangle::display_name_short(&func.name).into_owned());
 
     // Use cached decompile output if the function and rename generation haven't changed
     let needs_decompile = match &app.decompile_cache {

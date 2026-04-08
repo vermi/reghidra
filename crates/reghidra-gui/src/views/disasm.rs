@@ -8,10 +8,22 @@ use egui::{RichText, Ui};
 enum DisplayLine {
     /// Spacer before a function header (if not the first).
     Spacer,
-    /// Function header line.
-    FuncHeader {
+    /// Top/bottom rule line of a function header block.
+    FuncHeaderRule {
+        color: egui::Color32,
+    },
+    /// Name line of a function header block. Carries the click/context
+    /// target so right-click actions (rename, comment, bookmark, etc.)
+    /// hit the function entry.
+    FuncHeaderName {
         address: u64,
         display_name: String,
+        color: egui::Color32,
+    },
+    /// Stats line of a function header block (insn count + xref count +
+    /// entry address). Not interactive.
+    FuncHeaderStats {
+        address: u64,
         insn_count: usize,
         xref_count: usize,
         color: egui::Color32,
@@ -87,7 +99,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                 .renamed_functions
                 .get(&insn.address)
                 .cloned()
-                .unwrap_or_else(|| reghidra_core::demangle::display_name(&func.name).into_owned());
+                .unwrap_or_else(|| reghidra_core::demangle::display_name_short(&func.name).into_owned());
 
             let header_color = if is_user_renamed {
                 theme.func_header
@@ -104,13 +116,20 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             if idx > 0 {
                 display_lines.push(DisplayLine::Spacer);
             }
-            display_lines.push(DisplayLine::FuncHeader {
+            // Blocky multi-line header: top rule, name, stats, bottom rule.
+            display_lines.push(DisplayLine::FuncHeaderRule { color: header_color });
+            display_lines.push(DisplayLine::FuncHeaderName {
                 address: insn.address,
                 display_name,
+                color: header_color,
+            });
+            display_lines.push(DisplayLine::FuncHeaderStats {
+                address: insn.address,
                 insn_count: func.instruction_count,
                 xref_count,
                 color: header_color,
             });
+            display_lines.push(DisplayLine::FuncHeaderRule { color: header_color });
         }
 
         // Xrefs TO this address (non-function-entry branch targets)
@@ -163,23 +182,24 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                 DisplayLine::Spacer => {
                     ui.add_space(row_height);
                 }
-                DisplayLine::FuncHeader {
+                DisplayLine::FuncHeaderRule { color } => {
+                    ui.label(
+                        RichText::new("; ──────────────────────────────────────────────────────")
+                            .text_style(mono.clone())
+                            .color(*color),
+                    );
+                }
+                DisplayLine::FuncHeaderName {
                     address,
                     display_name,
-                    insn_count,
-                    xref_count,
                     color,
-                    ..
                 } => {
                     let resp = ui.add(
                         egui::Label::new(
-                            RichText::new(format!(
-                                "; ======= {} ({} insns, {} xrefs) =======",
-                                display_name, insn_count, xref_count
-                            ))
-                            .text_style(mono.clone())
-                            .color(*color)
-                            .strong(),
+                            RichText::new(format!("; FUNCTION  {}", display_name))
+                                .text_style(mono.clone())
+                                .color(*color)
+                                .strong(),
                         )
                         .sense(egui::Sense::click()),
                     );
@@ -193,6 +213,21 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                         has_comment,
                         ExtraContext::default(),
                         &mut ctx_action,
+                    );
+                }
+                DisplayLine::FuncHeaderStats {
+                    address,
+                    insn_count,
+                    xref_count,
+                    color,
+                } => {
+                    ui.label(
+                        RichText::new(format!(
+                            ";   0x{:x} · {} insns · {} xrefs",
+                            address, insn_count, xref_count
+                        ))
+                        .text_style(mono.clone())
+                        .color(*color),
                     );
                 }
                 DisplayLine::XrefHint { count } => {

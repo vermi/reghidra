@@ -28,7 +28,9 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                         .renamed_functions
                         .get(&f.entry_address)
                         .cloned()
-                        .unwrap_or_else(|| reghidra_core::demangle::display_name(&f.name).into_owned())
+                        .unwrap_or_else(|| {
+                            reghidra_core::demangle::display_name_short(&f.name).into_owned()
+                        })
                 })
                 .unwrap_or_else(|| format!("0x{:x}", x.from));
             (x.from, caller, x.kind)

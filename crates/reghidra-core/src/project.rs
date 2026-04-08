@@ -136,7 +136,7 @@ impl Project {
         }
         self.analysis
             .function_at(address)
-            .map(|f| crate::demangle::display_name(&f.name).into_owned())
+            .map(|f| crate::demangle::display_name_short(&f.name).into_owned())
     }
 
     /// Get the symbol at or near an address.
@@ -318,11 +318,15 @@ impl Project {
             .iter()
             .filter(|f| f.entry_address != 0)
             .map(|f| {
+                // Function list is a compact sidebar — use the short form
+                // (symbol only, no parameter list) so long C++ signatures
+                // don't overflow the UI. The full signature is shown in
+                // the decompile view header.
                 let name = self
                     .renamed_functions
                     .get(&f.entry_address)
                     .cloned()
-                    .unwrap_or_else(|| crate::demangle::display_name(&f.name).into_owned());
+                    .unwrap_or_else(|| crate::demangle::display_name_short(&f.name).into_owned());
                 (f.entry_address, name)
             })
             .collect();
