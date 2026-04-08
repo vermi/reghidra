@@ -13,6 +13,17 @@ pub enum Action {
         old_name: Option<String>,
         new_name: Option<String>,
     },
+    RenameLabel {
+        address: u64,
+        old_name: Option<String>,
+        new_name: Option<String>,
+    },
+    RenameVariable {
+        func_entry: u64,
+        displayed_name: String,
+        old_name: Option<String>,
+        new_name: Option<String>,
+    },
     AddBookmark {
         address: u64,
     },
@@ -75,17 +86,25 @@ impl UndoHistory {
         self.redo_stack.last().map(action_description)
     }
 
+    /// Returns true if undoing the next action would change a name that's
+    /// rendered into the decompile output (function/label/variable). The GUI
+    /// uses this to know when to invalidate the decompile cache.
     pub fn is_next_undo_rename(&self) -> bool {
-        self.undo_stack
-            .last()
-            .is_some_and(|a| matches!(a, Action::RenameFunction { .. }))
+        self.undo_stack.last().is_some_and(action_affects_decompile)
     }
 
     pub fn is_next_redo_rename(&self) -> bool {
-        self.redo_stack
-            .last()
-            .is_some_and(|a| matches!(a, Action::RenameFunction { .. }))
+        self.redo_stack.last().is_some_and(action_affects_decompile)
     }
+}
+
+fn action_affects_decompile(a: &Action) -> bool {
+    matches!(
+        a,
+        Action::RenameFunction { .. }
+            | Action::RenameLabel { .. }
+            | Action::RenameVariable { .. }
+    )
 }
 
 fn apply_action(action: &Action, project: &mut Project) {
@@ -103,6 +122,26 @@ fn apply_action(action: &Action, project: &mut Project) {
         } => {
             project.rename_function(
                 *address,
+                new_name.clone().unwrap_or_default(),
+            );
+        }
+        Action::RenameLabel {
+            address, new_name, ..
+        } => {
+            project.rename_label(
+                *address,
+                new_name.clone().unwrap_or_default(),
+            );
+        }
+        Action::RenameVariable {
+            func_entry,
+            displayed_name,
+            new_name,
+            ..
+        } => {
+            project.rename_variable(
+                *func_entry,
+                displayed_name.clone(),
                 new_name.clone().unwrap_or_default(),
             );
         }
@@ -137,6 +176,26 @@ fn reverse_action(action: &Action) -> Action {
             old_name: new_name.clone(),
             new_name: old_name.clone(),
         },
+        Action::RenameLabel {
+            address,
+            old_name,
+            new_name,
+        } => Action::RenameLabel {
+            address: *address,
+            old_name: new_name.clone(),
+            new_name: old_name.clone(),
+        },
+        Action::RenameVariable {
+            func_entry,
+            displayed_name,
+            old_name,
+            new_name,
+        } => Action::RenameVariable {
+            func_entry: *func_entry,
+            displayed_name: displayed_name.clone(),
+            old_name: new_name.clone(),
+            new_name: old_name.clone(),
+        },
         Action::AddBookmark { address } => Action::RemoveBookmark { address: *address },
         Action::RemoveBookmark { address } => Action::AddBookmark { address: *address },
     }
@@ -146,6 +205,8 @@ fn action_description(action: &Action) -> &str {
     match action {
         Action::SetComment { .. } => "Set Comment",
         Action::RenameFunction { .. } => "Rename Function",
+        Action::RenameLabel { .. } => "Rename Label",
+        Action::RenameVariable { .. } => "Rename Variable",
         Action::AddBookmark { .. } => "Add Bookmark",
         Action::RemoveBookmark { .. } => "Remove Bookmark",
     }

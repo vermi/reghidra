@@ -1,5 +1,6 @@
 mod annotations;
 mod app;
+mod context_menu;
 mod help;
 mod palette;
 mod theme;

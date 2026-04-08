@@ -108,8 +108,9 @@ pub struct ReghidraApp {
     // Track whether theme has been applied
     theme_applied: bool,
 
-    // Cached decompile output: (function_entry_addr, rename_generation, annotated_lines)
-    pub decompile_cache: Option<(u64, u64, Vec<reghidra_core::AnnotatedLine>)>,
+    // Cached decompile output: (function_entry_addr, rename_generation, annotated_lines, displayed_var_names)
+    pub decompile_cache:
+        Option<(u64, u64, Vec<reghidra_core::AnnotatedLine>, Vec<String>)>,
     /// Bumped whenever a function is renamed so decompile cache knows to refresh.
     pub rename_generation: u64,
 
@@ -491,7 +492,7 @@ impl ReghidraApp {
     }
 
     /// Get the active view ref for the focused pane (primary or secondary).
-    fn focused_view_mut(&mut self) -> &mut MainView {
+    pub fn focused_view_mut(&mut self) -> &mut MainView {
         if self.layout == ViewLayout::SplitVertical && self.focused_pane == 1 {
             &mut self.secondary_view
         } else {
@@ -732,7 +733,7 @@ impl eframe::App for ReghidraApp {
                     .and_then(|p| p.renamed_functions.get(&addr))
                     .cloned();
                 self.annotation_popup
-                    .open_rename(addr, existing.as_deref());
+                    .open_rename_function(addr, existing.as_deref());
             }
         }
 
@@ -940,7 +941,7 @@ impl eframe::App for ReghidraApp {
                                 .and_then(|p| p.renamed_functions.get(&addr))
                                 .cloned();
                             self.annotation_popup
-                                .open_rename(addr, existing.as_deref());
+                                .open_rename_function(addr, existing.as_deref());
                         }
                         ui.close_menu();
                     }
@@ -1235,8 +1236,11 @@ impl eframe::App for ReghidraApp {
 
         // Annotation popup
         if self.annotation_popup.open {
-            let was_rename =
-                self.annotation_popup.kind == crate::annotations::AnnotationKind::Rename;
+            // Any rename (function/label/variable) invalidates the decompile cache.
+            let was_rename = !matches!(
+                self.annotation_popup.kind,
+                crate::annotations::AnnotationKind::Comment
+            );
             if let Some(ref mut project) = self.project {
                 let committed = self.annotation_popup
                     .show(ctx, &theme_clone, project, &mut self.undo);

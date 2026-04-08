@@ -15,6 +15,11 @@ pub struct Project {
     pub analysis: AnalysisResults,
     pub comments: HashMap<u64, String>,
     pub renamed_functions: HashMap<u64, String>,
+    /// User-renamed labels (CFG block addresses → display name).
+    pub label_names: HashMap<u64, String>,
+    /// User-renamed local variables, keyed by (function entry, displayed name).
+    /// The "displayed name" is the post-heuristic name (e.g. "arg0", "var_1").
+    pub variable_names: HashMap<(u64, String), String>,
     pub bookmarks: Vec<u64>,
     /// Bundled signature databases (auto-loaded on open).
     pub bundled_dbs: Vec<FlirtDatabase>,
@@ -64,6 +69,8 @@ impl Project {
             analysis,
             comments: HashMap::new(),
             renamed_functions: HashMap::new(),
+            label_names: HashMap::new(),
+            variable_names: HashMap::new(),
             bookmarks: Vec::new(),
             bundled_dbs,
             user_dbs: Vec::new(),
@@ -142,6 +149,27 @@ impl Project {
         }
     }
 
+    /// Rename a label (CFG block address). Empty name resets to default.
+    pub fn rename_label(&mut self, address: u64, name: String) {
+        if name.is_empty() {
+            self.label_names.remove(&address);
+        } else {
+            self.label_names.insert(address, name);
+        }
+    }
+
+    /// Rename a local variable inside a function. Keyed by the displayed name
+    /// produced by the auto-naming pass (e.g. "arg0", "var_1"). Empty name
+    /// resets to default.
+    pub fn rename_variable(&mut self, func_entry: u64, displayed_name: String, new_name: String) {
+        let key = (func_entry, displayed_name);
+        if new_name.is_empty() {
+            self.variable_names.remove(&key);
+        } else {
+            self.variable_names.insert(key, new_name);
+        }
+    }
+
     /// Decompile the function at the given entry address.
     pub fn decompile(&self, entry: u64) -> Option<String> {
         let ir = self.analysis.ir_for(entry)?;
@@ -165,21 +193,36 @@ impl Project {
             .collect();
 
         let cfg = self.analysis.cfgs.get(&entry)?;
+        let var_names_for_func: HashMap<String, String> = self
+            .variable_names
+            .iter()
+            .filter_map(|((fe, displayed), user)| {
+                if *fe == entry {
+                    Some((displayed.clone(), user.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let ctx = reghidra_decompile::DecompileContext {
             function_names,
             string_literals,
             successors: cfg.successors.clone(),
             predecessors: cfg.predecessors.clone(),
+            label_names: self.label_names.clone(),
+            variable_names: var_names_for_func,
         };
 
         Some(reghidra_decompile::decompile(ir, &ctx))
     }
 
-    /// Decompile the function at the given entry address, returning annotated lines.
+    /// Decompile the function at the given entry address, returning annotated
+    /// lines and the set of post-rename variable names that appear (used by
+    /// the GUI to tokenize variable references for right-click rename).
     pub fn decompile_annotated(
         &self,
         entry: u64,
-    ) -> Option<Vec<reghidra_decompile::AnnotatedLine>> {
+    ) -> Option<(Vec<reghidra_decompile::AnnotatedLine>, Vec<String>)> {
         let ir = self.analysis.ir_for(entry)?;
 
         let mut function_names = HashMap::new();
@@ -200,11 +243,24 @@ impl Project {
             .collect();
 
         let cfg = self.analysis.cfgs.get(&entry)?;
+        let var_names_for_func: HashMap<String, String> = self
+            .variable_names
+            .iter()
+            .filter_map(|((fe, displayed), user)| {
+                if *fe == entry {
+                    Some((displayed.clone(), user.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let ctx = reghidra_decompile::DecompileContext {
             function_names,
             string_literals,
             successors: cfg.successors.clone(),
             predecessors: cfg.predecessors.clone(),
+            label_names: self.label_names.clone(),
+            variable_names: var_names_for_func,
         };
 
         Some(reghidra_decompile::decompile_annotated(ir, &ctx))
@@ -239,6 +295,12 @@ impl Project {
             comments: self.comments.clone(),
             renamed_functions: self.renamed_functions.clone(),
             bookmarks: self.bookmarks.clone(),
+            label_names: self.label_names.clone(),
+            variable_names: self
+                .variable_names
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let json = serde_json::to_string_pretty(&session)
             .map_err(|e| CoreError::Other(format!("Failed to serialize session: {e}")))?;
@@ -256,6 +318,8 @@ impl Project {
         self.comments = session.comments;
         self.renamed_functions = session.renamed_functions;
         self.bookmarks = session.bookmarks;
+        self.label_names = session.label_names;
+        self.variable_names = session.variable_names.into_iter().collect();
         Ok(())
     }
 
@@ -270,6 +334,8 @@ impl Project {
         project.comments = session.comments;
         project.renamed_functions = session.renamed_functions;
         project.bookmarks = session.bookmarks;
+        project.label_names = session.label_names;
+        project.variable_names = session.variable_names.into_iter().collect();
         Ok(project)
     }
 }
@@ -282,4 +348,9 @@ pub struct Session {
     pub comments: HashMap<u64, String>,
     pub renamed_functions: HashMap<u64, String>,
     pub bookmarks: Vec<u64>,
+    #[serde(default)]
+    pub label_names: HashMap<u64, String>,
+    /// Stored as Vec because tuple keys aren't supported in JSON object keys.
+    #[serde(default)]
+    pub variable_names: Vec<((u64, String), String)>,
 }

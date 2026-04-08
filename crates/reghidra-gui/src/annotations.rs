@@ -5,10 +5,17 @@ use crate::undo::{Action, UndoHistory};
 use reghidra_core::Project;
 
 /// What kind of annotation dialog is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnotationKind {
     Comment,
-    Rename,
+    RenameFunction,
+    RenameLabel,
+    /// Variable rename. Carries the function entry and the displayed name
+    /// (post-heuristic, e.g. "arg0") so the action can target the right key.
+    RenameVariable {
+        func_entry: u64,
+        displayed_name: String,
+    },
 }
 
 /// State for the annotation editing popup.
@@ -40,12 +47,39 @@ impl AnnotationPopup {
         self.needs_focus = true;
     }
 
-    /// Open a rename dialog for the given address.
-    pub fn open_rename(&mut self, address: u64, existing: Option<&str>) {
+    /// Open a rename-function dialog for the given function entry address.
+    pub fn open_rename_function(&mut self, address: u64, existing: Option<&str>) {
         self.open = true;
-        self.kind = AnnotationKind::Rename;
+        self.kind = AnnotationKind::RenameFunction;
         self.address = address;
         self.text = existing.unwrap_or("").to_string();
+        self.needs_focus = true;
+    }
+
+    /// Open a rename-label dialog for the given block address.
+    pub fn open_rename_label(&mut self, address: u64, existing: Option<&str>) {
+        self.open = true;
+        self.kind = AnnotationKind::RenameLabel;
+        self.address = address;
+        self.text = existing.unwrap_or("").to_string();
+        self.needs_focus = true;
+    }
+
+    /// Open a rename-variable dialog. The "address" is set to the function
+    /// entry so the title still shows a meaningful location.
+    pub fn open_rename_variable(
+        &mut self,
+        func_entry: u64,
+        displayed_name: String,
+        existing: Option<&str>,
+    ) {
+        self.open = true;
+        self.address = func_entry;
+        self.text = existing.unwrap_or("").to_string();
+        self.kind = AnnotationKind::RenameVariable {
+            func_entry,
+            displayed_name,
+        };
         self.needs_focus = true;
     }
 
@@ -79,9 +113,15 @@ impl AnnotationPopup {
             return false;
         }
 
-        let title = match self.kind {
+        let title = match &self.kind {
             AnnotationKind::Comment => format!("Comment @ 0x{:08x}", self.address),
-            AnnotationKind::Rename => format!("Rename @ 0x{:08x}", self.address),
+            AnnotationKind::RenameFunction => {
+                format!("Rename Function @ 0x{:08x}", self.address)
+            }
+            AnnotationKind::RenameLabel => format!("Rename Label @ 0x{:08x}", self.address),
+            AnnotationKind::RenameVariable { displayed_name, .. } => {
+                format!("Rename Variable '{displayed_name}'")
+            }
         };
 
         let mut close_after = false;
@@ -103,7 +143,7 @@ impl AnnotationPopup {
 
                         let hint = match self.kind {
                             AnnotationKind::Comment => "Enter comment (empty to remove)...",
-                            AnnotationKind::Rename => "Enter new name (empty to reset)...",
+                            _ => "Enter new name (empty to reset)...",
                         };
 
                         let response = ui.add(
@@ -121,35 +161,7 @@ impl AnnotationPopup {
                         if response.lost_focus()
                             && ui.input(|i| i.key_pressed(Key::Enter))
                         {
-                            let action = match self.kind {
-                                AnnotationKind::Comment => {
-                                    let old = project.comments.get(&self.address).cloned();
-                                    let new_val = if self.text.is_empty() {
-                                        None
-                                    } else {
-                                        Some(self.text.clone())
-                                    };
-                                    Action::SetComment {
-                                        address: self.address,
-                                        old_value: old,
-                                        new_value: new_val,
-                                    }
-                                }
-                                AnnotationKind::Rename => {
-                                    let old =
-                                        project.renamed_functions.get(&self.address).cloned();
-                                    let new_name = if self.text.is_empty() {
-                                        None
-                                    } else {
-                                        Some(self.text.clone())
-                                    };
-                                    Action::RenameFunction {
-                                        address: self.address,
-                                        old_name: old,
-                                        new_name,
-                                    }
-                                }
-                            };
+                            let action = build_action(&self.kind, self.address, &self.text, project);
                             undo.execute(action, project);
                             committed = true;
                             close_after = true;
@@ -158,38 +170,7 @@ impl AnnotationPopup {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             if ui.button("OK (Enter)").clicked() {
-                                let action = match self.kind {
-                                    AnnotationKind::Comment => {
-                                        let old =
-                                            project.comments.get(&self.address).cloned();
-                                        let new_val = if self.text.is_empty() {
-                                            None
-                                        } else {
-                                            Some(self.text.clone())
-                                        };
-                                        Action::SetComment {
-                                            address: self.address,
-                                            old_value: old,
-                                            new_value: new_val,
-                                        }
-                                    }
-                                    AnnotationKind::Rename => {
-                                        let old = project
-                                            .renamed_functions
-                                            .get(&self.address)
-                                            .cloned();
-                                        let new_name = if self.text.is_empty() {
-                                            None
-                                        } else {
-                                            Some(self.text.clone())
-                                        };
-                                        Action::RenameFunction {
-                                            address: self.address,
-                                            old_name: old,
-                                            new_name,
-                                        }
-                                    }
-                                };
+                                let action = build_action(&self.kind, self.address, &self.text, project);
                                 undo.execute(action, project);
                                 committed = true;
                                 close_after = true;
@@ -206,5 +187,50 @@ impl AnnotationPopup {
         }
 
         committed
+    }
+}
+
+fn opt_string(text: &str) -> Option<String> {
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn build_action(
+    kind: &AnnotationKind,
+    address: u64,
+    text: &str,
+    project: &Project,
+) -> Action {
+    match kind {
+        AnnotationKind::Comment => Action::SetComment {
+            address,
+            old_value: project.comments.get(&address).cloned(),
+            new_value: opt_string(text),
+        },
+        AnnotationKind::RenameFunction => Action::RenameFunction {
+            address,
+            old_name: project.renamed_functions.get(&address).cloned(),
+            new_name: opt_string(text),
+        },
+        AnnotationKind::RenameLabel => Action::RenameLabel {
+            address,
+            old_name: project.label_names.get(&address).cloned(),
+            new_name: opt_string(text),
+        },
+        AnnotationKind::RenameVariable {
+            func_entry,
+            displayed_name,
+        } => Action::RenameVariable {
+            func_entry: *func_entry,
+            displayed_name: displayed_name.clone(),
+            old_name: project
+                .variable_names
+                .get(&(*func_entry, displayed_name.clone()))
+                .cloned(),
+            new_name: opt_string(text),
+        },
     }
 }
