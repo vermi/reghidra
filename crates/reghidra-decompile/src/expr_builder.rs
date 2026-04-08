@@ -45,17 +45,11 @@ pub fn build_statements(
                 }
                 IrOp::Load { dst, addr } => {
                     let lhs = varnode_to_expr(dst);
-                    let rhs = Expr::Deref(
-                        Box::new(varnode_to_expr(addr)),
-                        CType::from_size(dst.size, false),
-                    );
+                    let rhs = memory_access_expr(addr, dst.size, ctx);
                     stmts.push(Stmt::Assign(lhs, rhs));
                 }
                 IrOp::Store { addr, src } => {
-                    let lhs = Expr::Deref(
-                        Box::new(varnode_to_expr(addr)),
-                        CType::from_size(src.size, false),
-                    );
+                    let lhs = memory_access_expr(addr, src.size, ctx);
                     let rhs = varnode_to_expr(src);
                     stmts.push(Stmt::Assign(lhs, rhs));
                 }
@@ -184,6 +178,8 @@ fn is_stack_pointer(vn: &VarNode) -> bool {
 
 /// Emit any deferred stack writes as plain `*(rsp) = value` assignments.
 /// Called when we decide the pushes weren't actually call-argument setup.
+/// These always have a register address (the stack pointer), so they
+/// never hit the global-data rewrite path in `memory_access_expr`.
 fn flush_stack_writes(stmts: &mut Vec<Stmt>, pending: &mut Vec<(VarNode, VarNode)>) {
     for (addr, src) in pending.drain(..) {
         let lhs = Expr::Deref(
@@ -193,6 +189,47 @@ fn flush_stack_writes(stmts: &mut Vec<Stmt>, pending: &mut Vec<(VarNode, VarNode
         let rhs = varnode_to_expr(&src);
         stmts.push(Stmt::Assign(lhs, rhs));
     }
+}
+
+/// Minimum address we'll accept as a plausible global-data pointer. Anything
+/// below this (NULL, small struct-offset constants, IRQ vector numbers, etc.)
+/// stays as a raw `*(0xN)` deref so we don't misname legitimate small
+/// integer dereferences as globals.
+const GLOBAL_DATA_MIN_ADDR: u64 = 0x1000;
+
+/// Build the expression for a memory access (Load rhs / Store lhs) at
+/// `addr` for a value of `size` bytes.
+///
+/// - For a constant address that looks like a global (>= `GLOBAL_DATA_MIN_ADDR`)
+///   and isn't already known as a function pointer or string literal, the
+///   access is rewritten as a bare `g_dat_ADDR` variable reference instead
+///   of `*(0xADDR)`. This is what users expect to see for `mov [0x40dfd8], eax`
+///   and friends, and makes the hex address clickable (the GUI tokenizer
+///   recognizes the `g_dat_` prefix).
+/// - For a constant address that resolves to a known function (typically a
+///   PE IAT slot from `import_addr_map`), emit a bare variable reference by
+///   that name — e.g. reading a function pointer from an IAT slot.
+/// - Everything else (register/temp addresses, small constants, etc.) falls
+///   back to a plain `*(expr)` deref.
+fn memory_access_expr(addr: &VarNode, size: u8, ctx: &DecompileContext) -> Expr {
+    if addr.space == VarSpace::Constant {
+        // Function pointer read from a known slot (e.g. PE IAT entry that
+        // some code path reads as data rather than calling directly).
+        if let Some(name) = ctx.function_names.get(&addr.offset) {
+            return Expr::Var(name.clone());
+        }
+        // Plausible global — rewrite as a named symbol. Strings are
+        // intentionally not rewritten here because string loads are rare
+        // and their textual form is preserved elsewhere (string literal
+        // references come through as arguments, not Load ops).
+        if addr.offset >= GLOBAL_DATA_MIN_ADDR {
+            return Expr::Var(format!("g_dat_{:x}", addr.offset));
+        }
+    }
+    Expr::Deref(
+        Box::new(varnode_to_expr(addr)),
+        CType::from_size(size, false),
+    )
 }
 
 /// Consume the pending stack writes and return them as call arguments.
@@ -392,6 +429,76 @@ mod tests {
                 assert_eq!(args.len(), 1, "only the second push should be an arg");
             }
             other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_plausible_global_uses_g_dat_name() {
+        // mov eax, [0x40dfd8]  ->  eax = g_dat_40dfd8 (not *(0x40dfd8))
+        let eax = VarNode::reg(0, 4);
+        let global = VarNode::constant(0x40dfd8, 4);
+        let ir = mk_ir(vec![IrOp::Load { dst: eax, addr: global }]);
+        let ctx = empty_ctx();
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        match &stmts[0] {
+            Stmt::Assign(_, Expr::Var(name)) => {
+                assert_eq!(name, "g_dat_40dfd8");
+            }
+            other => panic!("expected Assign with Var rhs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn store_to_plausible_global_uses_g_dat_name() {
+        // mov [0x40dfd8], eax  ->  g_dat_40dfd8 = eax
+        let eax = VarNode::reg(0, 4);
+        let global = VarNode::constant(0x40dfd8, 4);
+        let ir = mk_ir(vec![IrOp::Store { addr: global, src: eax }]);
+        let ctx = empty_ctx();
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        match &stmts[0] {
+            Stmt::Assign(Expr::Var(name), _) => {
+                assert_eq!(name, "g_dat_40dfd8");
+            }
+            other => panic!("expected Assign with Var lhs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_small_constant_stays_deref() {
+        // Small constants (< 0x1000) should stay as raw derefs — they're
+        // almost certainly struct offsets or null-adjacent values, not
+        // globals worth naming.
+        let eax = VarNode::reg(0, 4);
+        let tiny = VarNode::constant(0x10, 4);
+        let ir = mk_ir(vec![IrOp::Load { dst: eax, addr: tiny }]);
+        let ctx = empty_ctx();
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        match &stmts[0] {
+            Stmt::Assign(_, Expr::Deref(..)) => {}
+            other => panic!("expected Deref rhs for small constant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_known_function_pointer_uses_name() {
+        // If the address is in function_names (e.g. a PE IAT slot), emit
+        // a bare variable reference with that name rather than g_dat_XXXX.
+        let eax = VarNode::reg(0, 4);
+        let iat = VarNode::constant(0x40a028, 4);
+        let ir = mk_ir(vec![IrOp::Load { dst: eax, addr: iat }]);
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x40a028, "GetLastError".to_string());
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        match &stmts[0] {
+            Stmt::Assign(_, Expr::Var(name)) => {
+                assert_eq!(name, "GetLastError");
+            }
+            other => panic!("expected function-name Var rhs, got {other:?}"),
         }
     }
 }

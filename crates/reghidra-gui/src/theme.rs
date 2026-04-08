@@ -53,14 +53,21 @@ pub struct Theme {
     pub hex_ascii: Color32,
     pub column_header: Color32,
 
-    // Decompile
+    // Decompile — token-level syntax categories. The highlighter walks
+    // each rendered line and classifies every lexeme into one of these
+    // buckets so that keywords, types, numbers, strings, operators, and
+    // identifiers are all visually distinct instead of the whole line
+    // being rendered in one color.
     pub decomp_comment: Color32,
-    pub decomp_control: Color32,
-    pub decomp_return: Color32,
-    pub decomp_goto: Color32,
-    pub decomp_type: Color32,
-    pub decomp_structural: Color32,
-    pub decomp_default: Color32,
+    pub decomp_keyword: Color32,   // if / else / while / for / do / switch
+    pub decomp_return: Color32,    // return (standout)
+    pub decomp_goto: Color32,      // goto / break / continue
+    pub decomp_type: Color32,      // void / int32_t / HANDLE / etc.
+    pub decomp_number: Color32,    // numeric literals (decimal + hex)
+    pub decomp_string: Color32,    // "..." string literals
+    pub decomp_operator: Color32,  // + - * / = == && || etc.
+    pub decomp_punct: Color32,     // ; , { } [ ] ( ) — dimmer than operators
+    pub decomp_default: Color32,   // identifiers with no other category
 
     // CFG
     pub cfg_entry: Color32,
@@ -140,13 +147,21 @@ impl Theme {
             hex_ascii: Color32::from_rgb(180, 220, 180),
             column_header: Color32::from_rgb(150, 150, 150),
 
-            decomp_comment: Color32::from_rgb(100, 160, 100),
-            decomp_control: Color32::from_rgb(200, 150, 255),
-            decomp_return: Color32::from_rgb(255, 120, 120),
-            decomp_goto: Color32::from_rgb(255, 180, 100),
-            decomp_type: Color32::from_rgb(100, 200, 255),
-            decomp_structural: Color32::from_rgb(150, 150, 150),
-            decomp_default: Color32::from_rgb(220, 220, 220),
+            // Dark: Nord-inspired palette. Each category is visually
+            // distinct at small font sizes while still sitting in the
+            // same harmony family (cool blues + muted earth tones). The
+            // rule of thumb is keywords/types in the cool range, values
+            // in the warmer range, punctuation dimmer than text.
+            decomp_comment:  Color32::from_rgb(108, 123, 140),  // #6C7B8C — muted slate
+            decomp_keyword:  Color32::from_rgb(180, 142, 173),  // #B48EAD — Nord Aurora purple
+            decomp_return:   Color32::from_rgb(191, 97, 106),   // #BF616A — Nord Aurora red
+            decomp_goto:     Color32::from_rgb(208, 135, 112),  // #D08770 — Nord Aurora orange
+            decomp_type:     Color32::from_rgb(143, 188, 187),  // #8FBCBB — Nord Frost teal
+            decomp_number:   Color32::from_rgb(208, 135, 112),  // #D08770 — Nord Aurora orange (numbers)
+            decomp_string:   Color32::from_rgb(163, 190, 140),  // #A3BE8C — Nord Aurora green
+            decomp_operator: Color32::from_rgb(216, 222, 233),  // #D8DEE9 — Nord Snow Storm
+            decomp_punct:    Color32::from_rgb(129, 161, 193),  // #81A1C1 — Nord Frost dim blue
+            decomp_default:  Color32::from_rgb(229, 233, 240),  // #E5E9F0 — Nord Snow Storm (brighter)
 
             cfg_entry: Color32::from_rgb(100, 255, 100),
             cfg_active: Color32::from_rgb(255, 200, 60),
@@ -221,13 +236,19 @@ impl Theme {
             hex_ascii: Color32::from_rgb(30, 120, 30),
             column_header: Color32::from_rgb(100, 100, 100),
 
-            decomp_comment: Color32::from_rgb(30, 130, 30),
-            decomp_control: Color32::from_rgb(140, 60, 200),
-            decomp_return: Color32::from_rgb(200, 50, 50),
-            decomp_goto: Color32::from_rgb(200, 120, 30),
-            decomp_type: Color32::from_rgb(30, 120, 200),
-            decomp_structural: Color32::from_rgb(120, 120, 120),
-            decomp_default: Color32::from_rgb(30, 30, 30),
+            // Light: same categories mapped to Solarized-style darker
+            // hues so they read clearly on a pale background. Punctuation
+            // is pulled toward gray to avoid competing with text.
+            decomp_comment:  Color32::from_rgb(133, 153, 0),    // Solarized green
+            decomp_keyword:  Color32::from_rgb(108, 113, 196),  // Solarized violet
+            decomp_return:   Color32::from_rgb(220, 50, 47),    // Solarized red
+            decomp_goto:     Color32::from_rgb(203, 75, 22),    // Solarized orange
+            decomp_type:     Color32::from_rgb(42, 161, 152),   // Solarized cyan
+            decomp_number:   Color32::from_rgb(203, 75, 22),    // Solarized orange
+            decomp_string:   Color32::from_rgb(38, 139, 210),   // Solarized blue (readable for strings)
+            decomp_operator: Color32::from_rgb(88, 110, 117),   // Solarized base01
+            decomp_punct:    Color32::from_rgb(147, 161, 161),  // Solarized base1 (dim)
+            decomp_default:  Color32::from_rgb(7, 54, 66),      // Solarized base02 — dark body text
 
             cfg_entry: Color32::from_rgb(30, 160, 30),
             cfg_active: Color32::from_rgb(180, 130, 0),
@@ -322,33 +343,23 @@ impl Theme {
         }
     }
 
-    pub fn colorize_decompile_line(&self, line: &str) -> Color32 {
-        let trimmed = line.trim();
-        if trimmed.starts_with("/*") || trimmed.starts_with("//") {
-            self.decomp_comment
-        } else if trimmed.starts_with("if ")
-            || trimmed.starts_with("} else")
-            || trimmed.starts_with("while ")
-            || trimmed.starts_with("for ")
-        {
-            self.decomp_control
-        } else if trimmed.starts_with("return") {
-            self.decomp_return
-        } else if trimmed.starts_with("goto ") {
-            self.decomp_goto
-        } else if trimmed.starts_with("void ")
-            || trimmed.starts_with("int")
-            || trimmed.starts_with("uint")
-        {
-            self.decomp_type
-        } else if trimmed == "{"
-            || trimmed == "}"
-            || trimmed == "break;"
-            || trimmed == "continue;"
-        {
-            self.decomp_structural
-        } else {
-            self.decomp_default
+    /// Return the color that should be used for a given syntax category
+    /// within a decompiled line. See `tokenize_c_syntax` for how the
+    /// categories are computed from raw text.
+    pub fn decomp_color(&self, kind: crate::syntax::SyntaxKind) -> Color32 {
+        use crate::syntax::SyntaxKind::*;
+        match kind {
+            Comment     => self.decomp_comment,
+            Keyword     => self.decomp_keyword,
+            Return      => self.decomp_return,
+            Goto        => self.decomp_goto,
+            Type        => self.decomp_type,
+            Number      => self.decomp_number,
+            String      => self.decomp_string,
+            Operator    => self.decomp_operator,
+            Punctuation => self.decomp_punct,
+            Identifier  => self.decomp_default,
+            Whitespace  => self.decomp_default,
         }
     }
 

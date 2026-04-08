@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod emit;
 pub mod expr_builder;
+pub mod stackframe;
 pub mod structuring;
 pub mod types;
 pub mod varnames;
@@ -39,10 +40,17 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> String {
     // Step 2: Structure control flow
     let body = structuring::structure(ir, &block_stmts, ctx);
 
-    // Step 3: Assign variable names (with user overrides applied as a final pass)
+    // Step 3: Stack frame analysis. Rewrites *(rbp±k) / via-temp stack
+    // derefs into named local_/arg_ slots, drops the prologue bookkeeping,
+    // and emits VarDecl statements at the top for each discovered slot.
+    // Runs BEFORE rename_variables so the rbp/rsp detection sees the raw
+    // register names the expression builder emits.
+    let (body, _frame_layout) = stackframe::analyze_and_rewrite(body);
+
+    // Step 4: Assign variable names (with user overrides applied as a final pass)
     let body = varnames::rename_variables(body, &ctx.variable_names);
 
-    // Step 4: Emit C-like code
+    // Step 5: Emit C-like code
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
     emit::emit_function(display_name, &body, &ctx.label_names)
 }
@@ -56,6 +64,7 @@ pub fn decompile_annotated(
 ) -> (Vec<AnnotatedLine>, Vec<String>) {
     let block_stmts = expr_builder::build_statements(ir, ctx);
     let body = structuring::structure(ir, &block_stmts, ctx);
+    let (body, _frame_layout) = stackframe::analyze_and_rewrite(body);
     let body = varnames::rename_variables(body, &ctx.variable_names);
     let var_names = varnames::collect_displayed_names(&body);
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
