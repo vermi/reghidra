@@ -313,7 +313,19 @@ pub fn type_ref_to_ctype(ty: &TypeRef) -> crate::ast::CType {
             // by its name rather than its type.
             CType::Pointer(Box::new(CType::Void))
         }
-        TypeRef::Named(name) => CType::Named(name.clone()),
+        TypeRef::Named(name) => {
+            // Defensive: early PR 3 typegen runs leaked a few
+            // `syn::Type` debug-formatted names into the archive
+            // (notably `Type::Never { bang_token: Not }` for the `!`
+            // return type on functions marked `-> !` in libc). Until
+            // those archives are regenerated, recognize the leak and
+            // degrade to `void` so the signature line renders cleanly
+            // instead of surfacing Rust debug gibberish.
+            if name.starts_with("Type::") || name.contains('{') {
+                return CType::Void;
+            }
+            CType::Named(name.clone())
+        }
     }
 }
 

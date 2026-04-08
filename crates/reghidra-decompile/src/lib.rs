@@ -57,10 +57,50 @@ impl DecompileContext {
     /// should NOT pre-demangle the key; archives are keyed on the
     /// same form the naming pipeline produces (mangled for C++,
     /// unmangled for C).
+    ///
+    /// # Name decoration fallback
+    ///
+    /// MSVC and older cdecl/stdcall toolchains decorate C function
+    /// names with leading underscores (`_printf`, `_fclose`,
+    /// `__exit`) while libc/POSIX archives store the bare names. When
+    /// an exact-match lookup fails, retry with one and two leading
+    /// underscores stripped so FLIRT-matched CRT names resolve to
+    /// their POSIX prototypes. This is safe because:
+    ///
+    /// - Win32 APIs (`CreateFileA`) never start with an underscore,
+    ///   so the fallback can't displace them.
+    /// - Archive keys for C++ (mangled `?foo@Bar@@...`) start with
+    ///   `?` or `@`, never underscore, so the fallback is a no-op
+    ///   for them.
+    /// - The worst case on an underscore-having-but-otherwise-named
+    ///   function is a collision with an unrelated POSIX function of
+    ///   the trimmed name, which is rare enough that we accept it.
     pub fn lookup_prototype(&self, name: &str) -> Option<&FunctionType> {
         for archive in &self.type_archives {
             if let Some(f) = archive.functions.get(name) {
                 return Some(f);
+            }
+        }
+        // Fallback: strip MSVC-style leading underscore decoration and
+        // retry across all archives. Try one underscore first, then two.
+        let stripped1 = name.strip_prefix('_');
+        if let Some(s) = stripped1 {
+            if !s.is_empty() && !s.starts_with('_') {
+                for archive in &self.type_archives {
+                    if let Some(f) = archive.functions.get(s) {
+                        return Some(f);
+                    }
+                }
+            }
+        }
+        let stripped2 = name.strip_prefix("__");
+        if let Some(s) = stripped2 {
+            if !s.is_empty() && !s.starts_with('_') {
+                for archive in &self.type_archives {
+                    if let Some(f) = archive.functions.get(s) {
+                        return Some(f);
+                    }
+                }
             }
         }
         None
@@ -128,9 +168,12 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> DecompileOutput {
     // Step 4: Assign variable names (with user overrides applied as a final pass)
     let body = varnames::rename_variables(body, &ctx.variable_names);
 
-    // Step 5: Emit C-like code
+    // Step 5: Emit C-like code. Pass the prototype through so the
+    // signature line shows real types (`int _fclose(FILE* arg0)`) for
+    // FLIRT-matched CRT functions instead of the generic
+    // `void _fclose(void)` fallback.
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
-    let text = emit::emit_function(display_name, &body, &ctx.label_names);
+    let text = emit::emit_function(display_name, &body, &ctx.label_names, prototype);
     DecompileOutput { text, frame_layout }
 }
 
@@ -148,6 +191,6 @@ pub fn decompile_annotated(
     let body = varnames::rename_variables(body, &ctx.variable_names);
     let variable_names = varnames::collect_displayed_names(&body);
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
-    let lines = emit::emit_function_annotated(display_name, &body, &ctx.label_names);
+    let lines = emit::emit_function_annotated(display_name, &body, &ctx.label_names, prototype);
     DecompileAnnotated { lines, variable_names, frame_layout }
 }

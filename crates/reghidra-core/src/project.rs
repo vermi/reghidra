@@ -17,15 +17,17 @@ use std::sync::Arc;
 /// in scope — the decompile crate sits below core in the dep graph.
 fn archive_stems_for(info: &BinaryInfo) -> Vec<&'static str> {
     match (info.format, info.architecture) {
-        // windows-sys archives already cover the UCRT surface that
-        // ships under `Win32::System::Console`, `Win32::System::Threading`,
-        // etc. A dedicated `ucrt.rtarch` would duplicate those entries,
-        // so we don't produce one. If a follow-up splits the CRT out
-        // into its own archive (to slim the main Windows blob), add
-        // "ucrt" back here as a second entry.
-        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64"],
-        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86"],
-        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64"],
+        // windows-sys archives cover the Win32 API surface. MSVC CRT
+        // functions (`_printf`, `_fclose`, `_exit`, ...) are NOT in
+        // windows-sys — that crate is Win32 API only — but they share
+        // names with POSIX. Loading `posix` as a lower-precedence
+        // fallback catches the CRT-via-POSIX-alias case, which is the
+        // common mode for statically linked MSVC binaries. The Win32
+        // archive stays first so colliding names (rare — `exit`,
+        // `abort`, `strlen`) resolve to the Win32 form when present.
+        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64", "posix"],
+        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86", "posix"],
+        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64", "posix"],
         (BinaryFormat::Elf, _) => vec!["posix"],
         (BinaryFormat::MachO, _) => vec!["posix"],
         _ => vec![],
