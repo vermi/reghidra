@@ -1,0 +1,692 @@
+//! Heuristic stack frame analysis.
+//!
+//! Runs between `structure::structure` and `varnames::rename_variables`. Its
+//! job is to turn raw stack-pointer arithmetic (`*(rbp - 0x8)`, `*(t0)` where
+//! `t0 = rbp - 0x8`, etc.) into named locals and parameters (`local_8`,
+//! `arg_8`) with offset-keyed names that remain stable across edits and
+//! retypes. It also drops the x86 prologue/epilogue bookkeeping (`push rbp;
+//! mov rbp, rsp`) once the frame has been recognized, so the resulting
+//! pseudocode has no visible `rsp`/`rbp` assignments or the traditional
+//! scaffolding.
+//!
+//! Scope of this first cut (tier-2 heuristic):
+//! - Only x86/x86-64 functions that establish a frame pointer via the
+//!   canonical `push rbp; mov rbp, rsp` pattern are recognized. Functions
+//!   without a frame pointer (FPO/omit-frame-pointer builds) fall through
+//!   unchanged — their rsp-relative accesses still show up as raw arithmetic.
+//!   A follow-up can add rsp-delta tracking.
+//! - ARM64 frames (`stp x29, x30, [sp, #-N]!; mov x29, sp`) are not yet
+//!   recognized here — the shape of the setup is different, so support for
+//!   it can be layered on without disturbing the x86 path.
+//! - Slot types are always `Unknown(n)` where `n` is the observed access
+//!   size. Typing information (PDB, bundled archives) will be merged into
+//!   this layer in Phase 5c.
+//!
+//! Design choices worth remembering:
+//! - Slots are named by *hex offset* (`local_8`, `arg_c`), IDA-style. This
+//!   is a deliberate divergence from Ghidra's sequential numbering — it
+//!   means retyping a slot doesn't renumber anything else, which is what
+//!   the user wanted when we sketched the retype-collapses-other-slots
+//!   behavior.
+//! - All register-name comparisons accept both 64-bit and 32-bit aliases
+//!   (`rbp`/`ebp`, `rsp`/`esp`). The expression builder emits the
+//!   architecture-correct sized name, so we must handle both here.
+//! - This pass runs *before* `rename_variables`, so temporaries still look
+//!   like `tN` (not `var_N`) and the stack registers still look like
+//!   `rbp`/`rsp` (not `frame_pointer` or whatever a rename might produce).
+
+use crate::ast::{BinOp, CType, Expr, Stmt};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// A single discovered stack slot.
+#[derive(Debug, Clone)]
+pub struct StackSlot {
+    /// Signed offset from the frame pointer. Negative values are locals
+    /// (below `rbp`), positive values are inbound arguments (above the
+    /// saved return address).
+    pub offset: i64,
+    /// Largest access size observed for this slot, in bytes.
+    pub size: u8,
+    /// How many times this slot was referenced in the function body.
+    pub ref_count: usize,
+    /// Display name (`local_8`, `arg_c`, etc.).
+    pub name: String,
+    /// Inferred C type. `None` until the typing layer lands — slots default
+    /// to `CType::Unknown(size)` at declaration time.
+    pub ctype: Option<CType>,
+}
+
+/// Complete stack frame layout for one function.
+#[derive(Debug, Clone, Default)]
+pub struct FrameLayout {
+    /// Did we recognize a frame pointer setup? When `false`, the other
+    /// fields are empty and the pass made no rewrites.
+    pub has_frame_pointer: bool,
+    /// All slots discovered, keyed by signed offset from the frame pointer.
+    /// `BTreeMap` gives us a sorted iteration order for declaration emit.
+    pub slots: BTreeMap<i64, StackSlot>,
+}
+
+/// Analyze the function body, rewrite recognized stack accesses, drop the
+/// prologue bookkeeping, and prepend `VarDecl` statements for the discovered
+/// slots. Returns the rewritten body and the layout that was built.
+pub fn analyze_and_rewrite(body: Vec<Stmt>) -> (Vec<Stmt>, FrameLayout) {
+    let mut layout = FrameLayout::default();
+
+    // Step 1: look for the canonical `rbp = rsp` assignment anywhere in the
+    // body. When present, we know the function is using a frame pointer and
+    // all `rbp ± k` references can be treated as stable slot offsets.
+    if !has_frame_pointer_setup(&body) {
+        return (body, layout);
+    }
+    layout.has_frame_pointer = true;
+
+    // Step 2: build a temp → (reg, offset) map so that when we see
+    // `*(t0)` we can resolve it to a known slot address. The IR optimizer
+    // already folds pure constant chains, but `rbp + k` stays as a live
+    // IntAdd that becomes a temp assignment at the statement level.
+    let temp_offsets = collect_temp_offsets(&body);
+
+    // Step 3: walk the body, rewrite matched derefs to named slots, and
+    // populate `layout.slots` as we go.
+    let mut ctx = RewriteCtx {
+        temp_offsets: &temp_offsets,
+        layout: &mut layout,
+        used_temps: HashSet::new(),
+    };
+    let body: Vec<Stmt> = body.into_iter().map(|s| ctx.rewrite_stmt(s)).collect();
+    let surviving_temp_uses = ctx.used_temps;
+
+    // Step 4: drop (a) the prologue bookkeeping, and (b) any temp definitions
+    // that were only used as stack-access addresses. We know a temp was only
+    // used as an address if it's in `temp_offsets` (meaning we classified it)
+    // but NOT in `surviving_temp_uses` (meaning after rewriting, nothing
+    // references it anymore).
+    let body = strip_prologue_and_dead_temps(body, &temp_offsets, &surviving_temp_uses);
+
+    // Step 5: emit `VarDecl` statements at the top of the body for every
+    // slot we discovered. These give users a visible "variables list" like
+    // Ghidra's, and become the handle for retyping in Phase 5c.
+    let body = prepend_var_decls(body, &layout);
+
+    (body, layout)
+}
+
+// ---------------------------------------------------------------------------
+// Frame pointer detection
+// ---------------------------------------------------------------------------
+
+fn has_frame_pointer_setup(body: &[Stmt]) -> bool {
+    // A single `rbp = rsp` assignment anywhere in the function is sufficient
+    // evidence. In practice it only appears in the prologue because nothing
+    // else touches rbp in standard frame-pointer code, but we don't restrict
+    // position here — the important thing is that rbp tracks rsp at entry,
+    // which means `rbp ± k` offsets are stable for the whole function.
+    let mut found = false;
+    walk_stmts(body, &mut |stmt| {
+        if let Stmt::Assign(Expr::Var(lhs), Expr::Var(rhs)) = stmt {
+            if is_rbp(lhs) && is_rsp(rhs) {
+                found = true;
+            }
+        }
+    });
+    found
+}
+
+// ---------------------------------------------------------------------------
+// Temp offset collection
+// ---------------------------------------------------------------------------
+
+/// Reference to one of the stack registers. Only rbp matters for the current
+/// implementation (we don't track rsp-delta yet), but the enum gives us a
+/// place to grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StackReg {
+    Rbp,
+    // Rsp (future: tracked via a running delta)
+}
+
+fn collect_temp_offsets(body: &[Stmt]) -> HashMap<String, (StackReg, i64)> {
+    let mut map = HashMap::new();
+    walk_stmts(body, &mut |stmt| {
+        if let Stmt::Assign(Expr::Var(name), rhs) = stmt {
+            if !is_temp_name(name) {
+                return;
+            }
+            if let Some((reg, off)) = classify_stack_expr(rhs) {
+                map.insert(name.clone(), (reg, off));
+            }
+        }
+    });
+    map
+}
+
+/// Recognize `rbp`, `rbp + k`, or `rbp - k` as a stack-relative address and
+/// return the classified (reg, offset). Returns `None` for anything else.
+fn classify_stack_expr(expr: &Expr) -> Option<(StackReg, i64)> {
+    match expr {
+        Expr::Var(name) if is_rbp(name) => Some((StackReg::Rbp, 0)),
+        Expr::Binary(BinOp::Add, a, b) => classify_stack_binop(a, b, 1),
+        Expr::Binary(BinOp::Sub, a, b) => classify_stack_binop(a, b, -1),
+        _ => None,
+    }
+}
+
+fn classify_stack_binop(a: &Expr, b: &Expr, sign: i64) -> Option<(StackReg, i64)> {
+    // We only accept `<reg> ± <const>`, not `<const> ± <reg>`, because the
+    // latter is unusual for stack offsets and catching it would require
+    // distinguishing subtraction order. The lifter's memory-operand parser
+    // always emits the register on the left for `[reg+imm]` / `[reg-imm]`.
+    let Expr::Var(name) = a else {
+        return None;
+    };
+    if !is_rbp(name) {
+        return None;
+    }
+    let Expr::IntLit(k, _) = b else {
+        return None;
+    };
+    // `IntLit` stores unsigned; convert to signed with wrap so that the
+    // lifter's (`rbp + 0xFFFFFFF8`) sign-extension case also maps cleanly to
+    // a negative offset. In practice the lifter already subtracts, so most
+    // negatives come in via the Sub path, but this keeps the Add path honest.
+    let signed = *k as i64;
+    Some((StackReg::Rbp, sign * signed))
+}
+
+fn is_temp_name(s: &str) -> bool {
+    s.len() >= 2 && s.starts_with('t') && s[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_rbp(s: &str) -> bool {
+    matches!(s, "rbp" | "ebp")
+}
+
+fn is_rsp(s: &str) -> bool {
+    matches!(s, "rsp" | "esp")
+}
+
+// ---------------------------------------------------------------------------
+// Rewrite pass
+// ---------------------------------------------------------------------------
+
+struct RewriteCtx<'a> {
+    temp_offsets: &'a HashMap<String, (StackReg, i64)>,
+    layout: &'a mut FrameLayout,
+    /// Names of temps that are still referenced after rewriting. If a temp
+    /// definition exists in `temp_offsets` but its name never ends up in
+    /// this set, the definition is dead and we drop it.
+    used_temps: HashSet<String>,
+}
+
+impl RewriteCtx<'_> {
+    fn rewrite_stmt(&mut self, stmt: Stmt) -> Stmt {
+        match stmt {
+            Stmt::Assign(lhs, rhs) => {
+                // LHS is a def site, not a use — rewrite its shape (so e.g.
+                // `*(rbp - 8)` on the left of an assignment becomes
+                // `local_8`), but don't let a bare `Var` on the left count
+                // as a live reference in `used_temps`. Otherwise a
+                // `tN = rbp + k` definition would look like it uses `tN`
+                // and the dead-temp cleanup would never fire.
+                let new_lhs = self.rewrite_lhs(lhs);
+                let new_rhs = self.rewrite_expr(rhs);
+                Stmt::Assign(new_lhs, new_rhs)
+            }
+            Stmt::ExprStmt(e) => Stmt::ExprStmt(self.rewrite_expr(e)),
+            Stmt::Return(Some(e)) => Stmt::Return(Some(self.rewrite_expr(e))),
+            Stmt::If { cond, then_body, else_body } => Stmt::If {
+                cond: self.rewrite_expr(cond),
+                then_body: then_body.into_iter().map(|s| self.rewrite_stmt(s)).collect(),
+                else_body: else_body.into_iter().map(|s| self.rewrite_stmt(s)).collect(),
+            },
+            Stmt::While { cond, body } => Stmt::While {
+                cond: self.rewrite_expr(cond),
+                body: body.into_iter().map(|s| self.rewrite_stmt(s)).collect(),
+            },
+            Stmt::Loop { body } => Stmt::Loop {
+                body: body.into_iter().map(|s| self.rewrite_stmt(s)).collect(),
+            },
+            other => other,
+        }
+    }
+
+    /// Rewrite an assignment's left-hand side. Bare-Var LHS is passed
+    /// through untouched (no use-tracking); `Deref` LHS (store addresses)
+    /// still go through the full rewrite so `*(rbp ± k) = ...` stores
+    /// get their address rewritten to a named slot. Anything else falls
+    /// through to the regular expression rewriter.
+    fn rewrite_lhs(&mut self, expr: Expr) -> Expr {
+        match expr {
+            Expr::Var(_) => expr,
+            Expr::Deref(_, _) => self.rewrite_expr(expr),
+            other => self.rewrite_expr(other),
+        }
+    }
+
+    fn rewrite_expr(&mut self, expr: Expr) -> Expr {
+        // Bottom-up: handle deref patterns first (so nested stack derefs get
+        // caught), then fall through to structural recursion on every other
+        // variant. We intentionally don't recurse into a `Deref` before
+        // checking the shape — the match below handles both the inline and
+        // the via-temp form.
+        if let Expr::Deref(inner, ctype) = &expr {
+            let size = ctype.size().max(1);
+            if let Some((reg, offset)) = self.resolve_stack_addr(inner) {
+                return self.slot_expr(reg, offset, size);
+            }
+        }
+        match expr {
+            Expr::Var(name) => {
+                // Track surviving temp references so we can distinguish
+                // dead temp definitions from live ones in step 4.
+                if is_temp_name(&name) {
+                    self.used_temps.insert(name.clone());
+                }
+                Expr::Var(name)
+            }
+            Expr::Binary(op, a, b) => Expr::Binary(
+                op,
+                Box::new(self.rewrite_expr(*a)),
+                Box::new(self.rewrite_expr(*b)),
+            ),
+            Expr::Unary(op, e) => Expr::Unary(op, Box::new(self.rewrite_expr(*e))),
+            Expr::Call(func, args) => Expr::Call(
+                Box::new(self.rewrite_expr(*func)),
+                args.into_iter().map(|a| self.rewrite_expr(a)).collect(),
+            ),
+            Expr::Deref(e, t) => Expr::Deref(Box::new(self.rewrite_expr(*e)), t),
+            Expr::AddrOf(e) => Expr::AddrOf(Box::new(self.rewrite_expr(*e))),
+            Expr::Cast(t, e) => Expr::Cast(t, Box::new(self.rewrite_expr(*e))),
+            Expr::Index(b, i) => Expr::Index(
+                Box::new(self.rewrite_expr(*b)),
+                Box::new(self.rewrite_expr(*i)),
+            ),
+            Expr::Member(e, f) => Expr::Member(Box::new(self.rewrite_expr(*e)), f),
+            Expr::Ternary(c, a, b) => Expr::Ternary(
+                Box::new(self.rewrite_expr(*c)),
+                Box::new(self.rewrite_expr(*a)),
+                Box::new(self.rewrite_expr(*b)),
+            ),
+            other => other,
+        }
+    }
+
+    /// Try to classify an expression as a stack-relative address. Returns
+    /// `None` if the expression is anything we don't recognize.
+    fn resolve_stack_addr(&self, expr: &Expr) -> Option<(StackReg, i64)> {
+        // Inline form: `rbp`, `rbp + k`, `rbp - k`.
+        if let Some((reg, off)) = classify_stack_expr(expr) {
+            return Some((reg, off));
+        }
+        // Via-temp form: the expression is a Var referencing a previously
+        // classified temp.
+        if let Expr::Var(name) = expr {
+            if let Some(&(reg, off)) = self.temp_offsets.get(name) {
+                return Some((reg, off));
+            }
+        }
+        None
+    }
+
+    fn slot_expr(&mut self, reg: StackReg, offset: i64, size: u8) -> Expr {
+        // Offset 0 on an rbp-based frame is the saved caller rbp push —
+        // it's part of the linkage, not a user variable, and should never
+        // appear in the body as `arg_0`. Leave accesses at offset 0 as
+        // their original deref so they stay visually distinct from real
+        // slots. In practice this expression is rare (a function almost
+        // never reads its own saved rbp) and dropping the rewrite here
+        // keeps us from inventing a bogus slot.
+        if offset == 0 {
+            return match reg {
+                StackReg::Rbp => Expr::Deref(
+                    Box::new(Expr::Var("rbp".to_string())),
+                    CType::from_size(size, false),
+                ),
+            };
+        }
+        let name = slot_name(reg, offset);
+        let slot = self
+            .layout
+            .slots
+            .entry(offset)
+            .or_insert_with(|| StackSlot {
+                offset,
+                size,
+                ref_count: 0,
+                name: name.clone(),
+                ctype: None,
+            });
+        slot.ref_count += 1;
+        if size > slot.size {
+            slot.size = size;
+        }
+        Expr::Var(name)
+    }
+}
+
+fn slot_name(reg: StackReg, offset: i64) -> String {
+    match reg {
+        StackReg::Rbp => {
+            if offset >= 0 {
+                // Positive rbp-offsets are inbound arguments on the cdecl /
+                // SysV stack: [rbp+0] holds the saved rbp, [rbp+wordsize]
+                // holds the return address, and [rbp+2*wordsize] onwards
+                // are the stack-passed arguments.
+                format!("arg_{:x}", offset)
+            } else {
+                // Negatives are locals. Use the absolute value so that
+                // `rbp - 0x10` renders as `local_10` (no leading minus).
+                format!("local_{:x}", (-offset) as u64)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prologue + dead-temp cleanup
+// ---------------------------------------------------------------------------
+
+fn strip_prologue_and_dead_temps(
+    body: Vec<Stmt>,
+    temp_offsets: &HashMap<String, (StackReg, i64)>,
+    surviving_temp_uses: &HashSet<String>,
+) -> Vec<Stmt> {
+    body.into_iter()
+        .filter(|stmt| !is_droppable(stmt, temp_offsets, surviving_temp_uses))
+        .map(|stmt| filter_nested(stmt, temp_offsets, surviving_temp_uses))
+        .collect()
+}
+
+fn filter_nested(
+    stmt: Stmt,
+    temp_offsets: &HashMap<String, (StackReg, i64)>,
+    surviving: &HashSet<String>,
+) -> Stmt {
+    // Recurse into structured bodies. Same filter logic applies inside
+    // if/while/loop — prologue ops typically aren't in there but dead temp
+    // defs might be if the optimizer reshaped anything unusual.
+    match stmt {
+        Stmt::If { cond, then_body, else_body } => Stmt::If {
+            cond,
+            then_body: strip_prologue_and_dead_temps(then_body, temp_offsets, surviving),
+            else_body: strip_prologue_and_dead_temps(else_body, temp_offsets, surviving),
+        },
+        Stmt::While { cond, body } => Stmt::While {
+            cond,
+            body: strip_prologue_and_dead_temps(body, temp_offsets, surviving),
+        },
+        Stmt::Loop { body } => Stmt::Loop {
+            body: strip_prologue_and_dead_temps(body, temp_offsets, surviving),
+        },
+        other => other,
+    }
+}
+
+fn is_droppable(
+    stmt: &Stmt,
+    temp_offsets: &HashMap<String, (StackReg, i64)>,
+    surviving: &HashSet<String>,
+) -> bool {
+    match stmt {
+        // Drop `rbp = rsp` — the frame-pointer setup marker.
+        Stmt::Assign(Expr::Var(l), Expr::Var(r)) if is_rbp(l) && is_rsp(r) => true,
+        // Drop `rsp = rsp ± k` — stack adjustment bookkeeping (sub rsp, N in
+        // the prologue; add rsp, N in the epilogue). These stopped carrying
+        // useful information the moment we started referring to slots by
+        // their rbp-relative offset.
+        Stmt::Assign(Expr::Var(l), Expr::Binary(BinOp::Add | BinOp::Sub, a, b))
+            if is_rsp(l) && matches!(a.as_ref(), Expr::Var(n) if is_rsp(n))
+                && matches!(b.as_ref(), Expr::IntLit(_, _)) =>
+        {
+            true
+        }
+        // Drop `*(rsp) = rbp` — the saved-rbp push. (`rsp` assignment is
+        // dropped above, and the saved rbp store is now noise.)
+        Stmt::Assign(Expr::Deref(inner, _), Expr::Var(r))
+            if is_rsp(r_or_empty(inner)) && is_rbp(r) =>
+        {
+            // The pattern `*(rsp) = rbp` lands here only if `inner` is
+            // exactly `Var("rsp")` — i.e. rsp directly, not a computed addr.
+            true
+        }
+        // Drop `rbp = *(rsp)` — the saved-rbp restore in the epilogue.
+        Stmt::Assign(Expr::Var(l), Expr::Deref(inner, _))
+            if is_rbp(l) && is_rsp(r_or_empty(inner)) =>
+        {
+            true
+        }
+        // Drop dead temp definitions (`tN = rbp ± k`) when tN wasn't
+        // referenced after the rewrite pass. If a temp was classified as a
+        // stack address and all its uses were rewritten away, the defining
+        // statement is now dead code.
+        Stmt::Assign(Expr::Var(name), _)
+            if temp_offsets.contains_key(name) && !surviving.contains(name) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Borrow-helper: returns the Var name inside a `Box<Expr>` if it's a bare
+/// Var, or an empty string otherwise. Used by the `r_or_empty` matchers
+/// above so we can pattern-match without unboxing explicitly.
+fn r_or_empty(e: &Expr) -> &str {
+    match e {
+        Expr::Var(n) => n.as_str(),
+        _ => "",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VarDecl emission
+// ---------------------------------------------------------------------------
+
+fn prepend_var_decls(body: Vec<Stmt>, layout: &FrameLayout) -> Vec<Stmt> {
+    if layout.slots.is_empty() {
+        return body;
+    }
+    // Split slots into args (positive offsets excluding the saved-rbp/return-
+    // address pair at 0 and +wordsize) and locals (negative offsets). Both
+    // groups are iterated in signed-offset order, which `BTreeMap` gives us
+    // for free.
+    let mut decls: Vec<Stmt> = Vec::new();
+    for slot in layout.slots.values() {
+        decls.push(Stmt::VarDecl {
+            name: slot.name.clone(),
+            ctype: slot
+                .ctype
+                .clone()
+                .unwrap_or_else(|| CType::Unknown(slot.size.max(1))),
+            init: None,
+        });
+    }
+    decls.extend(body);
+    decls
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Recursive walker used by the detect/collect passes. `f` is called on every
+/// statement encountered in document order (including nested ones inside
+/// if/while/loop bodies).
+fn walk_stmts(body: &[Stmt], f: &mut dyn FnMut(&Stmt)) {
+    for stmt in body {
+        f(stmt);
+        match stmt {
+            Stmt::If { then_body, else_body, .. } => {
+                walk_stmts(then_body, f);
+                walk_stmts(else_body, f);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => walk_stmts(body, f),
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn int(n: u64) -> Expr {
+        Expr::IntLit(n, CType::UInt32)
+    }
+
+    fn var(s: &str) -> Expr {
+        Expr::Var(s.to_string())
+    }
+
+    fn deref(e: Expr) -> Expr {
+        Expr::Deref(Box::new(e), CType::UInt32)
+    }
+
+    fn assign(l: Expr, r: Expr) -> Stmt {
+        Stmt::Assign(l, r)
+    }
+
+    fn has_var(stmts: &[Stmt], needle: &str) -> bool {
+        let mut found = false;
+        walk_stmts(stmts, &mut |s| {
+            let mut scan = |e: &Expr| {
+                if let Expr::Var(n) = e {
+                    if n == needle {
+                        found = true;
+                    }
+                }
+            };
+            match s {
+                Stmt::Assign(l, r) => { scan(l); scan(r); }
+                Stmt::ExprStmt(e) | Stmt::Return(Some(e)) => scan(e),
+                _ => {}
+            }
+        });
+        found
+    }
+
+    #[test]
+    fn no_frame_pointer_no_rewrites() {
+        // No `rbp = rsp` assignment anywhere — pass should return the body
+        // unchanged and an empty layout.
+        let body = vec![assign(var("eax"), int(1))];
+        let (out, layout) = analyze_and_rewrite(body.clone());
+        assert!(!layout.has_frame_pointer);
+        assert!(layout.slots.is_empty());
+        assert_eq!(out.len(), body.len());
+    }
+
+    #[test]
+    fn inline_rbp_minus_const_becomes_local() {
+        // `*(rbp - 8) = eax`  ->  `local_8 = eax`
+        // Prologue scaffolding (rsp adjust + save + `rbp = rsp`) is dropped.
+        let body = vec![
+            assign(var("rsp"), Expr::Binary(BinOp::Sub, Box::new(var("rsp")), Box::new(int(8)))),
+            assign(deref(var("rsp")), var("rbp")),
+            assign(var("rbp"), var("rsp")),
+            assign(
+                deref(Expr::Binary(BinOp::Sub, Box::new(var("rbp")), Box::new(int(8)))),
+                var("eax"),
+            ),
+        ];
+        let (out, layout) = analyze_and_rewrite(body);
+        assert!(layout.has_frame_pointer);
+        assert_eq!(layout.slots.len(), 1);
+        let slot = layout.slots.values().next().unwrap();
+        assert_eq!(slot.offset, -8);
+        assert_eq!(slot.name, "local_8");
+        // Prologue lines are gone, only a VarDecl + the rewritten assign remain.
+        assert!(matches!(out[0], Stmt::VarDecl { .. }));
+        assert!(has_var(&out, "local_8"));
+        assert!(!has_var(&out, "rbp"));
+        assert!(!has_var(&out, "rsp"));
+    }
+
+    #[test]
+    fn via_temp_rbp_plus_const_becomes_arg() {
+        // t0 = rbp + 8; *(t0) = eax  ->  arg_8 = eax
+        // The temp definition is dead after rewrite and gets dropped.
+        let body = vec![
+            assign(var("rbp"), var("rsp")),
+            assign(
+                var("t0"),
+                Expr::Binary(BinOp::Add, Box::new(var("rbp")), Box::new(int(8))),
+            ),
+            assign(deref(var("t0")), var("eax")),
+        ];
+        let (out, layout) = analyze_and_rewrite(body);
+        assert!(layout.has_frame_pointer);
+        let slot = layout.slots.get(&8).expect("slot at +8 should exist");
+        assert_eq!(slot.name, "arg_8");
+        // The t0 definition must be gone.
+        assert!(!has_var(&out, "t0"));
+        assert!(has_var(&out, "arg_8"));
+    }
+
+    #[test]
+    fn multiple_slots_each_get_a_decl() {
+        // local_4 and arg_8 both referenced -> both get decls.
+        let body = vec![
+            assign(var("rbp"), var("rsp")),
+            assign(
+                deref(Expr::Binary(BinOp::Sub, Box::new(var("rbp")), Box::new(int(4)))),
+                int(0),
+            ),
+            assign(
+                var("edx"),
+                deref(Expr::Binary(BinOp::Add, Box::new(var("rbp")), Box::new(int(8)))),
+            ),
+        ];
+        let (out, layout) = analyze_and_rewrite(body);
+        assert_eq!(layout.slots.len(), 2);
+        let decl_count = out.iter().filter(|s| matches!(s, Stmt::VarDecl { .. })).count();
+        assert_eq!(decl_count, 2);
+    }
+
+    #[test]
+    fn repeated_access_increments_ref_count() {
+        let body = vec![
+            assign(var("rbp"), var("rsp")),
+            assign(
+                deref(Expr::Binary(BinOp::Sub, Box::new(var("rbp")), Box::new(int(0x10)))),
+                int(0),
+            ),
+            assign(
+                var("eax"),
+                deref(Expr::Binary(BinOp::Sub, Box::new(var("rbp")), Box::new(int(0x10)))),
+            ),
+        ];
+        let (_, layout) = analyze_and_rewrite(body);
+        let slot = layout.slots.get(&-0x10).unwrap();
+        assert_eq!(slot.ref_count, 2);
+    }
+
+    #[test]
+    fn live_temp_is_not_dropped() {
+        // A temp that's used somewhere other than a stack deref (e.g., it
+        // flows into an arithmetic result) must NOT be dropped, even if we
+        // classified its definition as a stack address. This guards against
+        // eating a `t = rbp + k` line that's being used as an address-taken
+        // computation (`&local_N`), not as a load/store address.
+        let body = vec![
+            assign(var("rbp"), var("rsp")),
+            assign(
+                var("t0"),
+                Expr::Binary(BinOp::Sub, Box::new(var("rbp")), Box::new(int(8))),
+            ),
+            // Here t0 is used as a value, not as a deref address.
+            assign(var("eax"), var("t0")),
+        ];
+        let (out, _layout) = analyze_and_rewrite(body);
+        assert!(has_var(&out, "t0"), "t0 defn was dropped but it has a live non-address use");
+    }
+}

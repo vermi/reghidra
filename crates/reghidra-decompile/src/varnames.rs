@@ -169,7 +169,7 @@ impl<'a> UserRenamer<'a> {
 
 /// Map any sized alias of an x86 / ARM64 register to its canonical 64-bit name.
 /// Returns the input unchanged if it's not a recognized register name.
-fn canonical_reg_name(name: &str) -> &str {
+pub(crate) fn canonical_reg_name(name: &str) -> &str {
     match name {
         // x86 GPRs
         "rax" | "eax" | "ax" | "ah" | "al" => "rax",
