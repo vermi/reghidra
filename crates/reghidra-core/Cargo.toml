@@ -15,3 +15,4 @@ log = { workspace = true }
 flate2 = { workspace = true }
 include_dir = { workspace = true }
 msvc-demangler = { workspace = true }
+postcard = { workspace = true }

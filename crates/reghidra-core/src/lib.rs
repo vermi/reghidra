@@ -5,6 +5,7 @@ pub mod demangle;
 pub mod disasm;
 pub mod error;
 pub mod project;
+pub mod types;
 
 pub use analysis::cfg::{BasicBlock, CfgEdge, ControlFlowGraph, EdgeKind};
 pub use analysis::functions::{Function, FunctionSource};
