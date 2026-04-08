@@ -113,3 +113,45 @@ fn pe_fixture_iat_call_decompiles_cleanly() {
         "expected RegCreateKeyExW import to be resolved by name; got:\n{decomp}"
     );
 }
+
+/// `sub_4014b6` in the PE fixture calls several Win32 imports whose
+/// args ARE present in the same basic block as the call:
+/// `SetUnhandledExceptionFilter(0)`, `UnhandledExceptionFilter(...)`,
+/// `TerminateProcess(...)`. With the PR 4c typed-cast-at-call-site
+/// pass, those args should be wrapped in Cast expressions referring
+/// to the prototype's parameter types — making `HANDLE`,
+/// `LPTOP_LEVEL_EXCEPTION_FILTER`, etc. visible in the rendered
+/// decompile output even though the function being decompiled is a
+/// `sub_XXXX` with no archive entry of its own.
+///
+/// This is the user-visible test for "I see types in the decompile
+/// view." If the decompiler stops emitting type names at typed call
+/// sites, this assertion catches it before the GUI does.
+#[test]
+fn pe_fixture_typed_calls_show_archive_types() {
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+        .expect("open PE fixture");
+    let decomp = project
+        .decompile(0x004014b6)
+        .expect("sub_4014b6 should decompile");
+
+    // The output should mention at least one Win32 type name from
+    // the archive. We don't pin to a specific function call because
+    // any drift in import resolution or arity capping might shuffle
+    // exactly which calls survive in the output, but we DO require
+    // that *some* archive type makes it to the rendered text.
+    let archive_types = ["HANDLE", "LPTOP_LEVEL_EXCEPTION_FILTER"];
+    let found_any = archive_types.iter().any(|t| decomp.contains(t));
+    assert!(
+        found_any,
+        "expected at least one of {archive_types:?} in sub_4014b6 decompile output, got:\n{decomp}"
+    );
+
+    // Specifically, TerminateProcess should appear with a HANDLE
+    // cast on its first arg. This is the canonical Win32 idiom and
+    // the most concrete validation for the typed-call work.
+    assert!(
+        decomp.contains("TerminateProcess((HANDLE)"),
+        "expected TerminateProcess to receive a HANDLE-typed arg, got:\n{decomp}"
+    );
+}

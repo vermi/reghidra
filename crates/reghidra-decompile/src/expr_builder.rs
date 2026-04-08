@@ -112,20 +112,25 @@ pub fn build_statements(
                         .cloned()
                         .unwrap_or_else(|| format!("sub_{target:x}"));
                     // Arity cap: if the callee has a known prototype in
-                    // the bundled type archives, truncate the pending
-                    // stack writes to that fixed arity so unrelated
-                    // over-pushes from earlier code don't get
-                    // misattributed as arguments to this call. Variadic
-                    // functions opt out — we can't safely cap them.
-                    let max_args = ctx
-                        .lookup_prototype(&func_name)
+                    // the bundled type archives, take only the last N
+                    // pending stack writes as args (where N is the
+                    // prototype's fixed arity). Variadic functions opt
+                    // out — we can't safely cap them.
+                    let prototype = ctx.lookup_prototype(&func_name);
+                    let max_args = prototype
                         .filter(|p| !p.is_variadic)
                         .map(|p| p.args.len());
-                    let args = drain_pending_for_call(
+                    let raw_args = drain_pending_for_call(
                         &mut stmts,
                         &mut pending_stack_writes,
                         max_args,
                     );
+                    // Type the args from the prototype's parameter list
+                    // when one is available. Each arg gets wrapped in a
+                    // Cast(declared_type, expr) so the rendered output
+                    // shows the user the declared type of the slot
+                    // (e.g. `(HANDLE)result`, `(DWORD)0xc0000409`).
+                    let args = annotate_call_args(raw_args, prototype);
                     stmts.push(Stmt::ExprStmt(Expr::Call(
                         Box::new(Expr::Var(func_name)),
                         args,
@@ -253,10 +258,6 @@ fn memory_access_expr(addr: &VarNode, size: u8, ctx: &DecompileContext) -> Expr 
     )
 }
 
-/// Consume the pending stack writes and return them as call arguments.
-/// Pushes happen in reverse order relative to the source-level argument
-/// list (the first argument is the *last* push before the call), so we
-/// reverse here to restore source order.
 /// Convert the pending stack-write queue into an argument list for a
 /// Call, honoring an optional arity cap.
 ///
@@ -266,45 +267,106 @@ fn memory_access_expr(addr: &VarNode, size: u8, ctx: &DecompileContext) -> Expr 
 /// chronologically is arg1 and the FIRST push is argN. Reversing
 /// gives source order [arg1, arg2, ..., argN].
 ///
-/// When `max_args` is `Some(n)` and the queue has more than `n`
-/// entries, the excess is almost always unrelated: a previous push
-/// that wasn't consumed by its intended call because our lifter
-/// doesn't track which push belongs to which callee. Rather than
-/// misattribute those pushes as args to the current call (the
-/// Phase 5b `GetCurrentProcess(0xc0000409)` / `TerminateProcess`
-/// regression), we flush the overflow as plain `*(rsp) = x` store
-/// statements so the code still parses and readers can see what
-/// the extra push was carrying. Only the last `n` items get consumed
-/// as arguments.
+/// When `max_args = Some(n)` and the queue has more than `n` entries,
+/// only the *last* `n` entries are consumed as args. Earlier entries
+/// stay in the queue — they're not over-attribution to discard,
+/// they're typically pre-positioned arguments for a *later* call (or
+/// they will be flushed by an intervening non-stack op via the
+/// pre-existing `flush_stack_writes` path). This is the key fix from
+/// the initial PR 4 implementation, which discarded the overflow as
+/// plain stores and lost the legitimate `TerminateProcess` exit-code
+/// arg in the canonical pattern:
 ///
-/// `max_args = None` disables the cap — used for indirect calls
-/// (unknown target) and for direct calls whose target isn't in the
-/// bundled archives.
+/// ```text
+/// push exit_code         ; arg2 of TerminateProcess
+/// call GetCurrentProcess ; 0-arg, must NOT consume exit_code
+/// push eax               ; arg1 of TerminateProcess
+/// call TerminateProcess
+/// ```
+///
+/// With the cap-as-limit semantics, the 0-arg `GetCurrentProcess`
+/// leaves `exit_code` in the queue, the `push eax` adds to it, and
+/// the 2-arg `TerminateProcess` consumes the trailing two entries.
+///
+/// `max_args = None` disables the cap entirely — used for indirect
+/// calls (unknown target) and for direct calls whose target isn't
+/// in the bundled archives. Pre-PR 4 behavior: drain the entire
+/// queue.
 fn drain_pending_for_call(
-    stmts: &mut Vec<Stmt>,
+    _stmts: &mut Vec<Stmt>,
     pending: &mut Vec<(VarNode, VarNode)>,
     max_args: Option<usize>,
 ) -> Vec<Expr> {
-    if let Some(cap) = max_args {
-        if pending.len() > cap {
-            // Flush the overflow (oldest pushes first) as plain
-            // stores. The cap-sized tail stays in the queue and gets
-            // drained below.
-            let overflow_len = pending.len() - cap;
-            let overflow: Vec<(VarNode, VarNode)> = pending.drain(..overflow_len).collect();
-            for (addr, src) in overflow {
-                let lhs = Expr::Deref(
-                    Box::new(varnode_to_expr(&addr)),
-                    CType::from_size(src.size, false),
-                );
-                stmts.push(Stmt::Assign(lhs, varnode_to_expr(&src)));
-            }
-        }
+    let take_n = match max_args {
+        Some(cap) => cap.min(pending.len()),
+        None => pending.len(),
+    };
+    if take_n == 0 {
+        // 0-arg cap: leave everything in the queue. Don't drain at
+        // all. The pre-existing flush logic handles unrelated leftovers
+        // when the next non-stack op runs.
+        return Vec::new();
     }
-    pending
-        .drain(..)
+    // Split off the last `take_n` entries as the args; the front of
+    // the queue stays in `pending` for a later call (or eventual
+    // flush). `Vec::split_off(idx)` returns the items from `idx`
+    // onwards, leaving the prefix in place.
+    let split_at = pending.len() - take_n;
+    let consumed: Vec<(VarNode, VarNode)> = pending.split_off(split_at);
+    consumed
+        .into_iter()
         .rev()
         .map(|(_, src)| varnode_to_expr(&src))
+        .collect()
+}
+
+/// Annotate a call's argument list with declared types from a known
+/// prototype. Each arg expression gets wrapped in
+/// `Expr::Cast(declared_type, arg)` so the rendered decompile output
+/// surfaces the parameter types (e.g. `TerminateProcess((HANDLE)result,
+/// (DWORD)0xc0000409)`). This is the only place in PR 4c that types
+/// from the bundled archives become *visible* in the output for the
+/// common case where the function being decompiled is a user
+/// `sub_XXXX` (which has no archive entry of its own and therefore
+/// gets no typed VarDecls).
+///
+/// When `prototype` is `None`, args pass through unchanged. When the
+/// arg list is shorter than the prototype's parameter list, only the
+/// supplied args get typed (the missing ones are missing from the
+/// output anyway). When the arg list is longer (e.g. variadic), the
+/// excess args pass through untyped because the variadic tail has no
+/// declared type.
+fn annotate_call_args(
+    args: Vec<Expr>,
+    prototype: Option<&crate::type_archive::FunctionType>,
+) -> Vec<Expr> {
+    let Some(proto) = prototype else {
+        return args;
+    };
+    args.into_iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            if let Some(proto_arg) = proto.args.get(i) {
+                let ctype = crate::type_archive::type_ref_to_ctype(&proto_arg.ty);
+                // Skip the cast for `void` arg types (shouldn't
+                // happen in practice — void params are illegal in C
+                // declarations — but be defensive). Also skip when
+                // the arg is already a Cast to the same type, to
+                // avoid `((HANDLE)(HANDLE)x)` double-wrapping if
+                // some upstream pass already typed the expression.
+                if matches!(ctype, CType::Void) {
+                    return arg;
+                }
+                if let Expr::Cast(existing, _) = &arg {
+                    if existing == &ctype {
+                        return arg;
+                    }
+                }
+                Expr::Cast(ctype, Box::new(arg))
+            } else {
+                arg
+            }
+        })
         .collect()
 }
 
@@ -566,19 +628,30 @@ mod tests {
         }
     }
 
-    /// Regression test for the Phase 5b "GetCurrentProcess(0xc0000409);
-    /// TerminateProcess" misattribution case. Prior to arity capping,
-    /// a stray push that wasn't consumed by its real target would get
-    /// merged into the arg list of the next call whose arity happened
-    /// to match, producing output like `GetCurrentProcess(0xc0000409)`
-    /// even though `GetCurrentProcess` is a 0-arg function.
+    /// Regression test for the canonical Win32 idiom where the
+    /// `uExitCode` arg of `TerminateProcess` is pre-positioned on the
+    /// stack BEFORE the `GetCurrentProcess` call that produces the
+    /// `hProcess` arg:
     ///
-    /// With arity capping, the zero-arg call sees the overflow,
-    /// flushes it as a plain `*(esp) = ...` store, and consumes no
-    /// args from the queue. The subsequent 2-arg call then reads the
-    /// args it actually expects.
+    /// ```text
+    /// push exit_code        ; arg2 (uExitCode), pre-positioned
+    /// call GetCurrentProcess ; 0-arg, returns hProcess in eax
+    /// push eax              ; arg1 (hProcess)
+    /// call TerminateProcess  ; 2-arg
+    /// ```
+    ///
+    /// The arity cap on `GetCurrentProcess` (0 args) must NOT consume
+    /// the `exit_code` push, and must NOT discard it as a flushed
+    /// store either. It should leave the entry in the pending queue
+    /// so the subsequent `TerminateProcess` call can pair it with
+    /// the `eax` push and consume both as args.
+    ///
+    /// This is the case the initial PR 4 arity cap got wrong by
+    /// flushing overflow at the call site; PR 4c switched to
+    /// "take last N, leave the rest" semantics so legitimate
+    /// pre-positioned args survive earlier calls.
     #[test]
-    fn arity_cap_flushes_overflow_and_caps_args() {
+    fn arity_cap_preserves_args_across_zero_arg_call() {
         use crate::type_archive::{
             ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn,
             Primitive, TypeArchive, TypeRef,
@@ -586,8 +659,6 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::Arc;
 
-        // Build a minimal archive with GetCurrentProcess (0 args) and
-        // TerminateProcess (2 args).
         let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
         functions.insert(
             "GetCurrentProcess".to_string(),
@@ -625,26 +696,20 @@ mod tests {
             types: HashMap::new(),
         });
 
-        // IR mimicking the Phase 5b regression:
-        //   push 0xc0000409        ; leftover push from earlier code
-        //   call GetCurrentProcess  ; 0-arg function
-        //   push 0xdeadbeef         ; real arg 2 to TerminateProcess
-        //   push 0xfeedface         ; real arg 1 to TerminateProcess
-        //   call TerminateProcess   ; 2-arg function
         let ir = mk_ir(vec![
+            // push 0xc0000409 — uExitCode pre-positioned
             IrOp::Store {
                 addr: rsp4(),
                 src: VarNode::constant(0xc0000409, 4),
             },
+            // call GetCurrentProcess
             IrOp::Call { target: 0x2000 },
-            IrOp::Store {
-                addr: rsp4(),
-                src: VarNode::constant(0xdeadbeef, 4),
-            },
+            // push 0xfeedface — stand-in for "push eax" (hProcess)
             IrOp::Store {
                 addr: rsp4(),
                 src: VarNode::constant(0xfeedface, 4),
             },
+            // call TerminateProcess
             IrOp::Call { target: 0x3000 },
         ]);
 
@@ -656,21 +721,16 @@ mod tests {
         let result = build_statements(&ir, &ctx);
         let stmts = &result[&0x1000];
 
-        // Expected sequence:
-        //   1. *(esp) = 0xc0000409     (overflow flushed by 0-arg cap)
-        //   2. GetCurrentProcess()     (called with zero args)
-        //   3. TerminateProcess(0xfeedface, 0xdeadbeef)
+        // Expected: only two statements (the calls). No leftover
+        // overflow stores. The 0xc0000409 push survives the
+        // GetCurrentProcess call and gets consumed as TerminateProcess's
+        // second argument.
         assert_eq!(
             stmts.len(),
-            3,
-            "expected [overflow store, GetCurrentProcess(), TerminateProcess(...)], got {stmts:#?}"
+            2,
+            "expected [GetCurrentProcess(), TerminateProcess(...)] only, got {stmts:#?}"
         );
-        assert!(
-            matches!(stmts[0], Stmt::Assign(..)),
-            "first stmt should be the flushed overflow push, got {:?}",
-            stmts[0]
-        );
-        match &stmts[1] {
+        match &stmts[0] {
             Stmt::ExprStmt(Expr::Call(callee, args)) => {
                 assert!(
                     matches!(**callee, Expr::Var(ref n) if n == "GetCurrentProcess")
@@ -682,15 +742,197 @@ mod tests {
             }
             other => panic!("expected GetCurrentProcess call, got {other:?}"),
         }
-        match &stmts[2] {
+        match &stmts[1] {
             Stmt::ExprStmt(Expr::Call(callee, args)) => {
                 assert!(
                     matches!(**callee, Expr::Var(ref n) if n == "TerminateProcess")
                 );
-                assert_eq!(args.len(), 2, "TerminateProcess should have 2 args");
+                assert_eq!(args.len(), 2, "TerminateProcess should have 2 args, got {args:#?}");
+                // Args are wrapped in Cast(declared_type, IntLit) by
+                // the typed-call-site pass. Look through the cast to
+                // assert the underlying constants.
+                // Source order: arg0=hProcess (last push, 0xfeedface),
+                // arg1=uExitCode (first push, 0xc0000409).
+                assert_eq!(unwrap_int_lit(&args[0]), 0xfeedface, "arg0 should be the eax push (hProcess)");
+                assert_eq!(unwrap_int_lit(&args[1]), 0xc0000409, "arg1 should be the pre-positioned uExitCode");
             }
             other => panic!("expected TerminateProcess call, got {other:?}"),
         }
+    }
+
+    /// Helper: unwrap an `Expr` that may be a `Cast(_, IntLit)` or a
+    /// bare `IntLit`, returning the literal value. Used by the
+    /// arity-cap tests so they don't have to care whether the cast
+    /// wrapper from `annotate_call_args` is present or not.
+    fn unwrap_int_lit(e: &Expr) -> u64 {
+        match e {
+            Expr::IntLit(v, _) => *v,
+            Expr::Cast(_, inner) => unwrap_int_lit(inner),
+            other => panic!("expected IntLit (optionally wrapped in Cast), got {other:?}"),
+        }
+    }
+
+    /// When a Call's prototype is in the bundled archives, the args
+    /// passed to it should be wrapped in `Expr::Cast(declared_type, ..)`
+    /// so the rendered output surfaces the parameter types
+    /// (`(HANDLE)result`, `(DWORD)0xc0000409`, etc.). This is the
+    /// most visible PR 4c change to a user looking at the decompile
+    /// view of a sub_XXXX function: even though the function itself
+    /// has no archive entry, the calls it makes get type-annotated
+    /// args.
+    #[test]
+    fn typed_call_args_get_cast_wrappers() {
+        use crate::ast::CType;
+        use crate::type_archive::{
+            ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn,
+            Primitive, TypeArchive, TypeRef,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        // Single-arg function: takes a HANDLE.
+        let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
+        functions.insert(
+            "CloseHandle".to_string(),
+            ArchiveFn {
+                name: "CloseHandle".to_string(),
+                args: vec![ArchiveArg {
+                    name: "hObject".to_string(),
+                    ty: TypeRef::Named("HANDLE".to_string()),
+                }],
+                return_type: TypeRef::Primitive(Primitive::Bool),
+                calling_convention: CallingConvention::Stdcall,
+                is_variadic: false,
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".to_string(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types: HashMap::new(),
+        });
+
+        // push 0xdeadbeef; call CloseHandle
+        let ir = mk_ir(vec![
+            IrOp::Store {
+                addr: rsp4(),
+                src: VarNode::constant(0xdeadbeef, 4),
+            },
+            IrOp::Call { target: 0x2000 },
+        ]);
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x2000, "CloseHandle".to_string());
+        ctx.type_archives = vec![archive];
+
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::ExprStmt(Expr::Call(_, args)) => {
+                assert_eq!(args.len(), 1);
+                // The arg should be wrapped in Cast(Named("HANDLE"), ..).
+                match &args[0] {
+                    Expr::Cast(ty, inner) => {
+                        assert!(
+                            matches!(ty, CType::Named(n) if n == "HANDLE"),
+                            "expected Cast(Named(HANDLE), ..), got Cast({ty:?}, ..)"
+                        );
+                        // Inner should be the original IntLit.
+                        assert!(matches!(**inner, Expr::IntLit(0xdeadbeef, _)));
+                    }
+                    other => panic!("expected Cast wrapper, got {other:?}"),
+                }
+            }
+            other => panic!("expected Call stmt, got {other:?}"),
+        }
+    }
+
+    /// When the pending queue has more entries than the cap, only the
+    /// *last* `n` are consumed as args; the prefix stays in the
+    /// queue. This protects pre-positioned args for later calls
+    /// without losing them. The simplest version: 3 pushes followed
+    /// by a 2-arg call should yield args from the last 2 pushes,
+    /// leaving the first push in `pending` until the next call or
+    /// flush sweeps it.
+    #[test]
+    fn arity_cap_takes_last_n_leaving_prefix() {
+        use crate::type_archive::{
+            ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn,
+            Primitive, TypeArchive, TypeRef,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
+        functions.insert(
+            "two_arg".to_string(),
+            ArchiveFn {
+                name: "two_arg".to_string(),
+                args: vec![
+                    ArchiveArg {
+                        name: "a".to_string(),
+                        ty: TypeRef::Primitive(Primitive::UInt32),
+                    },
+                    ArchiveArg {
+                        name: "b".to_string(),
+                        ty: TypeRef::Primitive(Primitive::UInt32),
+                    },
+                ],
+                return_type: TypeRef::Primitive(Primitive::Void),
+                calling_convention: CallingConvention::Cdecl,
+                is_variadic: false,
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".to_string(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types: HashMap::new(),
+        });
+
+        // push 100; push 2; push 1; call two_arg → two_arg(1, 2)
+        // The 100 push survives in the pending queue and would
+        // be consumed by a later call or flushed by an
+        // intervening op. Here we just check it isn't an arg.
+        let ir = mk_ir(vec![
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(100, 4) },
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(2, 4) },
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(1, 4) },
+            IrOp::Call { target: 0x2000 },
+            // Force a flush so the test doesn't depend on end-of-block
+            // flushing behavior to make the leftover observable.
+            IrOp::Return { value: Operand::None },
+        ]);
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x2000, "two_arg".to_string());
+        ctx.type_archives = vec![archive];
+
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+
+        // Expected sequence:
+        //   1. two_arg(1, 2)             ← consumes the last 2 pushes
+        //   2. *(esp) = 100              ← leftover push, flushed at Return
+        //   3. return                    ← terminator
+        // The leftover-flush happens at the Return op via the
+        // pre-existing flush_stack_writes path, NOT inside the call.
+        assert_eq!(stmts.len(), 3, "expected 3 stmts, got {stmts:#?}");
+        match &stmts[0] {
+            Stmt::ExprStmt(Expr::Call(callee, args)) => {
+                assert!(matches!(**callee, Expr::Var(ref n) if n == "two_arg"));
+                assert_eq!(args.len(), 2);
+                assert_eq!(unwrap_int_lit(&args[0]), 1);
+                assert_eq!(unwrap_int_lit(&args[1]), 2);
+            }
+            other => panic!("expected two_arg call, got {other:?}"),
+        }
+        // The leftover 100 push should now be a flushed store.
+        assert!(
+            matches!(stmts[1], Stmt::Assign(..)),
+            "expected leftover-100 to be flushed as a store, got {:?}",
+            stmts[1]
+        );
+        assert!(matches!(stmts[2], Stmt::Return(_)));
     }
 
     /// Variadic functions (printf, etc.) opt out of arity capping:
