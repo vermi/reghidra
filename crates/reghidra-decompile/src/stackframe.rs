@@ -97,6 +97,30 @@ pub fn analyze_and_rewrite(
     // body. When present, we know the function is using a frame pointer and
     // all `rbp ± k` references can be treated as stable slot offsets.
     if !has_frame_pointer_setup(&body) {
+        // Fallback: MSVC SEH4 prolog functions (`__SEH_prolog4`,
+        // `__SEH_prolog4_GS`, `_EH_prolog`, etc.) jump straight into a
+        // CRT helper to set up their frame and never emit the canonical
+        // `mov ebp, esp` we look for above. The body is opaque to the
+        // tier-2 walker, so no slots are recovered. But when the
+        // function ALSO has a known prototype in the bundled archives
+        // (typically a FLIRT-matched MSVC CRT internal — `__lockexit`,
+        // `__ftbuf`, `__commit`, etc.), we can still synthesize
+        // positive-offset arg slots directly from the prototype's arg
+        // list at standard x86-32 cdecl/stdcall stack offsets and
+        // prepend the typed `VarDecl`s. This gives the user a visible
+        // signature for the function body even though the access sites
+        // remain opaque. See `synthesize_arg_slots_from_prototype`
+        // for the offset convention. SEH4 is x86-32-only (x86-64 SEH
+        // is table-based and has no runtime prolog helper) so this
+        // assumption is safe.
+        if let Some(proto) = prototype {
+            if is_seh_prolog_function(&body) {
+                synthesize_arg_slots_from_prototype(&mut layout, proto);
+                layout.has_frame_pointer = true;
+                let body = prepend_var_decls(body, &layout);
+                return (body, layout);
+            }
+        }
         return (body, layout);
     }
     layout.has_frame_pointer = true;
@@ -181,6 +205,89 @@ fn apply_prototype_arg_types(layout: &mut FrameLayout, proto: &FunctionType) {
         if let Some(slot) = layout.slots.get_mut(slot_offset) {
             slot.ctype = Some(type_ref_to_ctype(&proto_arg.ty));
         }
+    }
+}
+
+/// Walk the body looking for a Call to a function whose name marks
+/// it as an MSVC SEH-style prolog helper. Microsoft's CRT compiles
+/// `__try`/`__except` blocks into a frame setup that hands off to one
+/// of these helpers instead of inlining a frame pointer assignment,
+/// so the tier-2 `rbp = rsp` detection misses them. Recognized names:
+///
+/// - `__SEH_prolog4` / `__SEH_prolog4_GS` — modern MSVC SEH4 prolog
+/// - `_SEH_prolog4` / `_SEH_prolog4_GS` — older underscore decoration
+/// - `_EH_prolog` / `__EH_prolog` — pre-SEH4 32-bit C++ EH prolog
+///
+/// Match is by leading-prefix substring so future Microsoft variants
+/// (`__SEH_prolog4_kernel`, etc.) get caught without code changes.
+fn is_seh_prolog_function(body: &[Stmt]) -> bool {
+    let mut found = false;
+    walk_stmts(body, &mut |stmt| {
+        let call_target = match stmt {
+            Stmt::ExprStmt(Expr::Call(callee, _)) => Some(callee.as_ref()),
+            Stmt::Assign(_, Expr::Call(callee, _)) => Some(callee.as_ref()),
+            _ => None,
+        };
+        if let Some(Expr::Var(name)) = call_target {
+            if is_seh_prolog_name(name) {
+                found = true;
+            }
+        }
+    });
+    found
+}
+
+fn is_seh_prolog_name(name: &str) -> bool {
+    // Strip up to two leading underscores so all decorations match.
+    let trimmed = name.trim_start_matches('_');
+    trimmed.starts_with("SEH_prolog") || trimmed.starts_with("EH_prolog")
+}
+
+/// Synthesize positive-offset arg slots directly from the prototype's
+/// parameter list at standard x86-32 cdecl/stdcall stack offsets:
+///
+/// ```text
+///   arg 0 → ebp + 0x08   ("arg_8")
+///   arg 1 → ebp + 0x0c   ("arg_c")
+///   arg 2 → ebp + 0x10   ("arg_10")
+///   ...
+/// ```
+///
+/// Each slot's `ctype` is populated from the corresponding prototype
+/// arg, and `size` is the byte width of the C type. Slots wider than
+/// 4 bytes (`int64_t`, structs) consume the next slot's offset, so
+/// the next arg's offset is bumped to maintain the cdecl alignment.
+/// This matches the convention `apply_prototype_arg_types` already
+/// uses for the frame-pointer-recognized path, just laid down ahead
+/// of time instead of recovered from access sites.
+///
+/// Used only for the SEH-prolog fallback in `analyze_and_rewrite`.
+/// The frame-pointer-recognized path keeps using
+/// `apply_prototype_arg_types` so its slot widths come from the
+/// observed access sizes (which can be more precise than the
+/// prototype declarations when the access is narrower).
+fn synthesize_arg_slots_from_prototype(layout: &mut FrameLayout, proto: &FunctionType) {
+    // x86-32 cdecl/stdcall: first arg is at [ebp+8] (saved-ebp at +0,
+    // return address at +4). Each subsequent arg is at +sizeof(prev)
+    // rounded up to 4 bytes.
+    let mut offset: i64 = 8;
+    for arg in &proto.args {
+        let ctype = type_ref_to_ctype(&arg.ty);
+        let size = ctype.size().max(1);
+        let name = format!("arg_{:x}", offset);
+        layout.slots.insert(
+            offset,
+            StackSlot {
+                offset,
+                size,
+                ref_count: 0,
+                name,
+                ctype: Some(ctype),
+            },
+        );
+        // Round up to 4-byte alignment for the next arg's offset.
+        let stride = ((size as i64) + 3) & !3;
+        offset += stride.max(4);
     }
 }
 
@@ -834,5 +941,94 @@ mod tests {
         if let Some(Stmt::VarDecl { ctype, .. }) = decl_for("arg_c") {
             assert!(matches!(ctype, CType::UInt32));
         }
+    }
+
+    /// MSVC SEH4 prolog functions don't establish the canonical
+    /// `mov ebp, esp` pattern — they hand off to `__SEH_prolog4`
+    /// instead. The fallback path in `analyze_and_rewrite` should
+    /// detect the call to a SEH-prolog helper, treat it as a
+    /// recognized frame, and synthesize positive-offset arg slots
+    /// directly from the supplied prototype's parameter list at
+    /// standard x86-32 cdecl/stdcall offsets.
+    #[test]
+    fn seh_prolog_with_prototype_synthesizes_arg_slots() {
+        use crate::type_archive::{
+            ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn, Primitive,
+            TypeRef,
+        };
+
+        let proto = ArchiveFn {
+            name: "__lockexit".to_string(),
+            args: vec![
+                ArchiveArg {
+                    name: "code".to_string(),
+                    ty: TypeRef::Primitive(Primitive::Int32),
+                },
+                ArchiveArg {
+                    name: "flag".to_string(),
+                    ty: TypeRef::Primitive(Primitive::Int32),
+                },
+            ],
+            return_type: TypeRef::Primitive(Primitive::Void),
+            calling_convention: CallingConvention::Cdecl,
+            is_variadic: false,
+        };
+
+        // Body has no `mov ebp, esp` — instead it calls __SEH_prolog4.
+        let body = vec![
+            Stmt::ExprStmt(Expr::Call(
+                Box::new(var("__SEH_prolog4")),
+                vec![],
+            )),
+            assign(var("eax"), int(0)),
+        ];
+        let (out, layout) = analyze_and_rewrite(body, Some(&proto));
+
+        // Frame should be reported as recognized via the SEH path.
+        assert!(layout.has_frame_pointer, "SEH4 fallback should set has_frame_pointer");
+        // Two arg slots at +8 and +c.
+        assert_eq!(layout.slots.len(), 2);
+        let slot8 = layout.slots.get(&8).expect("arg slot at +8");
+        assert_eq!(slot8.name, "arg_8");
+        assert!(matches!(slot8.ctype, Some(CType::Int32)));
+        let slot_c = layout.slots.get(&0xc).expect("arg slot at +c");
+        assert_eq!(slot_c.name, "arg_c");
+        assert!(matches!(slot_c.ctype, Some(CType::Int32)));
+
+        // VarDecls should be prepended to the body.
+        assert!(matches!(out.first(), Some(Stmt::VarDecl { .. })));
+        let decl_count = out.iter().filter(|s| matches!(s, Stmt::VarDecl { .. })).count();
+        assert_eq!(decl_count, 2);
+    }
+
+    /// SEH4 fallback only fires when a prototype is supplied. Without
+    /// one we have nothing to synthesize from, so the body should
+    /// pass through unchanged with `has_frame_pointer = false`.
+    #[test]
+    fn seh_prolog_without_prototype_no_synthesis() {
+        let body = vec![
+            Stmt::ExprStmt(Expr::Call(
+                Box::new(var("__SEH_prolog4")),
+                vec![],
+            )),
+        ];
+        let (out, layout) = analyze_and_rewrite(body, None);
+        assert!(!layout.has_frame_pointer);
+        assert!(layout.slots.is_empty());
+        assert_eq!(out.len(), 1);
+    }
+
+    /// Underscore-decoration variants of the SEH/EH prolog name should
+    /// all be recognized.
+    #[test]
+    fn seh_prolog_name_recognition() {
+        assert!(is_seh_prolog_name("__SEH_prolog4"));
+        assert!(is_seh_prolog_name("_SEH_prolog4"));
+        assert!(is_seh_prolog_name("SEH_prolog4"));
+        assert!(is_seh_prolog_name("__SEH_prolog4_GS"));
+        assert!(is_seh_prolog_name("__EH_prolog"));
+        assert!(is_seh_prolog_name("_EH_prolog"));
+        assert!(!is_seh_prolog_name("_setjmp"));
+        assert!(!is_seh_prolog_name("__main"));
     }
 }
