@@ -108,3 +108,16 @@ and signature data curated by the [Rizin](https://rizin.re/) project,
 which is itself GPLv3-licensed. Code from before the relicense remains
 available under MIT through git history; anyone needing a permissive
 fork can branch from `19d5581` or earlier.
+
+### Bundled third-party data
+
+- `signatures/` — FLIRT signature databases sourced from
+  [rizinorg/sigdb](https://github.com/rizinorg/sigdb) and the
+  IDA-derived public packs.
+- `types/rizin-windows.rtarch` and `types/rizin-libc.rtarch` —
+  derived works of Rizin's `librz/arch/types/functions-*.sdb.txt`
+  function-signature database (GPLv3). The pinned upstream commit
+  is recorded in `.github/workflows/typegen-drift-check.yml` under
+  `RIZIN_REF`. Regeneration is performed by
+  `tools/typegen --source rizin-sdb` and verified byte-for-byte
+  by the drift-check workflow on every pull request.

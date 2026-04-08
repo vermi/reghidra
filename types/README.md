@@ -1,6 +1,6 @@
 # Type archives
 
-This directory holds bundled [`TypeArchive`](../crates/reghidra-core/src/types/mod.rs)
+This directory holds bundled [`TypeArchive`](../crates/reghidra-decompile/src/type_archive/mod.rs)
 files consumed by the decompiler to recover typed function prototypes,
 parameter names, return values, and struct layouts for imported APIs.
 
@@ -41,19 +41,25 @@ regeneration (e.g. a bump of `windows-sys` in the typegen crate's
 ## Layout
 
 Archives are selected at load time by binary format and architecture;
-see `archive_stems` in `crates/reghidra-core/src/types/mod.rs` for the
-mapping. Current targets:
+see `archive_stems_for` in `crates/reghidra-core/src/project.rs` for
+the mapping. Current targets:
 
 | Stem              | Covers                                                |
 | ----------------- | ----------------------------------------------------- |
 | `posix`           | POSIX / libc / pthread core from `libc`               |
+| `ucrt`            | MSVC CRT from `libc`'s `src/windows/` tree            |
 | `windows-x64`     | Win32 APIs from `windows-sys` (LLP64, Win64 ABI)      |
 | `windows-x86`     | Same, 32-bit target (ILP32, stdcall ABI)              |
 | `windows-arm64`   | Same, ARM64 target (LLP64, AAPCS64 ABI)               |
+| `rizin-windows`   | ~5 350 Win32 functions from Rizin's SDB (35 headers)  |
+| `rizin-libc`      | ~530 POSIX/libc/linux/macos functions from Rizin SDB  |
 
-The UCRT surface that ships under `Win32::System::Console`,
-`Win32::System::Threading`, etc. is already covered by the
-`windows-*` archives, so there's no separate `ucrt.rtarch`. If a
-future PR splits the CRT out (e.g. to slim the main Windows blob),
-it should add the new stem to `archive_stems_for` in
-`crates/reghidra-core/src/project.rs`.
+The `rizin-*` archives are derived from
+[Rizin](https://github.com/rizinorg/rizin)'s `librz/arch/types/`
+SDB tree (GPLv3). The pinned upstream commit is recorded in
+`.github/workflows/typegen-drift-check.yml` under `RIZIN_REF`; bump
+that constant *and* commit the regenerated archives in the same PR.
+At runtime they sit at the bottom of the precedence chain in
+`archive_stems_for`, filling gaps left by the binding-crate-derived
+archives — first-archive-wins ordering keeps `windows-x64` (etc.)
+authoritative for any function name they share.
