@@ -353,6 +353,7 @@ mod tests {
             label_names: Default::default(),
             variable_names: Default::default(),
             current_function_display_name: None,
+            type_archives: Vec::new(),
         }
     }
 
