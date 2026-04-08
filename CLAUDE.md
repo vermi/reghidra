@@ -173,9 +173,10 @@ We follow the UChicago C style guide (https://uchicago-cs.github.io/student-reso
 - K&R brace style (`void foo(void) {` on same line, closing `}` on its own).
 - Empty parameter lists are `(void)`, not `()` — K&R `()` means "unspecified prototype" in strict C.
 - Space after control keywords (`if (cond)`, `while (cond)`), space around binary operators, no space around `*`/`&`/`.`/`->` in their unary/postfix forms (we strip parens around simple deref/addrof operands via `needs_no_deref_parens` in emit.rs).
-- Blank line between the leading `VarDecl` block and the rest of the function body so the variables section is visually distinct.
+- Unary operators on Binary/Ternary operands always get explicit parens so precedence stays correct (`-(x + y)`, never `-x + y`).
 - No compound one-line statements — every body is a brace block.
 - Block comments use `/* ... */`; line comments (`//`) only for annotations we explicitly emit.
+- **Logical section separation via blank lines**, per the guide's "the body of the function should include blank lines to indicate logical sections (with at most one blank line separating each logical section)" rule. Implemented in `emit::emit_body_with_separators` which inserts a blank line between adjacent visible statements when `should_separate(prev, curr)` returns true. The transitions that trigger a separator are: VarDecl ↔ non-VarDecl boundary, before any `Label`, control-flow block (`if`/`while`/`Loop`) ↔ straight-line code boundary, after `Return` or `Goto`, and around `Comment` annotations. Two adjacent control-flow blocks are NOT separated. The pass runs recursively inside `then_body`/`else_body`/`while body`/`loop body` so nested separators work, and never produces leading/trailing blanks inside a brace block or two consecutive blanks anywhere. `SourceAddr` markers are skipped when picking the "previous visible" statement so they don't anchor a wrong decision.
 
 ## Decompile syntax highlighting
 - Token-level coloring, not per-line. `reghidra-gui/src/syntax.rs` is the C lexer — every rendered decomp line is split into `SyntaxKind` spans (Keyword, Type, Number, String, Operator, Punctuation, Comment, Return, Goto, Identifier, Whitespace) and each span is painted with the theme's matching color. Do not regress this to per-line colorizing — it was literally a wall of code before.
