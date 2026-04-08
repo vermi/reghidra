@@ -97,4 +97,13 @@ reghidra/
 
 ## License
 
-MIT
+GNU General Public License v3.0 or later. See [LICENSE](LICENSE) for the
+full text.
+
+Reghidra was originally released under the MIT license through commit
+`19d5581` (Phase 5c PR 4f). Starting with the next commit it is
+distributed under GPL-3.0-or-later so it can incorporate type-archive
+and signature data curated by the [Rizin](https://rizin.re/) project,
+which is itself GPLv3-licensed. Code from before the relicense remains
+available under MIT through git history; anyone needing a permissive
+fork can branch from `19d5581` or earlier.
