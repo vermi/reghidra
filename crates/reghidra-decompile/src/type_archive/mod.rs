@@ -345,16 +345,39 @@ mod tests {
 
     #[test]
     fn load_embedded_missing_stem_returns_none() {
-        // The types/ tree currently contains no archives, so any stem
-        // lookup should return None without panicking. Once PR 3 lands
-        // archives this test will need a companion that asserts a real
-        // stem resolves.
         assert!(load_embedded("this-stem-will-never-exist").is_none());
     }
 
     #[test]
     fn is_embedded_reports_absence_cleanly() {
         assert!(!is_embedded("this-stem-will-never-exist"));
+    }
+
+    /// Integration check for PR 3: load the `posix.rtarch` archive
+    /// that `tools/typegen` produced from the `libc` crate and assert
+    /// it contains at least one well-known POSIX function. This is
+    /// the end-to-end guardrail that catches postcard format drift
+    /// between the tool-side data model (`tools/typegen/src/model.rs`)
+    /// and the runtime-side data model (this file). If they diverge,
+    /// decode fails here with a clear error before anyone ships a
+    /// broken archive.
+    ///
+    /// The test intentionally doesn't hard-code a specific function
+    /// count — the walker is expected to gain coverage in follow-up
+    /// PRs (struct decls, `s!` macro expansion, deeper cfg_if
+    /// traversal, Windows archives) and churning the expected count
+    /// on every walker improvement would be noise. We only check
+    /// that the archive loaded and has *something* meaningful in it.
+    #[test]
+    fn posix_archive_loads_and_has_content() {
+        let Some(archive) = load_embedded("posix") else {
+            panic!("posix.rtarch not found in embedded types/ directory");
+        };
+        assert_eq!(archive.version, ARCHIVE_VERSION);
+        assert!(
+            !archive.functions.is_empty(),
+            "posix.rtarch decoded but has zero functions — walker regression?"
+        );
     }
 
     #[test]

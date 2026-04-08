@@ -1,0 +1,64 @@
+# tools/typegen — maintainer-only archive generator.
+#
+# This crate intentionally declares its own [workspace] table so cargo treats
+# it as an isolated workspace root. It is NOT a member of the main
+# reghidra workspace in `../../Cargo.toml`, which means `cargo build` /
+# `cargo test` at the repo root never reach this crate, never pull syn or
+# postcard into the main dep graph, and never produce an archive at user
+# build time.
+#
+# Regeneration is explicitly a human action:
+#     cd tools/typegen
+#     cargo run --release -- \
+#         --source libc \
+#         --target linux \
+#         --out ../../types/posix.rtarch
+#
+# CI verifies drift on PRs that touch `types/` or `tools/typegen/` by
+# regenerating into a scratch directory and diffing against the checked-in
+# bytes. See `.github/workflows/typegen-drift-check.yml`.
+
+[workspace]
+# Empty `members` + a package declaration below makes this a standalone
+# workspace. Cargo's parent-workspace discovery still walks upward, so we
+# also need to tell it NOT to attach to the root reghidra workspace.
+members = ["."]
+
+[package]
+name = "reghidra-typegen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "reghidra-typegen"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+# AST walking and source-tree discovery
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+proc-macro2 = "1"
+cargo_metadata = "0.19"
+
+# Archive (de)serialization — must match the version used by
+# reghidra-decompile so archives produced here are byte-compatible with
+# the runtime loader. Locked via the root workspace Cargo.toml for the
+# main crates; we re-declare the same version here since we're out of
+# workspace.
+postcard = { version = "1", features = ["alloc"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+
+# Source crates we walk. These are dev-level deps for the tool, not for
+# Reghidra itself — they never reach the main workspace.
+libc = "0.2"
+# windows-sys is added in PR 3b when the windows_link macro walker lands.
+# Leaving it out of PR 3 keeps this scaffold focused on the libc path.
+
+# Logging during generation runs so maintainers can see progress.
+env_logger = "0.11"
+log = "0.4"

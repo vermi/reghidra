@@ -165,9 +165,27 @@ Planned (not yet pulled in):
 - [x] Decompile output C-style compliance (UChicago guide). `void foo(void)` for empty param lists, `*var` / `&var` instead of `*(var)` / `&(var)` for tight operands (`needs_no_deref_parens` in `emit.rs`), unary operators on Binary/Ternary operands get explicit parens for precedence safety, blank-line separators between logical sections via `emit::emit_body_with_separators` + `should_separate` (triggers: VarDecl↔body, before Label, control-flow↔straight-line, after Return/Goto, around Comment; never double blanks; runs recursively into nested bodies; SourceAddr markers skipped when picking "previous visible").
 - [x] Decompile view token-level syntax highlighting. New `reghidra-gui/src/syntax.rs` is a small C lexer that tokenizes each rendered line into `SyntaxKind` spans (Keyword, Type, Return, Goto, Number, String, Operator, Punctuation, Comment, Identifier, Whitespace). Hand-curated sorted `CONTROL_KEYWORDS` and `C_TYPE_KEYWORDS` tables (the type table includes stdint, common Windows API aliases — HANDLE/HWND/DWORD/LPCSTR/etc. — and the `unkN` defaults). `Theme::decomp_color(SyntaxKind)` replaces the old per-line `colorize_decompile_line`. Rendering path in `views/decompile.rs`: `render_interactive_line` → `emit_syntax_spans` walks the lexer output and paints every token with its category color. Existing clickable-token overlay (function calls, labels, hex addresses, variables) still works on top. Dark-mode palette is Nord-inspired (Frost teal for types, Aurora purple for keywords, Aurora orange for numbers, Aurora green for strings, Snow Storm for operators/default, Polar Night slate for comments); light mode is Solarized equivalents.
 
-### Phase 5c — Typing & debug info (NEXT — START HERE in the next session)
+### Phase 5c — Typing & debug info (IN PROGRESS)
 
 **Goal.** Stack slots currently default to `CType::Unknown(size)`. Make them typed. Two data sources feed a unified `TypeArchive`: (1) Rust binding crates (build-time extraction, ships pre-built archives), (2) PDB files (runtime load, overrides archive data for binaries that ship symbols). Once typed, wire into arity capping for the stack-arg collapser, typed parameter display in decompile output, return-type propagation, and a right-click "Set Type" retype UI with slot subsumption (retyping a slot to a wider type collapses adjacent slots that fall inside the new extent).
+
+**Naming vs typing precedence — DO NOT flatten these into one pipeline.** A function has two independently-sourced attributes, its *name* (what to call it) and its *type* (its signature). Each has its own chain of sources, and the two chains meet at the name: the typing chain keys off whatever name the naming chain produced.
+
+- **Name source precedence** (highest → lowest):
+  1. User rename (`Project::renamed_functions`)
+  2. PE Import/Export tables (deterministic — `binary.import_addr_map`, export table)
+  3. PDB (authoritative when the sibling `.pdb` is present — Phase 5c PR 5)
+  4. FLIRT (byte-pattern matching for statically-linked third-party code — CRT, libc, libstdc++)
+  5. Heuristic `sub_XXXX`
+- **Type source precedence** (highest → lowest):
+  1. User retype (Phase 5c PR 5 right-click "Set Type", persisted in `slot_types`)
+  2. PDB (when present — overrides archive data for functions in the symbol stream)
+  3. Type archive lookup — `windows-sys` / `libc` / `ucrt` bindings, keyed on the name from the naming chain
+  4. `CType::Unknown(size)` fallback
+
+The crucial thing is that **`windows-sys` is NOT in the naming chain**. It contains `extern "system"` declarations (name + prototype), not byte patterns, so it can't identify unnamed functions. Its value is purely as a type source: once the naming chain has produced `CreateFileA` (from the PE IAT), we look `CreateFileA` up in `windows-x64.rtarch` to get the prototype. Analogously, **FLIRT is NOT in the typing chain**: it produces names only. A FLIRT-matched `memcpy` becomes typed when we look `memcpy` up in `posix.rtarch` (from `libc`). The two sources compose cleanly because they never produce the same kind of information.
+
+A practical consequence: FLIRT matching on functions that already have an authoritative name (IAT imports, PDB entries) is wasted work. A small optimization landable any time during Phase 5c is to skip `apply_signatures` for functions whose `FunctionSource` is already `Import` or (later) `Pdb`. Low-risk, pure win, no new data structures.
 
 **Why not GDT or TIL (so the fresh agent doesn't redo this research).**
 - **GDT** (Ghidra Data Type archives): closed binary format tightly coupled to Ghidra's Java `DataTypeManager`, no standalone parser, tooling (`ghidra-gdt`, `gdt_helper`) all runs inside Ghidra itself. Skip.
@@ -175,28 +193,35 @@ Planned (not yet pulled in):
 - **Rizin `librz/arch/types/*.sdb.txt`**: ~90 hand-curated SDB text files covering Windows APIs (34 `functions-windows_*` split per-header), POSIX/libc/Linux/macOS/Android, x86/ARM/MIPS calling conventions. Trivially parseable flat `key=value` format. GPLv3 licensed — cross-licensing with Reghidra's MIT is a legal gray area even for data files, and the curation is creative work of the Rizin authors. Useful as **reference for cross-checking** our own archives; not bundleable.
 - **`windows-sys` + `libc` + `syn` (what we're doing)**: MIT/Apache-2.0 Rust binding crates are auto-generated from [microsoft/win32metadata](https://github.com/microsoft/win32metadata) (authoritative) for `windows-sys` and maintained by rust-lang for `libc`. Every Win32 function prototype, struct layout, and calling convention is in them as Rust syntax, parseable with `syn` (which the `windows-sys` build already uses anyway). Cross-platform — a macOS dev host still gets Windows API type data because it's Rust source in a crate, not platform-specific C headers. Clean licensing, free update cadence (new APIs land in `windows-sys` within a release cycle).
 
-**Architecture.**
+**Architecture (as landed in PR 1 + PR 2, updated from the original sketch).**
 
 ```
 reghidra/
 ├── tools/
-│   └── typegen/                       # NEW — build-time type archive generator
-│       ├── Cargo.toml                 # depends on syn, quote, windows-sys, libc, postcard
-│       └── src/main.rs                # CLI: takes a crate name + feature set, emits a .rtarch
-├── types/                             # NEW — bundled archives, same pattern as signatures/
-│   ├── windows-x86.rtarch             # built from windows-sys targeting 32-bit Win32
-│   ├── windows-x64.rtarch
-│   ├── posix.rtarch                   # built from libc (Linux/macOS common core)
-│   └── ucrt.rtarch                    # C runtime entries (from windows-sys::Win32::System::Console etc)
+│   └── typegen/                                # maintainer-only, OUT-OF-WORKSPACE (PR 3)
+│       ├── Cargo.toml                          # own [workspace] table — not a member of root
+│       └── src/main.rs                         # CLI: --source, --features, --arch, --os, --out
+├── types/                                      # bundled .rtarch blobs, include_dir!'d at compile time
+│   ├── README.md                               # maintainer-only policy doc (PR 1)
+│   ├── windows-x64.rtarch                      # produced by typegen (PR 3)
+│   ├── windows-x86.rtarch
+│   ├── posix.rtarch
+│   └── ucrt.rtarch
+├── .github/workflows/typegen-drift-check.yml   # regenerates + diffs on types/ or tools/typegen/ PRs (PR 3)
 └── crates/
+    ├── reghidra-decompile/
+    │   └── src/
+    │       ├── type_archive/                   # data model lives HERE, not in reghidra-core (PR 2)
+    │       │   ├── mod.rs                      # TypeArchive, FunctionType, TypeRef, Primitive, load_embedded
+    │       │   └── archive.rs                  # postcard (de)serialization + version gate
+    │       ├── stackframe.rs                   # FrameLayout now returned, not discarded (PR 2)
+    │       └── lib.rs                          # DecompileOutput/DecompileAnnotated expose FrameLayout; DecompileContext.type_archives wired
     └── reghidra-core/
         └── src/
-            └── types/                 # NEW module (sibling of analysis/)
-                ├── mod.rs             # public API: TypeArchive, load_bundled, lookup
-                ├── archive.rs         # on-disk format (postcard), (de)serialization
-                ├── c_type.rs          # the actual type model (if richer than reghidra-decompile::ast::CType)
-                └── pdb.rs             # PDB-sourced overlay via the `pdb` crate (optional runtime dep)
+            └── project.rs                      # BinaryInfo → stems dispatch (fn archive_stems_for / fn load_type_archives)
 ```
+
+The data model lives in `reghidra-decompile::type_archive` (not `reghidra-core::types` as originally sketched) because `reghidra-core` already depends on `reghidra-decompile` — reversing that would be a cycle, and `DecompileContext` needs to carry `Arc<TypeArchive>` directly. `BinaryInfo`-aware stem selection stays in `reghidra-core::project` as a thin wrapper around `type_archive::load_embedded(stem)`.
 
 **Data model (start here).**
 

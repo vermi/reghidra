@@ -6,6 +6,14 @@ members = [
     "crates/reghidra-gui",
     "crates/reghidra-cli",
 ]
+# The typegen maintainer tool lives in its own standalone workspace
+# (`tools/typegen/Cargo.toml` declares its own `[workspace]` table) so
+# that `cargo build` / `cargo test` at the repo root never touches it.
+# Excluding the directory here is belt-and-suspenders — it prevents
+# cargo's parent-workspace discovery from accidentally pulling the tool
+# into the main dep graph, which would drag in syn, clap, cargo_metadata,
+# libc, and (eventually) windows-sys.
+exclude = ["tools/typegen"]
 resolver = "2"
 
 [workspace.package]
