@@ -703,19 +703,106 @@ impl LoadedBinary {
             }
         }
 
-        let imports: Vec<Symbol> = macho
-            .imports()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|imp| {
-                Symbol {
-                    name: imp.name.strip_prefix('_').unwrap_or(&imp.name).to_string(),
-                    address: imp.offset as u64,
-                    size: 0,
-                    kind: SymbolKind::Function,
-                    is_import: true,
-                    is_export: false,
+        let raw_imports = macho.imports().unwrap_or_default();
+
+        // Populate `import_addr_map` so that Mach-O `call qword ptr
+        // [rip + disp]` lifts (which the x86_64 lifter already models
+        // as a direct `Call { target: iat_slot_addr }`) can resolve
+        // their target addresses to import names at decompile time,
+        // exactly the way PE IAT-slot calls do.
+        //
+        // On Mach-O x86_64, goblin's `Import::address` field is the
+        // VA of the entry in `__got` / `__la_symbol_ptr` that the
+        // rip-relative call form loads through. That's the same
+        // shape the decompiler's `function_names` map keys on, so
+        // the runtime lookup "just works" once this map is populated.
+        //
+        // Note: direct `call stub_addr` into `__stubs` (non-rip-
+        // relative, used when the compiler doesn't emit the
+        // `[rip+disp]` form) still won't resolve here because the
+        // stub's VA isn't in `imports()`. A future fix would walk
+        // `__stubs` + the Indirect Symbol Table to build a
+        // stub_addr → name map and merge it in. For the common
+        // rip-relative case this is enough to go from 0 named
+        // functions on a typical Mach-O fixture to "all direct
+        // external calls resolve to the right import name".
+        let mut import_addr_map: HashMap<u64, String> = HashMap::new();
+        for imp in &raw_imports {
+            let name = imp.name.strip_prefix('_').unwrap_or(imp.name).to_string();
+            if !name.is_empty() {
+                // First write wins — `imports()` can enumerate the
+                // same import several times across `__got` /
+                // `__la_symbol_ptr` / etc., but the canonical VA
+                // (lowest-address first seen) is what the lifter
+                // actually targets.
+                import_addr_map.entry(imp.address).or_insert(name);
+            }
+        }
+
+        // On Mach-O x86_64 most calls to imports don't land in
+        // `__la_symbol_ptr` directly — they jump through a small
+        // 6-byte stub in the `__stubs` section:
+        //
+        //     ff 25 XX XX XX XX     jmp qword ptr [rip + disp32]
+        //
+        // where `[rip + disp32]` resolves to an entry in
+        // `__la_symbol_ptr`. The compiler emits `call stub_addr`
+        // rather than `call qword ptr [rip+disp]`, so the lifter
+        // sees a direct `Call { target: stub_addr }` and looks
+        // `stub_addr` up in `import_addr_map` — which until now
+        // didn't contain stub entries.
+        //
+        // Walk the `__stubs` section in 6-byte strides, parse each
+        // jmp to compute its rip-relative target, and if that target
+        // is a known import slot, record the stub's VA mapped to the
+        // import name. This takes a Mach-O fixture with zero named
+        // external calls in the decompile output (because every
+        // `call sub_stub_XXX` stayed unresolved) to one where every
+        // direct import call renders with its real name.
+        if info.architecture == Architecture::X86_64 {
+            if let Some(stubs_section) = sections
+                .iter()
+                .find(|s| s.name == "__TEXT,__stubs" || s.name.ends_with(",__stubs"))
+            {
+                let base = stubs_section.file_offset as usize;
+                let len = stubs_section.file_size as usize;
+                let va = stubs_section.virtual_address;
+                let end = base + len;
+                if end <= data.len() {
+                    let bytes = &data[base..end];
+                    // 6-byte strides: ff 25 disp32 (jmp [rip+disp32]).
+                    let stride = 6usize;
+                    let mut i = 0;
+                    while i + stride <= bytes.len() {
+                        if bytes[i] == 0xff && bytes[i + 1] == 0x25 {
+                            let disp = i32::from_le_bytes([
+                                bytes[i + 2],
+                                bytes[i + 3],
+                                bytes[i + 4],
+                                bytes[i + 5],
+                            ]) as i64;
+                            let stub_addr = va + i as u64;
+                            let next_rip = stub_addr + stride as u64;
+                            let slot_addr = next_rip.wrapping_add(disp as u64);
+                            if let Some(name) = import_addr_map.get(&slot_addr).cloned() {
+                                import_addr_map.entry(stub_addr).or_insert(name);
+                            }
+                        }
+                        i += stride;
+                    }
                 }
+            }
+        }
+
+        let imports: Vec<Symbol> = raw_imports
+            .into_iter()
+            .map(|imp| Symbol {
+                name: imp.name.strip_prefix('_').unwrap_or(imp.name).to_string(),
+                address: imp.address,
+                size: 0,
+                kind: SymbolKind::Function,
+                is_import: true,
+                is_export: false,
             })
             .collect();
 
@@ -729,7 +816,7 @@ impl LoadedBinary {
             imports,
             exports,
             strings,
-            import_addr_map: HashMap::new(),
+            import_addr_map,
             pdata_function_starts: Vec::new(),
             guard_cf_function_starts: Vec::new(),
         })
