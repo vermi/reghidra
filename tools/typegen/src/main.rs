@@ -42,6 +42,17 @@ struct Args {
     #[arg(long)]
     out: PathBuf,
 
+    /// Input path for source crates that read their content from the
+    /// filesystem rather than a Rust dependency (`rizin-sdb`). For a
+    /// rizin-sdb source this should point at either a single
+    /// `functions-*.sdb.txt` file or a directory containing one or
+    /// more such files (typically a Rizin checkout's
+    /// `librz/arch/types/` directory). Ignored for `libc` /
+    /// `windows-sys` sources, which locate their source via
+    /// `cargo metadata`.
+    #[arg(long)]
+    input: Option<PathBuf>,
+
     /// Human-readable archive name recorded in the postcard blob (for
     /// status output and log lines, not used for lookup keys). Defaults
     /// to the output file's stem.
@@ -58,6 +69,14 @@ enum SourceCrate {
     /// `windows_targets::link!` macro; struct/type definitions use
     /// plain `#[repr(C)] pub struct` and `pub type`.
     WindowsSys,
+    /// Rizin's `librz/arch/types/*.sdb.txt` flat text database
+    /// (GPLv3). Input path is supplied via `--input` — either a
+    /// single `functions-*.sdb.txt` file or a directory containing
+    /// one or more (typically a Rizin checkout's
+    /// `librz/arch/types/` directory). Parses only function
+    /// signatures; `types-*.sdb.txt` and `cc-*.sdb.txt` files are
+    /// ignored by the walker's directory-mode filter.
+    RizinSdb,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -140,6 +159,16 @@ fn main() -> Result<()> {
             log::info!("walking windows-sys source at {}", src_dir.display());
             walker::windows::walk(&src_dir, win_target, &name)
                 .context("walking windows-sys source tree")?
+        }
+        SourceCrate::RizinSdb => {
+            let input = args.input.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "source=rizin-sdb requires --input <path>, e.g. --input /path/to/rizin/librz/arch/types"
+                )
+            })?;
+            log::info!("walking rizin SDB input at {}", input.display());
+            walker::rizin_sdb::walk(input, &name)
+                .context("walking rizin SDB input")?
         }
     };
 
