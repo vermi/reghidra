@@ -353,10 +353,10 @@ mod tests {
         assert!(!is_embedded("this-stem-will-never-exist"));
     }
 
-    /// Integration check for PR 3: load the `posix.rtarch` archive
-    /// that `tools/typegen` produced from the `libc` crate and assert
-    /// it contains at least one well-known POSIX function. This is
-    /// the end-to-end guardrail that catches postcard format drift
+    /// Integration check: load the `posix.rtarch` archive that
+    /// `tools/typegen` produced from the `libc` crate and assert it
+    /// contains at least one well-known POSIX function. This is the
+    /// end-to-end guardrail that catches postcard format drift
     /// between the tool-side data model (`tools/typegen/src/model.rs`)
     /// and the runtime-side data model (this file). If they diverge,
     /// decode fails here with a clear error before anyone ships a
@@ -364,10 +364,8 @@ mod tests {
     ///
     /// The test intentionally doesn't hard-code a specific function
     /// count — the walker is expected to gain coverage in follow-up
-    /// PRs (struct decls, `s!` macro expansion, deeper cfg_if
-    /// traversal, Windows archives) and churning the expected count
-    /// on every walker improvement would be noise. We only check
-    /// that the archive loaded and has *something* meaningful in it.
+    /// PRs and churning the expected count on every walker
+    /// improvement would be noise.
     #[test]
     fn posix_archive_loads_and_has_content() {
         let Some(archive) = load_embedded("posix") else {
@@ -377,6 +375,59 @@ mod tests {
         assert!(
             !archive.functions.is_empty(),
             "posix.rtarch decoded but has zero functions — walker regression?"
+        );
+    }
+
+    /// Integration check: load `windows-x64.rtarch` from the embedded
+    /// types/ directory and assert that canonical Win32 entry points
+    /// resolve. This catches two classes of regression that the
+    /// posix test misses:
+    ///
+    /// 1. Format drift on the `windows_targets::link!` macro path —
+    ///    a change in how we parse the DSL would show up here as a
+    ///    decode-time error or as an unexpectedly empty archive.
+    /// 2. Data-model drift specifically for calling conventions —
+    ///    Windows archives exercise the `Win64` / `Stdcall` / `Aapcs`
+    ///    branches that libc never does, so if the `CallingConvention`
+    ///    enum gains a variant without a mirrored update on the
+    ///    tool side, decode panics here before it can ship.
+    ///
+    /// Canonical canary: `CreateFileA` from `kernel32.dll`. Every
+    /// reverse-engineered PE sample imports it or something from the
+    /// same symbol family, so it's the closest thing we have to a
+    /// "load-bearing" function name for the archive.
+    #[test]
+    fn windows_x64_archive_loads_with_createfilea() {
+        let Some(archive) = load_embedded("windows-x64") else {
+            panic!("windows-x64.rtarch not found in embedded types/ directory");
+        };
+        assert_eq!(archive.version, ARCHIVE_VERSION);
+        assert!(
+            archive.functions.len() > 1000,
+            "windows-x64.rtarch has suspiciously few functions ({}); \
+             walker regression?",
+            archive.functions.len()
+        );
+        let cfa = archive
+            .functions
+            .get("CreateFileA")
+            .expect("CreateFileA missing from windows-x64.rtarch");
+        assert!(
+            cfa.args.len() >= 6,
+            "CreateFileA has {} args, expected >= 6 (lpFileName, dwDesiredAccess, \
+             dwShareMode, lpSecurityAttributes, dwCreationDisposition, \
+             dwFlagsAndAttributes, hTemplateFile)",
+            cfa.args.len()
+        );
+        // Returns HANDLE, which is a Named type alias resolved via
+        // archive.types. Just check the return type is some Named —
+        // we don't assert the exact name because the walker might
+        // legitimately rename in the future (e.g. resolve the alias).
+        assert!(
+            matches!(cfa.return_type, TypeRef::Named(_)),
+            "CreateFileA return type is {:?}, expected a Named type \
+             reference (HANDLE or equivalent)",
+            cfa.return_type
         );
     }
 

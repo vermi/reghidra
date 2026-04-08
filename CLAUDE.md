@@ -203,10 +203,10 @@ reghidra/
 │       └── src/main.rs                         # CLI: --source, --features, --arch, --os, --out
 ├── types/                                      # bundled .rtarch blobs, include_dir!'d at compile time
 │   ├── README.md                               # maintainer-only policy doc (PR 1)
-│   ├── windows-x64.rtarch                      # produced by typegen (PR 3)
-│   ├── windows-x86.rtarch
-│   ├── posix.rtarch
-│   └── ucrt.rtarch
+│   ├── posix.rtarch                            # libc → Linux/macOS POSIX (PR 3, ~29 KB)
+│   ├── windows-x64.rtarch                      # windows-sys → Win64 LLP64 (PR 3b, ~9 MB)
+│   ├── windows-x86.rtarch                      # windows-sys → Win32 ILP32 (PR 3b, ~9 MB)
+│   └── windows-arm64.rtarch                    # windows-sys → ARM64 LLP64 (PR 3b, ~9 MB)
 ├── .github/workflows/typegen-drift-check.yml   # regenerates + diffs on types/ or tools/typegen/ PRs (PR 3)
 └── crates/
     ├── reghidra-decompile/

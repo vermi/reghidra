@@ -17,9 +17,15 @@ use std::sync::Arc;
 /// in scope — the decompile crate sits below core in the dep graph.
 fn archive_stems_for(info: &BinaryInfo) -> Vec<&'static str> {
     match (info.format, info.architecture) {
-        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64", "ucrt"],
-        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86", "ucrt"],
-        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64", "ucrt"],
+        // windows-sys archives already cover the UCRT surface that
+        // ships under `Win32::System::Console`, `Win32::System::Threading`,
+        // etc. A dedicated `ucrt.rtarch` would duplicate those entries,
+        // so we don't produce one. If a follow-up splits the CRT out
+        // into its own archive (to slim the main Windows blob), add
+        // "ucrt" back here as a second entry.
+        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64"],
+        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86"],
+        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64"],
         (BinaryFormat::Elf, _) => vec!["posix"],
         (BinaryFormat::MachO, _) => vec!["posix"],
         _ => vec![],

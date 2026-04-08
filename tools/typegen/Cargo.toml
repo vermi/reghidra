@@ -43,6 +43,7 @@ anyhow = "1"
 # AST walking and source-tree discovery
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 proc-macro2 = "1"
+quote = "1"
 cargo_metadata = "0.19"
 
 # Archive (de)serialization — must match the version used by
@@ -56,8 +57,38 @@ serde = { version = "1", features = ["derive"] }
 # Source crates we walk. These are dev-level deps for the tool, not for
 # Reghidra itself — they never reach the main workspace.
 libc = "0.2"
-# windows-sys is added in PR 3b when the windows_link macro walker lands.
-# Leaving it out of PR 3 keeps this scaffold focused on the libc path.
+
+# windows-sys is pinned as a dep purely so `cargo_metadata` can resolve
+# its source directory; we never actually compile or link against any
+# of its exposed Win32 symbols. The walker parses the Rust source files
+# directly via `syn::parse_file` without invoking rustc on them. This
+# means we can build and run typegen on a macOS / Linux host and still
+# produce windows-x64.rtarch.
+#
+# Feature set chosen to cover the ~200 most-common Win32 APIs that show
+# up in reverse-engineering targets (malware, common userland binaries)
+# without ballooning the archive. The walker honors only the `target_os`
+# and `target_arch` cfg attributes — it IGNORES `feature = "..."` gates
+# because Windows namespaces its features and ignoring them gives the
+# walker access to every module regardless of which features cargo
+# has enabled on its side. The feature list below therefore only
+# influences what cargo FETCHES, not what the walker extracts.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_WindowsFirewall",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # Logging during generation runs so maintainers can see progress.
 env_logger = "0.11"
