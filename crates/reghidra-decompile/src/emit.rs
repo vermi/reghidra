@@ -1,4 +1,5 @@
-use crate::ast::{BinOp, Expr, Stmt};
+use crate::ast::{BinOp, CType, Expr, Stmt};
+use crate::type_archive::{type_ref_to_ctype, FunctionType};
 use std::collections::HashMap;
 
 /// A line of decompiled output with optional source address.
@@ -17,9 +18,61 @@ fn label_text(addr: u64, label_names: &HashMap<u64, String>) -> String {
 }
 
 /// Emit a complete function as C-like pseudocode.
-pub fn emit_function(name: &str, body: &[Stmt], label_names: &HashMap<u64, String>) -> String {
-    let lines = emit_function_annotated(name, body, label_names);
+pub fn emit_function(
+    name: &str,
+    body: &[Stmt],
+    label_names: &HashMap<u64, String>,
+    prototype: Option<&FunctionType>,
+) -> String {
+    let lines = emit_function_annotated(name, body, label_names, prototype);
     lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n")
+}
+
+/// Build the function signature line (`int foo(FILE* arg_8, ...)`) from
+/// an archive prototype when available, falling back to
+/// `void name(void)` when no prototype is known. The displayed name is
+/// always the caller-supplied `name` (which may be demangled or
+/// user-renamed), regardless of the prototype's own `name` field —
+/// we use the prototype only for types, not identity.
+fn format_signature(name: &str, prototype: Option<&FunctionType>) -> String {
+    let Some(proto) = prototype else {
+        // C-correct empty parameter list. `void foo()` and
+        // `void foo(void)` mean different things in strict C (the
+        // former is an "unspecified prototype" holdover from K&R C),
+        // and the UChicago style guide we follow calls out the
+        // latter as the correct declaration form.
+        return format!("void {name}(void) {{");
+    };
+    let ret = type_ref_to_ctype(&proto.return_type);
+    let ret_str = match ret {
+        CType::Void => "void".to_string(),
+        other => other.to_string(),
+    };
+    if proto.args.is_empty() && !proto.is_variadic {
+        return format!("{ret_str} {name}(void) {{");
+    }
+    let mut params: Vec<String> = proto
+        .args
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let ty = type_ref_to_ctype(&arg.ty);
+            // Use the archive's arg name if present, otherwise
+            // number parameters positionally. Archive-sourced arg
+            // names come from the binding crate (windows-sys param
+            // names are real; libc's are typically `arg0`, `arg1`).
+            let pname = if arg.name.is_empty() {
+                format!("arg{i}")
+            } else {
+                arg.name.clone()
+            };
+            format!("{ty} {pname}")
+        })
+        .collect();
+    if proto.is_variadic {
+        params.push("...".to_string());
+    }
+    format!("{ret_str} {name}({}) {{", params.join(", "))
 }
 
 /// Emit a complete function as annotated lines (text + source address).
@@ -27,16 +80,13 @@ pub fn emit_function_annotated(
     name: &str,
     body: &[Stmt],
     label_names: &HashMap<u64, String>,
+    prototype: Option<&FunctionType>,
 ) -> Vec<AnnotatedLine> {
     let mut lines = Vec::new();
     let mut current_addr: Option<u64> = None;
 
-    // C-correct empty parameter list. `void foo()` and `void foo(void)`
-    // mean different things in strict C (the former is an "unspecified
-    // prototype" holdover from K&R C), and the UChicago style guide we
-    // follow calls out the latter as the correct declaration form.
     lines.push(AnnotatedLine {
-        text: format!("void {name}(void) {{"),
+        text: format_signature(name, prototype),
         addr: None,
     });
 
@@ -449,7 +499,7 @@ mod tests {
 
     fn render(body: &[Stmt]) -> Vec<String> {
         let labels = HashMap::new();
-        emit_function_annotated("f", body, &labels)
+        emit_function_annotated("f", body, &labels, None)
             .into_iter()
             .map(|l| l.text)
             .collect()

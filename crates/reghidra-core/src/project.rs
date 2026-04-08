@@ -17,15 +17,24 @@ use std::sync::Arc;
 /// in scope — the decompile crate sits below core in the dep graph.
 fn archive_stems_for(info: &BinaryInfo) -> Vec<&'static str> {
     match (info.format, info.architecture) {
-        // windows-sys archives already cover the UCRT surface that
-        // ships under `Win32::System::Console`, `Win32::System::Threading`,
-        // etc. A dedicated `ucrt.rtarch` would duplicate those entries,
-        // so we don't produce one. If a follow-up splits the CRT out
-        // into its own archive (to slim the main Windows blob), add
-        // "ucrt" back here as a second entry.
-        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64"],
-        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86"],
-        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64"],
+        // PE precedence (first match wins on collision):
+        //   1. windows-{arch}: Win32 API surface (windows-sys-sourced),
+        //      ~20 k functions per arch
+        //   2. ucrt:           MSVC CRT (libc-sourced from src/windows/),
+        //      ~226 functions covering `_open`, `_close`, `_commit`,
+        //      `_flushall`, `printf`, `fopen`, etc. — the canonical
+        //      MSVC underscore-decorated CRT names that FLIRT picks up
+        //      in statically linked MSVC binaries
+        //   3. posix:          POSIX (libc-sourced from src/unix/),
+        //      ~450 functions; lower-precedence catch-all for CRT
+        //      functions whose Microsoft form aliases a POSIX name
+        //      (`exit`, `abort`, `strlen`)
+        // ucrt sits between Win32 and POSIX because it's the
+        // authoritative source for MSVC-decorated CRT names; POSIX
+        // remains as a fallback for the bare-name aliases.
+        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64", "ucrt", "posix"],
+        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86", "ucrt", "posix"],
+        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64", "ucrt", "posix"],
         (BinaryFormat::Elf, _) => vec!["posix"],
         (BinaryFormat::MachO, _) => vec!["posix"],
         _ => vec![],

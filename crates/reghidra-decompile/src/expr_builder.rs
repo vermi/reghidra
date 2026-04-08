@@ -5,20 +5,67 @@ use reghidra_ir::IrFunction;
 use std::collections::HashMap;
 
 /// Convert IR blocks into statement lists keyed by block address.
+///
+/// # Cross-block pending tracking (PR 4d)
+///
+/// The pending stack-write queue (used for x86-32 stdcall/cdecl argument
+/// setup) needs to flow across basic-block boundaries when the boundary
+/// is part of an *extended basic block* — i.e. a chain of blocks where
+/// every consecutive pair has the predecessor as the single successor and
+/// the successor as the single predecessor. Within an extended basic
+/// block there's no branching, so a `push` in block N can legitimately
+/// be the argument setup for a `call` in block N+1.
+///
+/// This matters in real Win32 code. The canonical termination idiom:
+///
+/// ```text
+/// block 0x4015a8:  push exit_code; call GetCurrentProcess  ; 0-arg
+/// block 0x4015b3:  push eax;       call TerminateProcess   ; 2-arg
+/// block 0x4015ba:  leave;          ret
+/// ```
+///
+/// is split across three basic blocks because the lifter starts a new
+/// block on every call. The two pushes belong to *different* calls and
+/// are in *different* blocks, but the linear chain means cross-block
+/// tracking can recover the full `TerminateProcess(eax, exit_code)`
+/// argument list.
+///
+/// Implementation: blocks are processed in address order (a stable
+/// approximation of topological order for non-loop CFGs). Each block
+/// looks up its sole predecessor's end-of-block pending state and
+/// inherits it when the chain rule holds. At end-of-block, the
+/// pending state is preserved (not flushed) when a sole successor
+/// will inherit it. Joins, branches, and back-edges all reset to an
+/// empty pending queue, which is the safe behavior — we never
+/// propagate args across paths whose execution isn't guaranteed.
 pub fn build_statements(
     ir: &IrFunction,
     ctx: &DecompileContext,
 ) -> HashMap<u64, Vec<Stmt>> {
     let mut result = HashMap::new();
 
-    for block in &ir.blocks {
+    // Process blocks in address order. This is stable for non-loop CFGs
+    // (forward jumps go to higher addresses, so predecessors are
+    // processed before successors). Loops with back-edges fall through
+    // to "no inherit" because the back-edge predecessor hasn't been
+    // processed yet — that's safe, just conservative.
+    let mut block_order: Vec<&_> = ir.blocks.iter().collect();
+    block_order.sort_by_key(|b| b.address);
+
+    // End-of-block pending state, keyed by block address. Successors
+    // that satisfy the chain rule inherit from this map.
+    let mut end_pending: HashMap<u64, Vec<(VarNode, VarNode)>> = HashMap::new();
+
+    for block in block_order {
         let mut stmts = Vec::new();
         // Deferred stack writes that look like x86-32 stdcall/cdecl argument
         // setup (`push x; push y; call f`). We hold onto them until we see a
         // Call (where they become arguments) or any other instruction (where
         // we flush them as plain `*(rsp) = x` statements — i.e. they weren't
-        // call args after all).
-        let mut pending_stack_writes: Vec<(VarNode, VarNode)> = Vec::new();
+        // call args after all). Initialized from the sole linear-chain
+        // predecessor's end state when the chain rule holds.
+        let mut pending_stack_writes: Vec<(VarNode, VarNode)> =
+            inherit_pending(block.address, ctx, &end_pending);
 
         for insn in &block.instructions {
             // Intercept stores to the stack pointer before the main match
@@ -28,6 +75,17 @@ pub fn build_statements(
                     pending_stack_writes.push((addr.clone(), src.clone()));
                     continue;
                 }
+            }
+
+            // Stack pointer delta bookkeeping (`rsp = rsp ± const`) is
+            // emitted by the lifter as part of every push/pop. It must
+            // NOT trigger a pending-stack-write flush — otherwise a
+            // push sequence that crosses a block boundary would see
+            // its inherited pending state dumped the moment the first
+            // push-half (`rsp -= 8`) arrives. Skip silently; the
+            // stackframe pass drops these anyway.
+            if is_stack_pointer_delta(&insn.op) {
+                continue;
             }
 
             // For any non-Call instruction, the pushes we saw weren't call
@@ -131,10 +189,8 @@ pub fn build_statements(
                     // shows the user the declared type of the slot
                     // (e.g. `(HANDLE)result`, `(DWORD)0xc0000409`).
                     let args = annotate_call_args(raw_args, prototype);
-                    stmts.push(Stmt::ExprStmt(Expr::Call(
-                        Box::new(Expr::Var(func_name)),
-                        args,
-                    )));
+                    let call = Expr::Call(Box::new(Expr::Var(func_name)), args);
+                    stmts.push(promote_call_for_return_type(call, prototype));
                 }
                 IrOp::CallInd { target } => {
                     // Indirect calls can't be looked up in the archive —
@@ -183,9 +239,18 @@ pub fn build_statements(
             }
         }
 
-        // Flush any stack writes still pending at the end of the block
-        // (e.g. a trailing push with no following call in this block).
-        flush_stack_writes(&mut stmts, &mut pending_stack_writes);
+        // End of block: decide whether to flush pending or to preserve
+        // it for a successor block. We preserve only when there's
+        // exactly one successor AND that successor has only this block
+        // as its predecessor — the linear-chain rule. Anything else
+        // (joins, branches, terminators) flushes immediately so the
+        // pushes still appear in the rendered output as plain
+        // `*(rsp) = x` stores rather than getting lost.
+        if successor_will_inherit(block.address, ctx) {
+            end_pending.insert(block.address, pending_stack_writes);
+        } else {
+            flush_stack_writes(&mut stmts, &mut pending_stack_writes);
+        }
         result.insert(block.address, stmts);
     }
 
@@ -202,10 +267,72 @@ fn is_stack_pointer(vn: &VarNode) -> bool {
     vn.offset == 4 || vn.offset == 31
 }
 
+/// Is this a stack pointer bookkeeping op (`rsp = rsp ± const`) emitted
+/// by the lifter as part of every push/pop? These must not trigger a
+/// pending-stack-write flush; otherwise a `push` sequence that crosses
+/// a block boundary would see its inherited state dumped when the
+/// first push-half (`rsp -= 8`) arrives in the new block.
+fn is_stack_pointer_delta(op: &IrOp) -> bool {
+    match op {
+        IrOp::IntSub { dst, a, b } | IrOp::IntAdd { dst, a, b } => {
+            is_stack_pointer(dst)
+                && is_stack_pointer(a)
+                && b.space == VarSpace::Constant
+        }
+        _ => false,
+    }
+}
+
 /// Emit any deferred stack writes as plain `*(rsp) = value` assignments.
 /// Called when we decide the pushes weren't actually call-argument setup.
 /// These always have a register address (the stack pointer), so they
 /// never hit the global-data rewrite path in `memory_access_expr`.
+/// Inherit the pending stack-write queue from a sole linear-chain
+/// predecessor. Returns the predecessor's end-of-block pending state
+/// when:
+///
+/// - The current block has exactly one predecessor in the CFG, AND
+/// - That predecessor has exactly one successor in the CFG, AND
+/// - The predecessor was already processed (its `end_pending` entry
+///   exists — guaranteed by address-order iteration on non-loop CFGs).
+///
+/// Otherwise returns an empty vec — joins, branches, entry blocks,
+/// and back-edge targets all start with an empty pending queue.
+fn inherit_pending(
+    block_addr: u64,
+    ctx: &DecompileContext,
+    end_pending: &HashMap<u64, Vec<(VarNode, VarNode)>>,
+) -> Vec<(VarNode, VarNode)> {
+    let preds = ctx.predecessors.get(&block_addr);
+    let Some(preds) = preds else { return Vec::new() };
+    if preds.len() != 1 {
+        return Vec::new();
+    }
+    let pred_addr = preds[0];
+    let pred_succs = ctx.successors.get(&pred_addr);
+    let Some(pred_succs) = pred_succs else { return Vec::new() };
+    if pred_succs.len() != 1 {
+        return Vec::new();
+    }
+    end_pending.get(&pred_addr).cloned().unwrap_or_default()
+}
+
+/// Returns true when `block_addr`'s sole successor will inherit the
+/// pending queue via [`inherit_pending`]. Used at end-of-block to
+/// decide whether to flush or preserve. Mirror of [`inherit_pending`]'s
+/// chain rule looked from the predecessor side.
+fn successor_will_inherit(block_addr: u64, ctx: &DecompileContext) -> bool {
+    let succs = ctx.successors.get(&block_addr);
+    let Some(succs) = succs else { return false };
+    if succs.len() != 1 {
+        return false;
+    }
+    let succ_addr = succs[0];
+    let succ_preds = ctx.predecessors.get(&succ_addr);
+    let Some(succ_preds) = succ_preds else { return false };
+    succ_preds.len() == 1
+}
+
 fn flush_stack_writes(stmts: &mut Vec<Stmt>, pending: &mut Vec<(VarNode, VarNode)>) {
     for (addr, src) in pending.drain(..) {
         let lhs = Expr::Deref(
@@ -336,6 +463,28 @@ fn drain_pending_for_call(
 /// output anyway). When the arg list is longer (e.g. variadic), the
 /// excess args pass through untyped because the variadic tail has no
 /// declared type.
+///
+/// # Retype invariant (future PR 5)
+///
+/// The cast wrapper here is *derived*, not authoritative: it exists
+/// only because the source expression's type (the slot, the register,
+/// the literal) is currently too weak to match the declared parameter
+/// type. Once the Phase 5c PR 5 right-click "Set Type" UI lands, if a
+/// user retypes the source to match (or be assignment-compatible
+/// with) the declared parameter type, this cast should *disappear* —
+/// rendering `TerminateProcess(hProc, exit_code)` instead of
+/// `TerminateProcess((HANDLE)hProc, (DWORD)exit_code)`. The cast is
+/// visual compensation for a typing gap; closing the gap should erase
+/// the compensation.
+///
+/// Implementation sketch for PR 5: thread a "source type context" into
+/// this function (from `FrameLayout.slots` for slot-backed args, from
+/// a register-type map for register-backed args, from literal inference
+/// for integer-literal args). When the source type is
+/// assignment-compatible with `proto_arg.ty`, skip the `Expr::Cast`
+/// wrap. Strict equality is too narrow (uint32_t → DWORD should be
+/// cast-free); width + signedness + named-alias resolution via the
+/// archive's `types` map is the right predicate.
 fn annotate_call_args(
     args: Vec<Expr>,
     prototype: Option<&crate::type_archive::FunctionType>,
@@ -368,6 +517,140 @@ fn annotate_call_args(
             }
         })
         .collect()
+}
+
+/// Promote a Call expression into the appropriate top-level [`Stmt`]
+/// based on the callee's prototype:
+///
+/// - **Non-void return** → `Stmt::Assign(Var("rax"), Call)`. The
+///   variable renamer canonicalizes `rax` (and its sized aliases
+///   `eax`/`ax`/`al` plus ARM64 `x0`) to `result`, so the output
+///   reads `result = CreateFileA(...)`. Making the result explicit
+///   surfaces the data flow into subsequent uses of `result` that
+///   today reference the call output only implicitly.
+/// - **Void return**, **unknown prototype**, or `CallInd` →
+///   `Stmt::ExprStmt(Call)` (the pre-PR-4d-followup behavior). The
+///   call's return value isn't usefully named and a spurious
+///   `result =` prefix would clutter every void-returning side-effect
+///   call.
+///
+/// The actual *typing* of the LHS (turning `result` into `HANDLE
+/// result`) happens in a separate post-rename pass — see
+/// [`type_call_returns`]. Splitting that off keeps this function pure
+/// (no `&DecompileContext` needed) and lets the typing pass run after
+/// `varnames::rename_variables` so it sees stable post-rename names.
+fn promote_call_for_return_type(
+    call: Expr,
+    prototype: Option<&crate::type_archive::FunctionType>,
+) -> Stmt {
+    if let Some(proto) = prototype {
+        if !matches!(
+            proto.return_type,
+            crate::type_archive::TypeRef::Primitive(crate::type_archive::Primitive::Void)
+        ) {
+            return Stmt::Assign(Expr::Var("rax".into()), call);
+        }
+    }
+    Stmt::ExprStmt(call)
+}
+
+/// Post-rename typing pass: walk the body and convert the *first*
+/// `Assign(Var(name), Call(Var(callee), ..))` per LHS name into a
+/// typed `VarDecl` carrying the callee prototype's return type.
+/// Subsequent assigns to the same LHS pass through unchanged.
+///
+/// This closes the return-type half of Phase 5c item 7. Combined with
+/// the [`promote_call_for_return_type`] step in `build_statements`, a
+/// `sub_XXXX` function that calls a Win32 API now renders as:
+///
+/// ```text
+/// HANDLE result = CreateFileA(...);
+/// SetLastError((DWORD)0);
+/// CloseHandle((HANDLE)result);
+/// ```
+///
+/// Limitations (acceptable for this PR; revisited in PR 5):
+/// - Only the first call's return type is captured for `result`.
+///   Subsequent calls reusing the same `rax` slot may have different
+///   declared returns; we don't try to invent unique names for each.
+/// - Calls whose target is the IR-level `Var` whose name doesn't match
+///   any archive entry are left untyped — same as the call-site
+///   typing pass.
+/// - When `result` is already declared by an upstream pass (currently
+///   never the case in practice), we honor the existing declaration
+///   and skip the promotion to avoid double-declaration.
+pub fn type_call_returns(stmts: Vec<Stmt>, ctx: &DecompileContext) -> Vec<Stmt> {
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    type_call_returns_inner(stmts, &mut declared, ctx)
+}
+
+fn type_call_returns_inner(
+    stmts: Vec<Stmt>,
+    declared: &mut std::collections::HashSet<String>,
+    ctx: &DecompileContext,
+) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .map(|s| type_call_returns_stmt(s, declared, ctx))
+        .collect()
+}
+
+fn type_call_returns_stmt(
+    stmt: Stmt,
+    declared: &mut std::collections::HashSet<String>,
+    ctx: &DecompileContext,
+) -> Stmt {
+    match stmt {
+        Stmt::Assign(lhs, rhs) => {
+            // Peek at the shape WITHOUT moving so we can fall through
+            // unchanged for non-matching assigns.
+            let matches_pattern = matches!(
+                (&lhs, &rhs),
+                (Expr::Var(_), Expr::Call(_, _))
+            );
+            if !matches_pattern {
+                return Stmt::Assign(lhs, rhs);
+            }
+            // Now safely destructure.
+            let (lhs_name, callee, args) = match (lhs, rhs) {
+                (Expr::Var(n), Expr::Call(c, a)) => (n, c, a),
+                _ => unreachable!(),
+            };
+            if !declared.contains(&lhs_name) {
+                if let Expr::Var(callee_name) = callee.as_ref() {
+                    if let Some(proto) = ctx.lookup_prototype(callee_name) {
+                        let ret_ty = crate::type_archive::type_ref_to_ctype(&proto.return_type);
+                        if !matches!(ret_ty, CType::Void) {
+                            declared.insert(lhs_name.clone());
+                            return Stmt::VarDecl {
+                                name: lhs_name,
+                                ctype: ret_ty,
+                                init: Some(Expr::Call(callee, args)),
+                            };
+                        }
+                    }
+                }
+            }
+            Stmt::Assign(Expr::Var(lhs_name), Expr::Call(callee, args))
+        }
+        Stmt::VarDecl { name, ctype, init } => {
+            declared.insert(name.clone());
+            Stmt::VarDecl { name, ctype, init }
+        }
+        Stmt::If { cond, then_body, else_body } => Stmt::If {
+            cond,
+            then_body: type_call_returns_inner(then_body, declared, ctx),
+            else_body: type_call_returns_inner(else_body, declared, ctx),
+        },
+        Stmt::While { cond, body } => Stmt::While {
+            cond,
+            body: type_call_returns_inner(body, declared, ctx),
+        },
+        Stmt::Loop { body } => Stmt::Loop {
+            body: type_call_returns_inner(body, declared, ctx),
+        },
+        other => other,
+    }
 }
 
 fn emit_binop(stmts: &mut Vec<Stmt>, dst: &VarNode, a: &VarNode, b: &VarNode, op: BinOp) {
@@ -730,33 +1013,46 @@ mod tests {
             2,
             "expected [GetCurrentProcess(), TerminateProcess(...)] only, got {stmts:#?}"
         );
-        match &stmts[0] {
-            Stmt::ExprStmt(Expr::Call(callee, args)) => {
-                assert!(
-                    matches!(**callee, Expr::Var(ref n) if n == "GetCurrentProcess")
-                );
-                assert!(
-                    args.is_empty(),
-                    "GetCurrentProcess should have 0 args, got {args:?}"
-                );
-            }
-            other => panic!("expected GetCurrentProcess call, got {other:?}"),
+        {
+            let (callee, args) = unwrap_call_stmt(&stmts[0]);
+            assert!(
+                matches!(callee, Expr::Var(n) if n == "GetCurrentProcess"),
+                "expected GetCurrentProcess call, got {callee:?}"
+            );
+            assert!(
+                args.is_empty(),
+                "GetCurrentProcess should have 0 args, got {args:?}"
+            );
         }
-        match &stmts[1] {
-            Stmt::ExprStmt(Expr::Call(callee, args)) => {
-                assert!(
-                    matches!(**callee, Expr::Var(ref n) if n == "TerminateProcess")
-                );
-                assert_eq!(args.len(), 2, "TerminateProcess should have 2 args, got {args:#?}");
-                // Args are wrapped in Cast(declared_type, IntLit) by
-                // the typed-call-site pass. Look through the cast to
-                // assert the underlying constants.
-                // Source order: arg0=hProcess (last push, 0xfeedface),
-                // arg1=uExitCode (first push, 0xc0000409).
-                assert_eq!(unwrap_int_lit(&args[0]), 0xfeedface, "arg0 should be the eax push (hProcess)");
-                assert_eq!(unwrap_int_lit(&args[1]), 0xc0000409, "arg1 should be the pre-positioned uExitCode");
-            }
-            other => panic!("expected TerminateProcess call, got {other:?}"),
+        {
+            let (callee, args) = unwrap_call_stmt(&stmts[1]);
+            assert!(
+                matches!(callee, Expr::Var(n) if n == "TerminateProcess"),
+                "expected TerminateProcess call, got {callee:?}"
+            );
+            assert_eq!(args.len(), 2, "TerminateProcess should have 2 args, got {args:#?}");
+            // Args are wrapped in Cast(declared_type, IntLit) by
+            // the typed-call-site pass. Look through the cast to
+            // assert the underlying constants.
+            // Source order: arg0=hProcess (last push, 0xfeedface),
+            // arg1=uExitCode (first push, 0xc0000409).
+            assert_eq!(unwrap_int_lit(&args[0]), 0xfeedface, "arg0 should be the eax push (hProcess)");
+            assert_eq!(unwrap_int_lit(&args[1]), 0xc0000409, "arg1 should be the pre-positioned uExitCode");
+        }
+    }
+
+    /// Helper: unwrap a Call statement that may be either
+    /// `ExprStmt(Call(..))` (void-returning callees) or
+    /// `Assign(Var("rax"), Call(..))` (non-void-returning callees,
+    /// post Phase 5c PR for return-type propagation). Returns the
+    /// inner callee expression and arg list. Tests that don't care
+    /// about which form they got use this so they're robust against
+    /// the prototype-driven promotion.
+    fn unwrap_call_stmt(stmt: &Stmt) -> (&Expr, &[Expr]) {
+        match stmt {
+            Stmt::ExprStmt(Expr::Call(callee, args)) => (callee.as_ref(), args.as_slice()),
+            Stmt::Assign(_, Expr::Call(callee, args)) => (callee.as_ref(), args.as_slice()),
+            other => panic!("expected a Call statement, got {other:?}"),
         }
     }
 
@@ -827,23 +1123,19 @@ mod tests {
         let result = build_statements(&ir, &ctx);
         let stmts = &result[&0x1000];
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Stmt::ExprStmt(Expr::Call(_, args)) => {
-                assert_eq!(args.len(), 1);
-                // The arg should be wrapped in Cast(Named("HANDLE"), ..).
-                match &args[0] {
-                    Expr::Cast(ty, inner) => {
-                        assert!(
-                            matches!(ty, CType::Named(n) if n == "HANDLE"),
-                            "expected Cast(Named(HANDLE), ..), got Cast({ty:?}, ..)"
-                        );
-                        // Inner should be the original IntLit.
-                        assert!(matches!(**inner, Expr::IntLit(0xdeadbeef, _)));
-                    }
-                    other => panic!("expected Cast wrapper, got {other:?}"),
-                }
+        let (_callee, args) = unwrap_call_stmt(&stmts[0]);
+        assert_eq!(args.len(), 1);
+        // The arg should be wrapped in Cast(Named("HANDLE"), ..).
+        match &args[0] {
+            Expr::Cast(ty, inner) => {
+                assert!(
+                    matches!(ty, CType::Named(n) if n == "HANDLE"),
+                    "expected Cast(Named(HANDLE), ..), got Cast({ty:?}, ..)"
+                );
+                // Inner should be the original IntLit.
+                assert!(matches!(**inner, Expr::IntLit(0xdeadbeef, _)));
             }
-            other => panic!("expected Call stmt, got {other:?}"),
+            other => panic!("expected Cast wrapper, got {other:?}"),
         }
     }
 
@@ -983,10 +1275,167 @@ mod tests {
         let result = build_statements(&ir, &ctx);
         let stmts = &result[&0x1000];
         assert_eq!(stmts.len(), 1, "expected single Call stmt, got {stmts:#?}");
-        if let Stmt::ExprStmt(Expr::Call(_, args)) = &stmts[0] {
-            assert_eq!(args.len(), 3, "variadic printf should get all 3 args, not capped to 1");
-        } else {
-            panic!("expected Call, got {:?}", stmts[0]);
+        let (_callee, args) = unwrap_call_stmt(&stmts[0]);
+        assert_eq!(args.len(), 3, "variadic printf should get all 3 args, not capped to 1");
+    }
+
+    /// When a callee has a known prototype with a non-void return,
+    /// `build_statements` should promote `ExprStmt(Call)` to
+    /// `Assign(Var("rax"), Call)` so the call result is explicit
+    /// and the renamer can canonicalize `rax` to `result` for
+    /// downstream references.
+    #[test]
+    fn nonvoid_call_promotes_to_assign_to_rax() {
+        use crate::type_archive::{
+            CallingConvention, FunctionType as ArchiveFn, Primitive, TypeArchive, TypeRef,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
+        functions.insert(
+            "GetLastError".to_string(),
+            ArchiveFn {
+                name: "GetLastError".to_string(),
+                args: vec![],
+                return_type: TypeRef::Primitive(Primitive::UInt32),
+                calling_convention: CallingConvention::Stdcall,
+                is_variadic: false,
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".to_string(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types: HashMap::new(),
+        });
+
+        let ir = mk_ir(vec![IrOp::Call { target: 0x2000 }]);
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x2000, "GetLastError".to_string());
+        ctx.type_archives = vec![archive];
+
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::Assign(Expr::Var(lhs), Expr::Call(callee, _)) => {
+                assert_eq!(lhs, "rax");
+                assert!(matches!(**callee, Expr::Var(ref n) if n == "GetLastError"));
+            }
+            other => panic!("expected Assign(Var(rax), Call(..)), got {other:?}"),
         }
+    }
+
+    /// A call whose callee returns void should NOT be promoted —
+    /// stays as a bare ExprStmt so void side-effect calls don't
+    /// gain a spurious `result =` prefix.
+    #[test]
+    fn void_call_stays_expr_stmt() {
+        use crate::type_archive::{
+            CallingConvention, FunctionType as ArchiveFn, Primitive, TypeArchive, TypeRef,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
+        functions.insert(
+            "ExitProcess".to_string(),
+            ArchiveFn {
+                name: "ExitProcess".to_string(),
+                args: vec![crate::type_archive::ArgType {
+                    name: "uExitCode".to_string(),
+                    ty: TypeRef::Primitive(Primitive::UInt32),
+                }],
+                return_type: TypeRef::Primitive(Primitive::Void),
+                calling_convention: CallingConvention::Stdcall,
+                is_variadic: false,
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".to_string(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types: HashMap::new(),
+        });
+
+        let ir = mk_ir(vec![
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(0, 4) },
+            IrOp::Call { target: 0x2000 },
+        ]);
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x2000, "ExitProcess".to_string());
+        ctx.type_archives = vec![archive];
+
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            matches!(&stmts[0], Stmt::ExprStmt(Expr::Call(_, _))),
+            "void-returning call should stay ExprStmt, got {:?}",
+            stmts[0]
+        );
+    }
+
+    /// The `type_call_returns` post-rename pass converts the first
+    /// `Assign(Var(name), Call(Var(callee), ..))` per LHS into a
+    /// typed `VarDecl`. Subsequent assigns to the same LHS pass
+    /// through unchanged.
+    #[test]
+    fn type_call_returns_typed_first_only() {
+        use crate::ast::CType;
+        use crate::type_archive::{
+            CallingConvention, FunctionType as ArchiveFn, Primitive, TypeArchive, TypeRef,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut functions: HashMap<String, ArchiveFn> = HashMap::new();
+        functions.insert(
+            "GetLastError".to_string(),
+            ArchiveFn {
+                name: "GetLastError".to_string(),
+                args: vec![],
+                return_type: TypeRef::Named("DWORD".to_string()),
+                calling_convention: CallingConvention::Stdcall,
+                is_variadic: false,
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".to_string(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types: HashMap::new(),
+        });
+        let mut ctx = empty_ctx();
+        ctx.type_archives = vec![archive];
+
+        // Two assigns to "result" from GetLastError. First should
+        // become a typed VarDecl; second should stay an Assign.
+        let stmts = vec![
+            Stmt::Assign(
+                Expr::Var("result".into()),
+                Expr::Call(Box::new(Expr::Var("GetLastError".into())), vec![]),
+            ),
+            Stmt::Assign(
+                Expr::Var("result".into()),
+                Expr::Call(Box::new(Expr::Var("GetLastError".into())), vec![]),
+            ),
+        ];
+        let typed = type_call_returns(stmts, &ctx);
+        assert_eq!(typed.len(), 2);
+        match &typed[0] {
+            Stmt::VarDecl { name, ctype, init } => {
+                assert_eq!(name, "result");
+                assert!(matches!(ctype, CType::Named(n) if n == "DWORD"));
+                assert!(matches!(init, Some(Expr::Call(_, _))));
+            }
+            other => panic!("expected typed VarDecl, got {other:?}"),
+        }
+        assert!(
+            matches!(&typed[1], Stmt::Assign(Expr::Var(n), Expr::Call(..)) if n == "result"),
+            "second assign should stay an Assign, got {:?}",
+            typed[1]
+        );
     }
 }

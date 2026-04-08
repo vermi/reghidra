@@ -78,6 +78,13 @@ jobs:
           cargo run --release --quiet -- \
               --source windows-sys --target windows-arm64 \
               --out /tmp/typegen-out/windows-arm64.rtarch
+          # MSVC CRT (UCRT) — sourced from libc's `src/windows/` tree.
+          # Covers `_open`, `_close`, `_commit`, `printf`, etc., the
+          # public CRT surface that FLIRT picks up in statically linked
+          # MSVC binaries. This is the Windows companion to posix.
+          cargo run --release --quiet -- \
+              --source libc --target windows-x64 \
+              --out /tmp/typegen-out/ucrt.rtarch
 
       - name: Diff against checked-in archives
         run: |
@@ -103,3 +110,4 @@ jobs:
           check windows-x64   "--source windows-sys --target windows-x64" || exit 1
           check windows-x86   "--source windows-sys --target windows-x86" || exit 1
           check windows-arm64 "--source windows-sys --target windows-arm64" || exit 1
+          check ucrt          "--source libc --target windows-x64" || exit 1

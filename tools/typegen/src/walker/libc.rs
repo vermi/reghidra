@@ -85,11 +85,17 @@ pub fn walk(src_dir: &Path, target: Target, archive_name: &str) -> Result<TypeAr
     let mut archive = TypeArchive::new(archive_name);
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
-    // Both supported libc targets (Linux and macOS) are LP64 on the
-    // architectures we care about (x86-64, ARM64). 32-bit libc archives
-    // aren't a current goal; if they become one, split this by
-    // (target_os, target_arch) and add an `--arch` CLI flag.
-    let type_ctx = TypeCtx::LP64;
+    // Pick the right C type model for the target. Linux/macOS LP64;
+    // Windows x64/ARM64 LLP64 (long is 32-bit even on 64-bit Windows);
+    // Windows x86 ILP32. The Windows targets are used for the
+    // `ucrt.rtarch` build that pulls MSVC CRT prototypes (`_commit`,
+    // `_flushall`, `_open`, `printf`, ...) from the `libc` crate's
+    // `src/windows/` tree.
+    let type_ctx = match target {
+        Target::Linux | Target::Macos => TypeCtx::LP64,
+        Target::WindowsX64 | Target::WindowsArm64 => TypeCtx::LLP64,
+        Target::WindowsX86 => TypeCtx::ILP32,
+    };
 
     let lib_rs = src_dir.join("lib.rs");
     walk_file(&lib_rs, target, type_ctx, &mut archive, &mut visited)
@@ -533,9 +539,17 @@ fn cfg_meta_permits(meta: &Meta, target: Target) -> bool {
         // always permits for our current target set.
         Meta::Path(path) => {
             let Some(ident) = path.get_ident() else { return true };
+            // `unix` and `windows` are mutually exclusive umbrella cfgs
+            // in libc. The right answer depends on the target — Windows
+            // targets need to take the `windows` branch and skip
+            // `unix`-only declarations, and vice versa.
+            let target_is_windows = matches!(
+                target,
+                Target::WindowsX64 | Target::WindowsX86 | Target::WindowsArm64
+            );
             match ident.to_string().as_str() {
-                "unix" => true,
-                "windows" => false,
+                "unix" => !target_is_windows,
+                "windows" => target_is_windows,
                 _ => true,
             }
         }

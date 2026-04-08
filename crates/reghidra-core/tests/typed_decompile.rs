@@ -154,4 +154,68 @@ fn pe_fixture_typed_calls_show_archive_types() {
         decomp.contains("TerminateProcess((HANDLE)"),
         "expected TerminateProcess to receive a HANDLE-typed arg, got:\n{decomp}"
     );
+
+    // PR 4d: the second arg (exit code 0xc0000409) is pushed in a
+    // different basic block than the call itself — TerminateProcess's
+    // push sequence crosses a block boundary. Cross-block pending
+    // propagation (linear-chain rule) is what makes this arg survive
+    // to the rendered output. If we regress cross-block tracking,
+    // the arg list will shrink to just the HANDLE and this assertion
+    // will fail before the GUI does.
+    assert!(
+        decomp.contains("0xc0000409"),
+        "expected TerminateProcess second arg (exit code 0xc0000409) \
+         to survive cross-block pending propagation, got:\n{decomp}"
+    );
+}
+
+/// FLIRT-matched MSVC CRT functions like `_fclose`, `_printf`, `__close`
+/// should pick up POSIX prototypes from `posix.rtarch` via the
+/// leading-underscore-stripped lookup path (PR 4e). Before PR 4e, PE
+/// binaries only loaded `windows-x86.rtarch`, which has no CRT
+/// surface, so CRT wrappers rendered as `void _fclose(void)`. After
+/// PR 4e the POSIX archive is a lower-precedence fallback and the
+/// signature line pulls its types straight from the prototype.
+///
+/// Pinning to exact names is fragile to fixture drift, so assert only
+/// that *some* CRT wrapper in the fixture has picked up a typed
+/// signature — meaning the signature line contains a parameter with
+/// a real type (`FILE*`, `int32_t`, `char*`) rather than just
+/// `(void)`. If the fixture ever stops including a FLIRT-matched CRT
+/// function altogether this will false-positive fail, in which case
+/// the test should move to a canned IR fixture with a hand-crafted
+/// function name.
+#[test]
+fn pe_fixture_flirt_crt_picks_up_typed_signature() {
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+        .expect("open PE fixture");
+
+    let canaries: &[&str] = &["_fclose", "_printf", "_exit", "__exit", "__close"];
+    let mut checked = 0usize;
+    let mut typed = 0usize;
+    for func in project.analysis.functions.iter() {
+        if !canaries.iter().any(|c| func.name == *c) {
+            continue;
+        }
+        checked += 1;
+        let Some(decomp) = project.decompile(func.entry_address) else {
+            continue;
+        };
+        let first_line = decomp.lines().next().unwrap_or("");
+        // "void name(void) {" = untyped fallback. Anything else means
+        // the archive lookup landed and format_signature pulled real
+        // types in.
+        if !first_line.starts_with("void ") || !first_line.contains("(void)") {
+            typed += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "PE fixture should contain at least one of {canaries:?}"
+    );
+    assert!(
+        typed > 0,
+        "expected at least one FLIRT-matched CRT wrapper to render \
+         with a typed signature line (checked {checked} candidates)"
+    );
 }
