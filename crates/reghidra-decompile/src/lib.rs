@@ -168,7 +168,16 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> DecompileOutput {
     // Step 4: Assign variable names (with user overrides applied as a final pass)
     let body = varnames::rename_variables(body, &ctx.variable_names);
 
-    // Step 5: Emit C-like code. Pass the prototype through so the
+    // Step 5: Type call returns. Convert the first
+    // `Assign(Var(name), Call(Var(callee), ..))` per LHS into a typed
+    // `VarDecl` carrying the callee prototype's return type, so call
+    // results render as `HANDLE result = CreateFileA(...)` instead of
+    // bare `result = CreateFileA(...)`. Subsequent assigns to the
+    // same LHS pass through unchanged. Runs after rename so it sees
+    // stable post-canonicalization names (e.g. `result`, not `rax`).
+    let body = expr_builder::type_call_returns(body, ctx);
+
+    // Step 6: Emit C-like code. Pass the prototype through so the
     // signature line shows real types (`int _fclose(FILE* arg0)`) for
     // FLIRT-matched CRT functions instead of the generic
     // `void _fclose(void)` fallback.
@@ -189,6 +198,7 @@ pub fn decompile_annotated(
     let prototype = current_function_prototype(ir, ctx);
     let (body, frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
     let body = varnames::rename_variables(body, &ctx.variable_names);
+    let body = expr_builder::type_call_returns(body, ctx);
     let variable_names = varnames::collect_displayed_names(&body);
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
     let lines = emit::emit_function_annotated(display_name, &body, &ctx.label_names, prototype);
