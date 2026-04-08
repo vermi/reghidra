@@ -32,11 +32,29 @@ fn archive_stems_for(info: &BinaryInfo) -> Vec<&'static str> {
         // ucrt sits between Win32 and POSIX because it's the
         // authoritative source for MSVC-decorated CRT names; POSIX
         // remains as a fallback for the bare-name aliases.
-        (BinaryFormat::Pe, Architecture::X86_64) => vec!["windows-x64", "ucrt", "posix"],
-        (BinaryFormat::Pe, Architecture::X86_32) => vec!["windows-x86", "ucrt", "posix"],
-        (BinaryFormat::Pe, Architecture::Arm64) => vec!["windows-arm64", "ucrt", "posix"],
-        (BinaryFormat::Elf, _) => vec!["posix"],
-        (BinaryFormat::MachO, _) => vec!["posix"],
+        //
+        // `rizin-windows` and `rizin-libc` (Phase 5c PR — Rizin SDB
+        // import) come last so they only fill gaps left by the
+        // authoritative binding-crate-sourced archives. Rizin's
+        // SDB is a hand-curated GPLv3 reference covering ~5.4 k
+        // Win32 functions across 35 headers (some not in
+        // `windows-sys`'s default feature set) and ~530
+        // POSIX/libc/linux/macos functions. First-archive-wins
+        // ordering means a `CreateFileA` lookup still resolves
+        // through `windows-x64` if present and only falls through
+        // to `rizin-windows` for entries the binding crate didn't
+        // expose.
+        (BinaryFormat::Pe, Architecture::X86_64) => {
+            vec!["windows-x64", "ucrt", "posix", "rizin-windows", "rizin-libc"]
+        }
+        (BinaryFormat::Pe, Architecture::X86_32) => {
+            vec!["windows-x86", "ucrt", "posix", "rizin-windows", "rizin-libc"]
+        }
+        (BinaryFormat::Pe, Architecture::Arm64) => {
+            vec!["windows-arm64", "ucrt", "posix", "rizin-windows", "rizin-libc"]
+        }
+        (BinaryFormat::Elf, _) => vec!["posix", "rizin-libc"],
+        (BinaryFormat::MachO, _) => vec!["posix", "rizin-libc"],
         _ => vec![],
     }
 }

@@ -71,7 +71,14 @@ use std::path::{Path, PathBuf};
 /// feed cc-*.sdb.txt or types-*.sdb.txt manually if a future walker
 /// variant wants them, though the current parser will ignore
 /// non-`func.*` keys).
-pub fn walk(input: &Path, archive_name: &str) -> Result<TypeArchive> {
+///
+/// `filter_prefixes` further restricts directory-mode discovery to
+/// files matching `functions-{prefix}*.sdb.txt` for at least one of
+/// the supplied prefixes. An empty slice disables filtering and the
+/// directory walk falls back to the unrestricted `functions-*.sdb.txt`
+/// pattern. Single-file inputs ignore the filter — the maintainer is
+/// expected to know what they passed.
+pub fn walk(input: &Path, archive_name: &str, filter_prefixes: &[String]) -> Result<TypeArchive> {
     let mut archive = TypeArchive::new(archive_name);
 
     let files: Vec<PathBuf> = if input.is_dir() {
@@ -82,9 +89,30 @@ pub fn walk(input: &Path, archive_name: &str) -> Result<TypeArchive> {
             let entry = entry?;
             let path = entry.path();
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.starts_with("functions-") && name.ends_with(".sdb.txt") {
-                out.push(path);
+            if !(name.starts_with("functions-") && name.ends_with(".sdb.txt")) {
+                continue;
             }
+            if !filter_prefixes.is_empty() {
+                // Match `functions-{prefix}` exactly OR
+                // `functions-{prefix}.sdb.txt` OR
+                // `functions-{prefix}_...sdb.txt`. The trailing
+                // delimiter check stops `linux` from matching
+                // `linux64` style names if they ever appear; today
+                // there are none, but it's the obviously correct
+                // semantics for a prefix filter.
+                let stem = &name["functions-".len()..name.len() - ".sdb.txt".len()];
+                let matches = filter_prefixes.iter().any(|p| {
+                    stem == p.as_str()
+                        || stem
+                            .strip_prefix(p.as_str())
+                            .map(|rest| rest.starts_with('_') || rest.starts_with('.'))
+                            .unwrap_or(false)
+                });
+                if !matches {
+                    continue;
+                }
+            }
+            out.push(path);
         }
         out.sort();
         out
@@ -99,8 +127,13 @@ pub fn walk(input: &Path, archive_name: &str) -> Result<TypeArchive> {
 
     if files.is_empty() {
         return Err(anyhow!(
-            "no SDB files found at {} (expected functions-*.sdb.txt)",
-            input.display()
+            "no SDB files found at {} (expected functions-*.sdb.txt{})",
+            input.display(),
+            if filter_prefixes.is_empty() {
+                String::new()
+            } else {
+                format!(" matching prefixes {filter_prefixes:?}")
+            }
         ));
     }
 

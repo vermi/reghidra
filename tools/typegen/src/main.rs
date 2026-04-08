@@ -58,6 +58,18 @@ struct Args {
     /// to the output file's stem.
     #[arg(long)]
     name: Option<String>,
+
+    /// Comma-separated list of filename prefixes that restrict which
+    /// `functions-{prefix}*.sdb.txt` files in `--input` are walked.
+    /// Only meaningful for `--source rizin-sdb` with a directory
+    /// input. Example: `--filter windows` selects every Win32 header
+    /// file (`functions-windows_winbase.sdb.txt`,
+    /// `functions-windows_fileapi.sdb.txt`, ...) without sweeping in
+    /// the libc/linux/macos files; `--filter libc,linux,macos`
+    /// selects the POSIX-family files. Empty / unset = no filter
+    /// (all `functions-*.sdb.txt` files in the directory).
+    #[arg(long, value_delimiter = ',')]
+    filter: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -167,7 +179,10 @@ fn main() -> Result<()> {
                 )
             })?;
             log::info!("walking rizin SDB input at {}", input.display());
-            walker::rizin_sdb::walk(input, &name)
+            if !args.filter.is_empty() {
+                log::info!("  filtering by prefixes: {:?}", args.filter);
+            }
+            walker::rizin_sdb::walk(input, &name, &args.filter)
                 .context("walking rizin SDB input")?
         }
     };

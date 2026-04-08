@@ -516,6 +516,50 @@ mod tests {
         );
     }
 
+    /// Integration check: load `rizin-windows.rtarch` (sourced from
+    /// Rizin's `librz/arch/types/functions-windows*.sdb.txt` SDB
+    /// tree) and assert canonical Win32 functions resolve. The Rizin
+    /// SDB walker is the third extraction path (after libc and
+    /// windows-sys), so this is the test that catches drift in the
+    /// flat-text key=value parser.
+    #[test]
+    fn rizin_windows_archive_loads_with_createfilea() {
+        let Some(archive) = load_embedded("rizin-windows") else {
+            panic!("rizin-windows.rtarch not found in embedded types/ directory");
+        };
+        assert_eq!(archive.version, ARCHIVE_VERSION);
+        assert!(
+            archive.functions.len() > 1000,
+            "rizin-windows.rtarch has only {} functions; SDB walker regression?",
+            archive.functions.len()
+        );
+        let cfa = archive
+            .functions
+            .get("CreateFileA")
+            .expect("CreateFileA missing from rizin-windows.rtarch");
+        assert!(
+            cfa.args.len() >= 6,
+            "CreateFileA in rizin-windows has {} args, expected >= 6",
+            cfa.args.len()
+        );
+    }
+
+    /// Integration check: load `rizin-libc.rtarch` and assert it
+    /// contains a basic POSIX entry. Mirrors `posix_archive_loads`
+    /// but exercises the SDB walker path rather than the libc
+    /// walker.
+    #[test]
+    fn rizin_libc_archive_loads_with_malloc() {
+        let Some(archive) = load_embedded("rizin-libc") else {
+            panic!("rizin-libc.rtarch not found in embedded types/ directory");
+        };
+        assert_eq!(archive.version, ARCHIVE_VERSION);
+        assert!(
+            archive.functions.contains_key("malloc"),
+            "malloc missing from rizin-libc.rtarch"
+        );
+    }
+
     #[test]
     fn primitive_sizes_are_sane() {
         assert_eq!(Primitive::Void.size(), 0);
