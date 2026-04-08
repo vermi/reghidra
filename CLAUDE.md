@@ -131,6 +131,21 @@ reghidra/
 - [x] Help discoverable via command palette (Cmd+K → "Help")
 - [x] Status bar hint for help shortcut
 
+### Phase 5b — Decompiler Quality (in progress on `feature/ida-sigs-and-til`)
+- [x] Merge IDA FLIRT sig packs (86 added) into bundled `signatures/` tree, IDA-precedence ordering at load time
+- [x] Fix FLIRT `IDASIG_FUNCTION_UNRESOLVED_COLLISION` (0x08) so collision-placeholder names don't leak through as `?`
+- [x] Resolve PE IAT call targets (`call [imm]` x86-32 and `call [rip+disp]` x86-64) — emits `Call { target: iat_addr }` and `project::decompile` merges `binary.import_addr_map` into `function_names`
+- [x] Fix double-deref bug: `parse_memory_expression` now returns address-value varnodes (`Constant`/`Register`/temp) for `[imm]`/`[reg]`/`[reg±imm]` instead of `VarSpace::Memory` descriptors that the expression builder was wrapping in a second `Deref`
+- [x] Fix `pop [mem]` and `push [mem]` regression after the above (`read_operand`/`write_operand` helpers in x86_64 lifter)
+- [x] Stack-arg collapsing in `expr_builder::build_statements` — defer `Store { addr=esp/rsp/sp }` ops, attach to following Call as args (reversed for source order), flush as plain stack writes if interrupted
+- [x] Variable rename canonicalization: sized aliases of one register share a single rename via `canonical_reg_name` (rax/eax/ax/al → rax, etc.), and `is_known_register_name` routes ALL recognized GPRs through the renamer instead of leaking through. x86-32 detection pre-pass (`scan_for_x86_32`) suppresses argN mapping when 32-bit register forms are seen.
+- [ ] Stack frame analysis: turn `*(rsp)` / `*(rbp+N)` references into named locals/params, eliminate the last visible `rsp`/`rbp` from output
+- [ ] Type library loader (Ghidra GDT format preferred; .til parser is undocumented and licensing is grey). Wins: arity capping for stack-arg collapsing (avoids over-attribution like `GetCurrentProcess(0xc0000409)` when followed by `TerminateProcess`), and typed parameter display
+- [ ] Global data naming: `0x40dfd8` → `g_dat_40dfd8` or PDB symbol where available
+- [ ] RMW memory destinations in `lift_binop`/`lift_inc_dec`/`lift_not`/`lift_neg` (latent bug — they still call `parse_operand` and use the result as both source and destination, which produces nonsense for memory operands)
+- [ ] MSVC C++ name demangling for display (e.g. `?strtoxl@@YAKPAUlocaleinfo_struct@@PBDPAPBDHH@Z`) — try the `msvc-demangler` crate; keep mangled name as canonical
+- [ ] `pushfd`/`leave` lifter intrinsics (currently `/* unimpl */`)
+
 ### Phase 6 — Extensibility + Scripting
 - [ ] Lua scripting API
 - [ ] Rust trait-based plugin system
@@ -152,3 +167,19 @@ reghidra/
 - `functions::detect_functions` is a two-pass design: (1) entry discovery from all sources (binary entry, symbols, call targets, gated tail-call jmps, prologues, PE `.pdata`, Guard CF), (2) per-entry CFG reachability walk via `cfg::build_cfg_from_entry` that stops at rets, indirect branches, and other known entries. Function size/instruction count come from `ControlFlowGraph::extent()` — do not fall back to linear walks. CFGs are built once during detection and reused by xrefs/IR lifting.
 - Adding a new entry source? Feed it into `collect_extra_entries` in `analysis.rs` with a `FunctionSource` variant, not into `detect_functions` directly.
 - PE-specific metadata lives on `LoadedBinary` (`pdata_function_starts`, `guard_cf_function_starts`) and `BinaryInfo` (`pdb_info`, `rich_header`). Guard CF parser is stubbed; the Load Config Directory decoder is a follow-up.
+
+## Lifter / decompiler notes
+- **VarNode address vs value distinction**: `parse_memory_expression` returns a varnode whose *value is the effective address*, not a `VarSpace::Memory` descriptor. Callers pass it as `Store.addr` / `Load.addr`, and the expression builder's single `Expr::Deref` wrap produces correct C. Do NOT reintroduce `VarSpace::Memory` flowing out of operand parsing — it caused a double-deref bug (`*(*(0x40dfd8))`).
+- **Memory-destination ops**: x86 has read-modify-write forms (`mov [m], r`, `add [m], r`, `inc [m]`, `pop [m]`). Use the `read_operand`/`write_operand` helpers in `x86_64.rs` — `parse_operand` is fine for non-memory operands and for cases where you want the address itself (jmp/call targets). Currently only `lift_mov`, `lift_push`, `lift_pop` use the helpers; binops/inc/dec are still on the old path and have a latent bug for memory destinations.
+- **IAT call resolution**: x86-32 `call [imm]` and x86-64 `call [rip+disp]` lift to `IrOp::Call { target: iat_slot_addr }` rather than `CallInd`. `project::decompile` merges `binary.import_addr_map` into `DecompileContext.function_names` keyed by IAT slot address, so the existing target-lookup path resolves them. Register-indirect calls (`call rax`, `call [rbx+8]`) still lift to `CallInd`.
+- **Stack-arg collapsing** lives in `expr_builder::build_statements`, NOT in the lifter. It's a per-block walk that defers `Store { addr=stack_pointer }` into a `pending_stack_writes` queue and consumes it on the next `Call`/`CallInd` (in reverse order — first arg = last pushed). Any non-call instruction flushes the queue as plain `*(rsp) = x` assignments. Limitation: without per-function arity it can over-attribute pushes (e.g. an arg pushed for a later call gets consumed by an intervening 0-arg call). Fix needs the type-library loader.
+- **Variable renamer** (`varnames.rs`):
+  - All sized aliases of an x86 GPR canonicalize via `canonical_reg_name` (eax/ax/al → rax). The `renames` map is keyed on canonical names so mixed-width accesses share one rename.
+  - `is_known_register_name` is the gate that decides whether an unrecognized var should become a fresh `var_N` (it's a register) or be left alone (probably a function name, global, or already-renamed).
+  - x86-32 mode is detected by a pre-pass (`scan_for_x86_32`) before `collect_vars` runs. When set, the SysV `argN` mapping for `rdi/rsi/rdx/rcx/r8/r9` is suppressed because x86-32 cdecl/stdcall pass everything on the stack.
+  - `rsp/rbp/result/flags` are intentionally left visible; eliminating them needs stack-frame analysis.
+
+## FLIRT notes
+- Bundled `signatures/` tree contains both rizinorg/sigdb sigs (named like `VisualStudio2015.sig`, `ubuntu-libc6.sig`) and IDA-derived sigs (named like `vc32_14.sig`, `pe.sig`). `bundled_sigs::collect_bundled_sigs` orders IDA sigs first so they take precedence at apply time (first DB to match wins).
+- IDA `.sig` files use bit `0x08` (`IDASIG_FUNCTION_UNRESOLVED_COLLISION`) in the optional pre-name attribute byte to mark collision placeholders that `sigmake` couldn't resolve. The placeholder name is typically `?`. `parse_module` tracks `is_collision` per public-name candidate and clears the module name if every candidate is a collision; `apply_signatures` already skips empty-name modules. Don't reintroduce naive name parsing that ignores the attribute byte.
+- The 16-bit/DOS/OS-2/NetWare/NE/LE/Mach-O-startup sigs from the IDA pack are intentionally NOT bundled (we don't target those formats); see the classification logic that was used to add the 86 files for which file_types/app_types we accepted.
