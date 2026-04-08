@@ -16,5 +16,6 @@
 //!   manually to recover function signatures.
 
 pub mod libc;
+pub mod rizin_sdb;
 pub mod rust_ty;
 pub mod windows;
