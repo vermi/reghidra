@@ -1,4 +1,5 @@
 use crate::ast::{BinOp, Expr, Stmt};
+use std::collections::HashMap;
 
 /// A line of decompiled output with optional source address.
 #[derive(Debug, Clone)]
@@ -7,14 +8,26 @@ pub struct AnnotatedLine {
     pub addr: Option<u64>,
 }
 
+/// Look up a label's display form, applying user-renames if present.
+fn label_text(addr: u64, label_names: &HashMap<u64, String>) -> String {
+    match label_names.get(&addr) {
+        Some(name) => name.clone(),
+        None => format!("label_{addr:x}"),
+    }
+}
+
 /// Emit a complete function as C-like pseudocode.
-pub fn emit_function(name: &str, body: &[Stmt]) -> String {
-    let lines = emit_function_annotated(name, body);
+pub fn emit_function(name: &str, body: &[Stmt], label_names: &HashMap<u64, String>) -> String {
+    let lines = emit_function_annotated(name, body, label_names);
     lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n")
 }
 
 /// Emit a complete function as annotated lines (text + source address).
-pub fn emit_function_annotated(name: &str, body: &[Stmt]) -> Vec<AnnotatedLine> {
+pub fn emit_function_annotated(
+    name: &str,
+    body: &[Stmt],
+    label_names: &HashMap<u64, String>,
+) -> Vec<AnnotatedLine> {
     let mut lines = Vec::new();
     let mut current_addr: Option<u64> = None;
 
@@ -24,7 +37,7 @@ pub fn emit_function_annotated(name: &str, body: &[Stmt]) -> Vec<AnnotatedLine> 
     });
 
     for stmt in body {
-        emit_stmt_annotated(&mut lines, stmt, 1, &mut current_addr);
+        emit_stmt_annotated(&mut lines, stmt, 1, &mut current_addr, label_names);
     }
 
     lines.push(AnnotatedLine {
@@ -40,6 +53,7 @@ fn emit_stmt_annotated(
     stmt: &Stmt,
     indent: usize,
     current_addr: &mut Option<u64>,
+    label_names: &HashMap<u64, String>,
 ) {
     let pad = "    ".repeat(indent);
     match stmt {
@@ -83,7 +97,7 @@ fn emit_stmt_annotated(
                 addr: *current_addr,
             });
             for s in then_body {
-                emit_stmt_annotated(lines, s, indent + 1, current_addr);
+                emit_stmt_annotated(lines, s, indent + 1, current_addr, label_names);
             }
             if else_body.is_empty() {
                 lines.push(AnnotatedLine {
@@ -96,7 +110,7 @@ fn emit_stmt_annotated(
                     addr: *current_addr,
                 });
                 for s in else_body {
-                    emit_stmt_annotated(lines, s, indent + 1, current_addr);
+                    emit_stmt_annotated(lines, s, indent + 1, current_addr, label_names);
                 }
                 lines.push(AnnotatedLine {
                     text: format!("{pad}}}"),
@@ -110,7 +124,7 @@ fn emit_stmt_annotated(
                 addr: *current_addr,
             });
             for s in body {
-                emit_stmt_annotated(lines, s, indent + 1, current_addr);
+                emit_stmt_annotated(lines, s, indent + 1, current_addr, label_names);
             }
             lines.push(AnnotatedLine {
                 text: format!("{pad}}}"),
@@ -123,7 +137,7 @@ fn emit_stmt_annotated(
                 addr: *current_addr,
             });
             for s in body {
-                emit_stmt_annotated(lines, s, indent + 1, current_addr);
+                emit_stmt_annotated(lines, s, indent + 1, current_addr, label_names);
             }
             lines.push(AnnotatedLine {
                 text: format!("{pad}}}"),
@@ -143,14 +157,16 @@ fn emit_stmt_annotated(
             });
         }
         Stmt::Goto(target) => {
+            let label = label_text(*target, label_names);
             lines.push(AnnotatedLine {
-                text: format!("{pad}goto label_{target:x};"),
+                text: format!("{pad}goto {label};"),
                 addr: *current_addr,
             });
         }
         Stmt::Label(addr) => {
+            let label = label_text(*addr, label_names);
             lines.push(AnnotatedLine {
-                text: format!("label_{addr:x}:"),
+                text: format!("{label}:"),
                 addr: Some(*addr),
             });
         }

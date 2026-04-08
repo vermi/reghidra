@@ -29,7 +29,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .or_else(|| {
             app.decompile_cache
                 .as_ref()
-                .and_then(|(entry, _, _)| project.analysis.function_at(*entry))
+                .and_then(|(entry, _, _, _)| project.analysis.function_at(*entry))
         });
 
     let Some(func) = func else {

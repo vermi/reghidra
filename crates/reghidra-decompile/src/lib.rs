@@ -19,6 +19,11 @@ pub struct DecompileContext {
     pub successors: std::collections::HashMap<u64, Vec<u64>>,
     /// CFG predecessors for each block.
     pub predecessors: std::collections::HashMap<u64, Vec<u64>>,
+    /// User-renamed labels (block address → display name). Replaces the
+    /// default `label_XXXX` form when present.
+    pub label_names: std::collections::HashMap<u64, String>,
+    /// User-renamed local variables: post-heuristic displayed name → user name.
+    pub variable_names: std::collections::HashMap<String, String>,
 }
 
 /// Decompile an IR function into C-like pseudocode.
@@ -29,17 +34,24 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> String {
     // Step 2: Structure control flow
     let body = structuring::structure(ir, &block_stmts, ctx);
 
-    // Step 3: Assign variable names
-    let body = varnames::rename_variables(body);
+    // Step 3: Assign variable names (with user overrides applied as a final pass)
+    let body = varnames::rename_variables(body, &ctx.variable_names);
 
     // Step 4: Emit C-like code
-    emit::emit_function(&ir.name, &body)
+    emit::emit_function(&ir.name, &body, &ctx.label_names)
 }
 
-/// Decompile an IR function into annotated lines (text + source address per line).
-pub fn decompile_annotated(ir: &IrFunction, ctx: &DecompileContext) -> Vec<AnnotatedLine> {
+/// Decompile an IR function into annotated lines and the set of post-rename
+/// variable names that appear in the output (for the GUI's right-click
+/// tokenizer).
+pub fn decompile_annotated(
+    ir: &IrFunction,
+    ctx: &DecompileContext,
+) -> (Vec<AnnotatedLine>, Vec<String>) {
     let block_stmts = expr_builder::build_statements(ir, ctx);
     let body = structuring::structure(ir, &block_stmts, ctx);
-    let body = varnames::rename_variables(body);
-    emit::emit_function_annotated(&ir.name, &body)
+    let body = varnames::rename_variables(body, &ctx.variable_names);
+    let var_names = varnames::collect_displayed_names(&body);
+    let lines = emit::emit_function_annotated(&ir.name, &body, &ctx.label_names);
+    (lines, var_names)
 }

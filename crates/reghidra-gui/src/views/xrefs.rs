@@ -1,4 +1,7 @@
 use crate::app::ReghidraApp;
+use crate::context_menu::{
+    address_context_menu, apply_context_action, ContextAction, ExtraContext, RenameKind,
+};
 use egui::{RichText, Ui};
 
 /// Render cross-references panel for the currently selected address.
@@ -47,6 +50,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     let mut navigate_to = None;
     let mut new_hovered: Option<u64> = None;
+    let mut ctx_action: Option<ContextAction> = None;
 
     ui.label(RichText::new(format!("Xrefs for 0x{selected_addr:08x}")).strong());
     ui.separator();
@@ -86,10 +90,28 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                                     .color(kind_color),
                             );
                         })
-                        .response;
+                        .response
+                        .interact(egui::Sense::click());
                     if resp.hovered() {
                         new_hovered = Some(*from_addr);
                     }
+                    let is_func = project.analysis.function_at(*from_addr).is_some();
+                    let rename_kind = if is_func {
+                        RenameKind::Function
+                    } else {
+                        RenameKind::None
+                    };
+                    let is_bookmarked = project.bookmarks.contains(from_addr);
+                    let has_comment = project.comments.contains_key(from_addr);
+                    address_context_menu(
+                        &resp,
+                        *from_addr,
+                        rename_kind,
+                        is_bookmarked,
+                        has_comment,
+                        ExtraContext::default(),
+                        &mut ctx_action,
+                    );
                 }
                 ui.add_space(8.0);
             }
@@ -123,10 +145,37 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                                     .color(kind_color),
                             );
                         })
-                        .response;
+                        .response
+                        .interact(egui::Sense::click());
                     if resp.hovered() {
                         new_hovered = Some(*to_addr);
                     }
+                    let is_func = project.analysis.function_at(*to_addr).is_some();
+                    let rename_kind = if is_func {
+                        RenameKind::Function
+                    } else {
+                        RenameKind::None
+                    };
+                    let is_bookmarked = project.bookmarks.contains(to_addr);
+                    let has_comment = project.comments.contains_key(to_addr);
+                    let string_value = project
+                        .binary
+                        .strings
+                        .iter()
+                        .find(|s| s.address == *to_addr)
+                        .map(|s| s.value.as_str());
+                    address_context_menu(
+                        &resp,
+                        *to_addr,
+                        rename_kind,
+                        is_bookmarked,
+                        has_comment,
+                        ExtraContext {
+                            string_value,
+                            variable: None,
+                        },
+                        &mut ctx_action,
+                    );
                 }
             }
         });
@@ -137,5 +186,9 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     if let Some(addr) = navigate_to {
         app.navigate_to(addr);
+    }
+
+    if let Some(action) = ctx_action {
+        apply_context_action(app, action);
     }
 }

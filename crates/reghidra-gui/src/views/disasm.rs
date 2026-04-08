@@ -1,4 +1,7 @@
 use crate::app::ReghidraApp;
+use crate::context_menu::{
+    address_context_menu, apply_context_action, ContextAction, ExtraContext, RenameKind,
+};
 use egui::{RichText, Ui};
 
 /// Each item in the flat display list is exactly one row height.
@@ -7,6 +10,7 @@ enum DisplayLine {
     Spacer,
     /// Function header line.
     FuncHeader {
+        address: u64,
         display_name: String,
         insn_count: usize,
         xref_count: usize,
@@ -102,6 +106,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                 display_lines.push(DisplayLine::Spacer);
             }
             display_lines.push(DisplayLine::FuncHeader {
+                address: insn.address,
                 display_name,
                 insn_count: func.instruction_count,
                 xref_count,
@@ -133,6 +138,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let mut navigate_to = None;
     let mut clicked_mnemonic: Option<String> = None;
     let mut new_hovered: Option<u64> = None;
+    let mut ctx_action: Option<ContextAction> = None;
 
     let total_rows = display_lines.len();
     let row_height = 18.0;
@@ -159,20 +165,35 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                     ui.add_space(row_height);
                 }
                 DisplayLine::FuncHeader {
+                    address,
                     display_name,
                     insn_count,
                     xref_count,
                     color,
                     ..
                 } => {
-                    ui.label(
-                        RichText::new(format!(
-                            "; ======= {} ({} insns, {} xrefs) =======",
-                            display_name, insn_count, xref_count
-                        ))
-                        .text_style(mono.clone())
-                        .color(*color)
-                        .strong(),
+                    let resp = ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "; ======= {} ({} insns, {} xrefs) =======",
+                                display_name, insn_count, xref_count
+                            ))
+                            .text_style(mono.clone())
+                            .color(*color)
+                            .strong(),
+                        )
+                        .sense(egui::Sense::click()),
+                    );
+                    let is_bookmarked = project.bookmarks.contains(address);
+                    let has_comment = project.comments.contains_key(address);
+                    address_context_menu(
+                        &resp,
+                        *address,
+                        RenameKind::Function,
+                        is_bookmarked,
+                        has_comment,
+                        ExtraContext::default(),
+                        &mut ctx_action,
                     );
                 }
                 DisplayLine::XrefHint { count } => {
@@ -319,6 +340,46 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                     if resp.hovered() {
                         new_hovered = Some(insn.address);
                     }
+
+                    // Right-click context menu — make the row sense clicks so
+                    // the menu can attach to it.
+                    let resp = resp.interact(egui::Sense::click());
+                    let is_func_entry =
+                        project.analysis.function_at(insn.address).is_some();
+                    let rename_kind = if is_func_entry {
+                        RenameKind::Function
+                    } else {
+                        RenameKind::None
+                    };
+                    let is_bookmarked = project.bookmarks.contains(&insn.address);
+                    let has_comment = project.comments.contains_key(&insn.address);
+                    // If any of the instruction's xref'd targets is a string,
+                    // expose Copy String for the first such string.
+                    let string_value = project
+                        .analysis
+                        .xrefs
+                        .xrefs_from(insn.address)
+                        .iter()
+                        .find_map(|x| {
+                            project
+                                .binary
+                                .strings
+                                .iter()
+                                .find(|s| s.address == x.to)
+                                .map(|s| s.value.as_str())
+                        });
+                    address_context_menu(
+                        &resp,
+                        insn.address,
+                        rename_kind,
+                        is_bookmarked,
+                        has_comment,
+                        ExtraContext {
+                            string_value,
+                            variable: None,
+                        },
+                        &mut ctx_action,
+                    );
                 }
             }
         }
@@ -340,5 +401,9 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     if let Some(addr) = navigate_to {
         app.navigate_to(addr);
+    }
+
+    if let Some(action) = ctx_action {
+        apply_context_action(app, action);
     }
 }
