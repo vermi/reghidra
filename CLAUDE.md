@@ -86,7 +86,9 @@ reghidra/
 - [x] Basic GUI shell (file open, disasm view, hex view, symbols sidebar, function list)
 
 ### Phase 2 — Analysis Engine
-- [x] Function detection (symbols + heuristic prologue/epilogue + call targets)
+- [x] Function detection (symbols + heuristic prologue/epilogue + call targets + gated tail-call jmp targets + MSVC hotpatch prologue)
+- [x] CFG-reachability-based function extents (two-pass: entry discovery → per-entry CFG walk stopping at rets, indirect branches, and other known entries)
+- [x] PE metadata mining: x64 `.pdata` exception table, Debug Directory CodeView RSDS (PDB GUID/age/path), Rich Header (MSVC toolchain fingerprint)
 - [x] Control flow graph (basic blocks, interactive CFG view in GUI)
 - [x] Cross-references (code xrefs + data xrefs, click-to-navigate, xref panel)
 - [x] String detection with xrefs
@@ -115,7 +117,7 @@ reghidra/
 - [x] Fuzzy search + command palette (Cmd+K)
 - [x] Dark/light themes, centralized color palette
 - [x] Vim-like keyboard navigation (j/k, n/N, gg/G, ;, r, x, d, 1-6)
-- [x] Split/tabbed synchronized views (Space to toggle split)
+- [x] Split/tabbed synchronized views (split is the default layout; Space to toggle single)
 - [x] Full undo/redo history (Cmd+Z / Cmd+Shift+Z)
 - [x] Right-click context menu on any symbol (navigate, comment, rename, bookmark, xrefs, copy address/string)
 - [x] Rename labels and decompiler variables in addition to functions
@@ -145,3 +147,8 @@ reghidra/
 - All public APIs should have doc comments
 - Test with real binaries in `tests/fixtures/`
 - Never mention AI tools in commit messages or code comments
+
+## Analysis pipeline notes
+- `functions::detect_functions` is a two-pass design: (1) entry discovery from all sources (binary entry, symbols, call targets, gated tail-call jmps, prologues, PE `.pdata`, Guard CF), (2) per-entry CFG reachability walk via `cfg::build_cfg_from_entry` that stops at rets, indirect branches, and other known entries. Function size/instruction count come from `ControlFlowGraph::extent()` — do not fall back to linear walks. CFGs are built once during detection and reused by xrefs/IR lifting.
+- Adding a new entry source? Feed it into `collect_extra_entries` in `analysis.rs` with a `FunctionSource` variant, not into `detect_functions` directly.
+- PE-specific metadata lives on `LoadedBinary` (`pdata_function_starts`, `guard_cf_function_starts`) and `BinaryInfo` (`pdb_info`, `rich_header`). Guard CF parser is stubbed; the Load Config Directory decoder is a follow-up.

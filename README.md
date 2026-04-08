@@ -10,7 +10,8 @@ A Rust-based reverse engineering framework reimplementing Ghidra's core function
 
 - **Multi-format binary loading** — ELF, PE, and Mach-O via goblin
 - **Multi-architecture disassembly** — x86_64, ARM64 (and more) via capstone
-- **Automated analysis** — function detection (symbols, prologues, call targets), control flow graphs, cross-references, string detection with auto-naming
+- **Automated analysis** — function detection (symbols, prologues including MSVC hotpatch, call targets, tail-call jmp targets) with CFG-reachability-based boundaries, control flow graphs, cross-references, string detection with auto-naming
+- **PE metadata mining** — x64 `.pdata` exception table for authoritative function starts, CodeView Debug Directory for PDB references (GUID/age/path), Rich Header for MSVC toolchain fingerprinting
 - **Intermediate representation** — register transfer language with ~30 opcodes, x86_64 and ARM64 lifters, optimization passes (constant folding, copy propagation, DCE)
 - **Decompiler** — type inference, control flow structuring (if/else/while/goto), C-like pseudocode output
 - **FLIRT signature matching** — ships with 76 bundled signature databases from [rizinorg/sigdb](https://github.com/rizinorg/sigdb) covering ELF and PE across x86, ARM, and MIPS; auto-applied on binary load with support for user-provided `.sig` files
