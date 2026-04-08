@@ -635,7 +635,7 @@ impl FlirtDatabase {
         // CRC matches — check each module
         for module in &group.modules {
             if self.check_module(module, bytes, pattern_size, crc_len) {
-                if !module.name.is_empty() {
+                if is_meaningful_sig_name(&module.name) {
                     matches.push(FlirtMatch {
                         name: module.name.clone(),
                         offset: module.offset,
@@ -705,12 +705,29 @@ pub fn apply_signatures(
             .min_by_key(|m| (m.offset, u32::MAX - m.module_length))
             .unwrap();
 
+        // Safety net: even after the collision-bit filter, some sig files
+        // leak placeholder names like a bare `?`. Skip those so the
+        // function stays `sub_XXXX` instead of becoming a wall of `?` in
+        // the function list.
+        if !is_meaningful_sig_name(&best.name) {
+            continue;
+        }
+
         func.name = best.name.clone();
         func.source = FunctionSource::Signature;
         match_count += 1;
     }
 
     match_count
+}
+
+/// A FLIRT module name is "meaningful" if it's non-empty and isn't just a
+/// collision placeholder. `?` alone is the standard sigmake placeholder
+/// for unresolved collisions; empty names occur when every candidate in
+/// a module was flagged as a collision.
+fn is_meaningful_sig_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty() && trimmed != "?"
 }
 
 // ---------------------------------------------------------------------------

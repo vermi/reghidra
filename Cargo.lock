@@ -2011,6 +2011,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "msvc-demangler"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbeff6bd154a309b2ada5639b2661ca6ae4599b34e8487dc276d2cd637da2d76"
+dependencies = [
+ "bitflags 2.11.0",
+ "itoa",
+]
+
+[[package]]
 name = "naga"
 version = "24.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2805,7 +2815,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "reghidra-cli"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -2815,13 +2825,14 @@ dependencies = [
 
 [[package]]
 name = "reghidra-core"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "capstone",
  "flate2",
  "goblin",
  "include_dir",
  "log",
+ "msvc-demangler",
  "reghidra-decompile",
  "reghidra-ir",
  "serde",
@@ -2831,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "reghidra-decompile"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "log",
  "reghidra-ir",
@@ -2841,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "reghidra-gui"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2858,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "reghidra-ir"
-version = "1.2.0"
+version = "1.4.0"
 dependencies = [
  "log",
  "serde",

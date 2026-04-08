@@ -35,8 +35,12 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         return;
     };
 
-    let func_name = func.name.clone();
     let func_entry = func.entry_address;
+    let func_name = project
+        .renamed_functions
+        .get(&func_entry)
+        .cloned()
+        .unwrap_or_else(|| reghidra_core::demangle::display_name_short(&func.name).into_owned());
 
     let Some(cfg) = project.analysis.cfgs.get(&func_entry) else {
         ui.label("No CFG available for this function.");

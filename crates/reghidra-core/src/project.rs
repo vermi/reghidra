@@ -124,6 +124,21 @@ impl Project {
             .map(|f| f.name.as_str())
     }
 
+    /// Display-friendly function name at the given address.
+    ///
+    /// Returns the user rename if present, otherwise the demangled form of
+    /// the canonical analysis name. Use this for GUI labels and xref
+    /// listings; use [`Self::function_name`] for canonical identifier
+    /// lookups where the mangled form is required.
+    pub fn display_function_name(&self, address: u64) -> Option<String> {
+        if let Some(name) = self.renamed_functions.get(&address) {
+            return Some(name.clone());
+        }
+        self.analysis
+            .function_at(address)
+            .map(|f| crate::demangle::display_name_short(&f.name).into_owned())
+    }
+
     /// Get the symbol at or near an address.
     pub fn symbol_at(&self, address: u64) -> Option<&crate::binary::Symbol> {
         self.binary.symbols.iter().find(|s| {
@@ -170,25 +185,55 @@ impl Project {
         }
     }
 
-    /// Decompile the function at the given entry address.
-    pub fn decompile(&self, entry: u64) -> Option<String> {
-        let ir = self.analysis.ir_for(entry)?;
-
-        // Build decompile context
+    /// Build the display-name map used by the decompiler for call targets.
+    ///
+    /// User-renamed functions pass through unchanged (they're already in
+    /// the form the user wants). Raw analysis names and import names are
+    /// run through [`crate::demangle::display_name`] so that MSVC C++
+    /// mangled names show up as readable signatures.
+    fn build_display_function_names(&self) -> HashMap<u64, String> {
         let mut function_names = HashMap::new();
         for func in &self.analysis.functions {
-            let name = self
-                .renamed_functions
-                .get(&func.entry_address)
-                .cloned()
-                .unwrap_or_else(|| func.name.clone());
-            function_names.insert(func.entry_address, name);
+            if let Some(user) = self.renamed_functions.get(&func.entry_address) {
+                function_names.insert(func.entry_address, user.clone());
+            } else {
+                function_names
+                    .insert(func.entry_address, crate::demangle::display_name(&func.name).into_owned());
+            }
         }
         // Expose imports by IAT-slot address so that `call [IAT]` (lifted as
         // a direct Call whose target is the IAT slot) displays the import name.
         for (addr, name) in &self.binary.import_addr_map {
-            function_names.entry(*addr).or_insert_with(|| name.clone());
+            function_names
+                .entry(*addr)
+                .or_insert_with(|| crate::demangle::display_name(name).into_owned());
         }
+        function_names
+    }
+
+    /// Return the demangled display form of the current function's name,
+    /// honoring user renames. Returns `None` when the user rename (or the
+    /// canonical name) already matches the display form.
+    fn current_function_display_name(&self, entry: u64, ir_name: &str) -> Option<String> {
+        if let Some(user) = self.renamed_functions.get(&entry) {
+            if user != ir_name {
+                return Some(user.clone());
+            }
+            return None;
+        }
+        let demangled = crate::demangle::display_name(ir_name);
+        if demangled == ir_name {
+            None
+        } else {
+            Some(demangled.into_owned())
+        }
+    }
+
+    /// Decompile the function at the given entry address.
+    pub fn decompile(&self, entry: u64) -> Option<String> {
+        let ir = self.analysis.ir_for(entry)?;
+
+        let function_names = self.build_display_function_names();
 
         let string_literals: HashMap<u64, String> = self
             .binary
@@ -216,6 +261,7 @@ impl Project {
             predecessors: cfg.predecessors.clone(),
             label_names: self.label_names.clone(),
             variable_names: var_names_for_func,
+            current_function_display_name: self.current_function_display_name(entry, &ir.name),
         };
 
         Some(reghidra_decompile::decompile(ir, &ctx))
@@ -230,20 +276,7 @@ impl Project {
     ) -> Option<(Vec<reghidra_decompile::AnnotatedLine>, Vec<String>)> {
         let ir = self.analysis.ir_for(entry)?;
 
-        let mut function_names = HashMap::new();
-        for func in &self.analysis.functions {
-            let name = self
-                .renamed_functions
-                .get(&func.entry_address)
-                .cloned()
-                .unwrap_or_else(|| func.name.clone());
-            function_names.insert(func.entry_address, name);
-        }
-        // Expose imports by IAT-slot address so that `call [IAT]` (lifted as
-        // a direct Call whose target is the IAT slot) displays the import name.
-        for (addr, name) in &self.binary.import_addr_map {
-            function_names.entry(*addr).or_insert_with(|| name.clone());
-        }
+        let function_names = self.build_display_function_names();
 
         let string_literals: HashMap<u64, String> = self
             .binary
@@ -271,6 +304,7 @@ impl Project {
             predecessors: cfg.predecessors.clone(),
             label_names: self.label_names.clone(),
             variable_names: var_names_for_func,
+            current_function_display_name: self.current_function_display_name(entry, &ir.name),
         };
 
         Some(reghidra_decompile::decompile_annotated(ir, &ctx))
@@ -284,11 +318,15 @@ impl Project {
             .iter()
             .filter(|f| f.entry_address != 0)
             .map(|f| {
+                // Function list is a compact sidebar — use the short form
+                // (symbol only, no parameter list) so long C++ signatures
+                // don't overflow the UI. The full signature is shown in
+                // the decompile view header.
                 let name = self
                     .renamed_functions
                     .get(&f.entry_address)
                     .cloned()
-                    .unwrap_or_else(|| f.name.clone());
+                    .unwrap_or_else(|| crate::demangle::display_name_short(&f.name).into_owned());
                 (f.entry_address, name)
             })
             .collect();

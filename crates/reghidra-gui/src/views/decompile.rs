@@ -40,7 +40,14 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     };
 
     let func_entry = func.entry_address;
-    let func_name = func.name.clone();
+    // The top label just identifies the function — use the short form so
+    // a long C++ signature doesn't bloat the header. The decompiled body
+    // itself (rendered by emit_function) already shows the full signature.
+    let func_name = project
+        .renamed_functions
+        .get(&func_entry)
+        .cloned()
+        .unwrap_or_else(|| reghidra_core::demangle::display_name_short(&func.name).into_owned());
 
     // Use cached decompile output if the function and rename generation haven't changed
     let needs_decompile = match &app.decompile_cache {
@@ -76,11 +83,13 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .functions
         .iter()
         .map(|f| {
+            // Must match what the decompiler prints so click-to-navigate works
+            // after the demangling pass.
             let name = project
                 .renamed_functions
                 .get(&f.entry_address)
                 .cloned()
-                .unwrap_or_else(|| f.name.clone());
+                .unwrap_or_else(|| reghidra_core::demangle::display_name(&f.name).into_owned());
             (name, f.entry_address)
         })
         .collect();

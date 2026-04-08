@@ -131,7 +131,7 @@ reghidra/
 - [x] Help discoverable via command palette (Cmd+K → "Help")
 - [x] Status bar hint for help shortcut
 
-### Phase 5b — Decompiler Quality (in progress on `feature/ida-sigs-and-til`)
+### Phase 5b — Decompiler Quality
 - [x] Merge IDA FLIRT sig packs (86 added) into bundled `signatures/` tree, IDA-precedence ordering at load time
 - [x] Fix FLIRT `IDASIG_FUNCTION_UNRESOLVED_COLLISION` (0x08) so collision-placeholder names don't leak through as `?`
 - [x] Resolve PE IAT call targets (`call [imm]` x86-32 and `call [rip+disp]` x86-64) — emits `Call { target: iat_addr }` and `project::decompile` merges `binary.import_addr_map` into `function_names`
@@ -142,9 +142,13 @@ reghidra/
 - [ ] Stack frame analysis: turn `*(rsp)` / `*(rbp+N)` references into named locals/params, eliminate the last visible `rsp`/`rbp` from output
 - [ ] Type library loader (Ghidra GDT format preferred; .til parser is undocumented and licensing is grey). Wins: arity capping for stack-arg collapsing (avoids over-attribution like `GetCurrentProcess(0xc0000409)` when followed by `TerminateProcess`), and typed parameter display
 - [ ] Global data naming: `0x40dfd8` → `g_dat_40dfd8` or PDB symbol where available
-- [ ] RMW memory destinations in `lift_binop`/`lift_inc_dec`/`lift_not`/`lift_neg` (latent bug — they still call `parse_operand` and use the result as both source and destination, which produces nonsense for memory operands)
-- [ ] MSVC C++ name demangling for display (e.g. `?strtoxl@@YAKPAUlocaleinfo_struct@@PBDPAPBDHH@Z`) — try the `msvc-demangler` crate; keep mangled name as canonical
-- [ ] `pushfd`/`leave` lifter intrinsics (currently `/* unimpl */`)
+- [x] RMW memory destinations in `lift_binop`/`lift_xor`/`lift_inc_dec`/`lift_not`/`lift_neg` — new `rmw_begin`/`rmw_end` helpers load current value into a temp, perform the op on the temp, and store the result back. Register destinations unchanged (no spurious Load/Store).
+- [x] `leave`/`pushfd`/`pushfq`/`popfd`/`popfq` lifter intrinsics (previously `/* unimpl */`)
+- [x] MSVC C++ name demangling for display via `reghidra_core::demangle` (msvc-demangler crate). Mangled names stay canonical in storage/renames/xref keys; GUI views and `project.functions()`/`project.display_function_name` go through the helper. `DecompileContext::current_function_display_name` carries the demangled form into `emit_function` without mutating the IR.
+  - **Two flavors**: `display_name` = full signature (used by decompile body + `function_names` call-target map); `display_name_short` (NAME_ONLY flag) = symbol only (used by sidebar function list, disasm block header, CFG/IR/xref headers, decompile top label). Full form and short form must match in their respective contexts — the reverse `name → addr` lookup map in `views/decompile.rs` uses `display_name` because that's what the decompile body prints in call expressions.
+  - **Calling-convention decoration**: `strip_msvc_decoration` handles `@name@N` (fastcall) and `_name@N` (stdcall) — e.g. `@__security_check_cookie@4` → `__security_check_cookie`. Bare leading underscores without the `@N` suffix are intentionally left alone (legitimate on ELF symbols like `_start`).
+  - **FLIRT `?` placeholder filter**: `is_meaningful_sig_name` in `flirt.rs` gates both `collect_matches` and the final apply step, so sig files that leak a bare `?` through the collision-bit filter no longer clutter the function list — affected functions stay as their canonical `sub_XXXX`.
+- [x] Blocky disassembly function header: four-line block (top rule, `; FUNCTION name`, `;   0xADDR · N insns · M xrefs`, bottom rule). Right-click context menu is attached to the name row; rules and stats are passive. Implemented as separate `DisplayLine::FuncHeaderRule` / `FuncHeaderName` / `FuncHeaderStats` variants so the fixed-row-height `show_rows` scrolling still works.
 
 ### Phase 6 — Extensibility + Scripting
 - [ ] Lua scripting API

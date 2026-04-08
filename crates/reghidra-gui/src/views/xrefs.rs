@@ -23,7 +23,15 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             let caller = project
                 .analysis
                 .function_containing(x.from)
-                .map(|f| f.name.clone())
+                .map(|f| {
+                    project
+                        .renamed_functions
+                        .get(&f.entry_address)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            reghidra_core::demangle::display_name_short(&f.name).into_owned()
+                        })
+                })
                 .unwrap_or_else(|| format!("0x{:x}", x.from));
             (x.from, caller, x.kind)
         })
@@ -33,8 +41,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .iter()
         .map(|x| {
             let target_name = project
-                .function_name(x.to)
-                .map(|s| s.to_string())
+                .display_function_name(x.to)
                 .or_else(|| {
                     project
                         .binary
