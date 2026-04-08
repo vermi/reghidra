@@ -40,7 +40,13 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     };
 
     let func_entry = func.entry_address;
-    let func_name = func.name.clone();
+    // Header display uses the demangled form (and user rename if present);
+    // the raw mangled name stays canonical in storage.
+    let func_name = project
+        .renamed_functions
+        .get(&func_entry)
+        .cloned()
+        .unwrap_or_else(|| reghidra_core::demangle::display_name(&func.name).into_owned());
 
     // Use cached decompile output if the function and rename generation haven't changed
     let needs_decompile = match &app.decompile_cache {
@@ -76,11 +82,13 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .functions
         .iter()
         .map(|f| {
+            // Must match what the decompiler prints so click-to-navigate works
+            // after the demangling pass.
             let name = project
                 .renamed_functions
                 .get(&f.entry_address)
                 .cloned()
-                .unwrap_or_else(|| f.name.clone());
+                .unwrap_or_else(|| reghidra_core::demangle::display_name(&f.name).into_owned());
             (name, f.entry_address)
         })
         .collect();

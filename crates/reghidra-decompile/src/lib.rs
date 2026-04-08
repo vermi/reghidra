@@ -24,6 +24,11 @@ pub struct DecompileContext {
     pub label_names: std::collections::HashMap<u64, String>,
     /// User-renamed local variables: post-heuristic displayed name → user name.
     pub variable_names: std::collections::HashMap<String, String>,
+    /// Optional display name for the current function. When set, `emit_function`
+    /// prefers this over the IR function's canonical `name`. Used to show a
+    /// demangled form (e.g. MSVC C++ signatures) while keeping the mangled name
+    /// as the canonical identifier in storage and xrefs.
+    pub current_function_display_name: Option<String>,
 }
 
 /// Decompile an IR function into C-like pseudocode.
@@ -38,7 +43,8 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> String {
     let body = varnames::rename_variables(body, &ctx.variable_names);
 
     // Step 4: Emit C-like code
-    emit::emit_function(&ir.name, &body, &ctx.label_names)
+    let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
+    emit::emit_function(display_name, &body, &ctx.label_names)
 }
 
 /// Decompile an IR function into annotated lines and the set of post-rename
@@ -52,6 +58,7 @@ pub fn decompile_annotated(
     let body = structuring::structure(ir, &block_stmts, ctx);
     let body = varnames::rename_variables(body, &ctx.variable_names);
     let var_names = varnames::collect_displayed_names(&body);
-    let lines = emit::emit_function_annotated(&ir.name, &body, &ctx.label_names);
+    let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
+    let lines = emit::emit_function_annotated(display_name, &body, &ctx.label_names);
     (lines, var_names)
 }

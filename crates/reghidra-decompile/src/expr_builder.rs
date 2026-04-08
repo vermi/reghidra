@@ -315,6 +315,7 @@ mod tests {
             predecessors: Default::default(),
             label_names: Default::default(),
             variable_names: Default::default(),
+            current_function_display_name: None,
         }
     }
 

@@ -38,7 +38,11 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     };
 
     let func_entry = func.entry_address;
-    let func_name = func.name.clone();
+    let func_name = project
+        .renamed_functions
+        .get(&func_entry)
+        .cloned()
+        .unwrap_or_else(|| reghidra_core::demangle::display_name(&func.name).into_owned());
 
     let Some(ir) = project.analysis.ir_for(func_entry) else {
         ui.label("No IR available for this function.");

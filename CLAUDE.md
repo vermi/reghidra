@@ -144,7 +144,7 @@ reghidra/
 - [ ] Global data naming: `0x40dfd8` → `g_dat_40dfd8` or PDB symbol where available
 - [x] RMW memory destinations in `lift_binop`/`lift_xor`/`lift_inc_dec`/`lift_not`/`lift_neg` — new `rmw_begin`/`rmw_end` helpers load current value into a temp, perform the op on the temp, and store the result back. Register destinations unchanged (no spurious Load/Store).
 - [x] `leave`/`pushfd`/`pushfq`/`popfd`/`popfq` lifter intrinsics (previously `/* unimpl */`)
-- [ ] MSVC C++ name demangling for display (e.g. `?strtoxl@@YAKPAUlocaleinfo_struct@@PBDPAPBDHH@Z`) — try the `msvc-demangler` crate; keep mangled name as canonical
+- [x] MSVC C++ name demangling for display via `reghidra_core::demangle::display_name` (msvc-demangler crate). Mangled names stay canonical in storage/renames/xref keys; GUI views (decompile header + reverse-lookup map, disasm header, cfg/ir headers, xref panel) and `project.functions()`/`project.display_function_name` all go through the helper. `DecompileContext::current_function_display_name` carries the demangled form into `emit_function` without mutating the IR.
 
 ### Phase 6 — Extensibility + Scripting
 - [ ] Lua scripting API

@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod arch;
 pub mod binary;
+pub mod demangle;
 pub mod disasm;
 pub mod error;
 pub mod project;

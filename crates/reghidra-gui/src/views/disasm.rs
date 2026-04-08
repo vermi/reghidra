@@ -86,9 +86,8 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             let display_name = project
                 .renamed_functions
                 .get(&insn.address)
-                .map(|s| s.as_str())
-                .unwrap_or(&func.name)
-                .to_string();
+                .cloned()
+                .unwrap_or_else(|| reghidra_core::demangle::display_name(&func.name).into_owned());
 
             let header_color = if is_user_renamed {
                 theme.func_header
