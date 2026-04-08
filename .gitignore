@@ -1,4 +1,7 @@
 /target
+# tools/typegen is an out-of-workspace maintainer tool with its own
+# target dir — the root /target glob above doesn't cover nested ones.
+tools/typegen/target
 *.swp
 *.swo
 .DS_Store

@@ -1,0 +1,81 @@
+name: typegen drift check
+
+# Verifies that the type archives checked into `types/` are byte-identical
+# to what the current `tools/typegen` source would produce. The tool is a
+# maintainer-only out-of-workspace crate; CI never auto-regenerates or
+# commits on the maintainer's behalf — its only job here is to catch
+# drift so a stale archive can't silently ship.
+#
+# When this job fails, the fix is always one of:
+#   1. Regenerate the archive locally and commit the result:
+#        cd tools/typegen
+#        cargo run --release -- --source libc --target linux \
+#            --out ../../types/posix.rtarch
+#   2. Or, if the change to tools/typegen was unintended, revert it.
+#
+# The workflow intentionally does NOT push regenerated archives back to
+# the PR branch — archive updates must always be a deliberate, reviewable
+# commit by a human so the binary diff stays attached to the motivating
+# source change.
+
+on:
+  pull_request:
+    paths:
+      - "types/**"
+      - "tools/typegen/**"
+      - ".github/workflows/typegen-drift-check.yml"
+  push:
+    branches: [main]
+    paths:
+      - "types/**"
+      - "tools/typegen/**"
+      - ".github/workflows/typegen-drift-check.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  drift-check:
+    name: Verify bundled type archives are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache typegen build artifacts
+        uses: actions/cache@v4
+        with:
+          # `tools/typegen` has its own Cargo.lock because it's an
+          # out-of-workspace crate; cache its target dir and registry
+          # separately from the main workspace to avoid cross-pollution.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/typegen/target
+          key: typegen-${{ runner.os }}-${{ hashFiles('tools/typegen/Cargo.lock') }}
+
+      - name: Regenerate posix.rtarch into scratch dir
+        run: |
+          mkdir -p /tmp/typegen-out
+          cd tools/typegen
+          cargo run --release --quiet -- \
+              --source libc \
+              --target linux \
+              --out /tmp/typegen-out/posix.rtarch
+
+      - name: Diff against checked-in posix.rtarch
+        run: |
+          if ! cmp -s types/posix.rtarch /tmp/typegen-out/posix.rtarch; then
+            echo "::error::types/posix.rtarch is out of sync with tools/typegen source."
+            echo "Checked-in size:      $(wc -c < types/posix.rtarch) bytes"
+            echo "Regenerated size:     $(wc -c < /tmp/typegen-out/posix.rtarch) bytes"
+            echo ""
+            echo "To fix, run locally and commit the updated archive:"
+            echo "  cd tools/typegen"
+            echo "  cargo run --release -- --source libc --target linux \\"
+            echo "      --out ../../types/posix.rtarch"
+            exit 1
+          fi
+          echo "types/posix.rtarch is current."
