@@ -9,7 +9,7 @@ pub mod xrefs;
 use crate::binary::LoadedBinary;
 use crate::disasm::DisassembledInstruction;
 use cfg::ControlFlowGraph;
-use functions::Function;
+use functions::{Function, FunctionSource};
 use reghidra_ir::IrFunction;
 use xrefs::XRefDatabase;
 
@@ -36,7 +36,12 @@ impl AnalysisResults {
         instructions: &[DisassembledInstruction],
         flirt_dbs: &[&flirt::FlirtDatabase],
     ) -> Self {
-        let mut functions = functions::detect_functions(binary, instructions);
+        // Discover functions and build their CFGs in one pass. CFGs are
+        // driven by reachability from each entry, so function extents never
+        // run past the real end of the function into adjacent code.
+        let extra_entries = collect_extra_entries(binary);
+        let (mut functions, cfgs) =
+            functions::detect_functions(binary, instructions, &extra_entries);
 
         // Resolve PLT stubs (ELF) and IAT entries (PE) to import names
         resolve_import_functions(&mut functions, binary);
@@ -50,14 +55,6 @@ impl AnalysisResults {
 
         // Auto-name functions using heuristics (thunks, wrappers, string-refs, API patterns)
         naming::auto_name_functions(&mut functions, &xrefs, &binary.strings, instructions, &binary.import_addr_map);
-
-        let cfgs: std::collections::HashMap<u64, ControlFlowGraph> = functions
-            .iter()
-            .filter_map(|f| {
-                let cfg = cfg::build_cfg(f, instructions);
-                Some((f.entry_address, cfg))
-            })
-            .collect();
 
         // Lift functions to IR
         let ir_functions = lifting::lift_all(
@@ -91,6 +88,22 @@ impl AnalysisResults {
     pub fn ir_for(&self, entry: u64) -> Option<&IrFunction> {
         self.ir_functions.get(&entry)
     }
+}
+
+/// Collect high-confidence function entries from format-specific metadata
+/// (PE .pdata exception table, PE Guard CF function table, etc.) to seed
+/// the entry-discovery pass.
+fn collect_extra_entries(binary: &LoadedBinary) -> Vec<(u64, String, FunctionSource)> {
+    let mut extras: Vec<(u64, String, FunctionSource)> = Vec::new();
+
+    for addr in &binary.pdata_function_starts {
+        extras.push((*addr, format!("sub_{addr:x}"), FunctionSource::PData));
+    }
+    for addr in &binary.guard_cf_function_starts {
+        extras.push((*addr, format!("sub_{addr:x}"), FunctionSource::GuardCf));
+    }
+
+    extras
 }
 
 /// Resolve PLT stubs (ELF) and IAT thunks (PE) to their import names.
