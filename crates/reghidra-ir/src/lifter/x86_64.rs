@@ -1,5 +1,5 @@
 use super::{DisasmInput, LiftContext};
-use crate::op::{IrOp, Operand, VarNode};
+use crate::op::{IrOp, Operand, VarNode, VarSpace};
 use crate::types::IrFunction;
 
 // x86_64 register offsets (arbitrary but consistent mapping)
@@ -90,7 +90,7 @@ fn lift_instruction(ctx: &mut LiftContext, insn: &DisasmInput) {
         "ja" | "jnbe" => lift_cjmp(ctx, operands, CondKind::UGrtr),
         "js" => lift_cjmp(ctx, operands, CondKind::Sign),
         "jns" => lift_cjmp(ctx, operands, CondKind::NotSign),
-        "call" => lift_call(ctx, operands),
+        "call" => lift_call(ctx, operands, insn.bytes.len()),
         "ret" | "retq" => {
             ctx.emit(IrOp::Return { value: Operand::Var(VarNode::reg(regs::RAX, 8)) });
         }
@@ -207,7 +207,7 @@ fn lift_lea(ctx: &mut LiftContext, operands: &str) {
 }
 
 fn lift_push(ctx: &mut LiftContext, operands: &str) {
-    let src = parse_operand(ctx, operands.trim());
+    let src = read_operand(ctx, operands.trim());
     let rsp = VarNode::reg(regs::RSP, 8);
     let eight = VarNode::constant(8, 8);
 
@@ -218,14 +218,64 @@ fn lift_push(ctx: &mut LiftContext, operands: &str) {
 }
 
 fn lift_pop(ctx: &mut LiftContext, operands: &str) {
-    let dst = parse_operand(ctx, operands.trim());
     let rsp = VarNode::reg(regs::RSP, 8);
     let eight = VarNode::constant(8, 8);
+    let operands = operands.trim();
 
-    // dst = *rsp
-    ctx.emit(IrOp::Load { dst, addr: rsp.clone() });
+    // value = *rsp
+    let value_size = memory_operand_size(operands).unwrap_or(8);
+    let value = ctx.new_temp(value_size);
+    ctx.emit(IrOp::Load { dst: value.clone(), addr: rsp.clone() });
+    // operand = value  (may be a register or a memory store)
+    write_operand(ctx, operands, value);
     // rsp += 8
     ctx.emit(IrOp::IntAdd { dst: rsp.clone(), a: rsp.clone(), b: eight });
+}
+
+/// Return the access size implied by a memory operand's size prefix
+/// (`byte ptr`, `word ptr`, `dword ptr`, `qword ptr`), or None if the
+/// operand is not a memory operand.
+fn memory_operand_size(s: &str) -> Option<u8> {
+    let s = s.trim();
+    if !is_memory_operand(s) {
+        return None;
+    }
+    Some(if s.starts_with("byte") {
+        1
+    } else if s.starts_with("word") {
+        2
+    } else if s.starts_with("dword") {
+        4
+    } else {
+        8
+    })
+}
+
+/// Read an operand's *value*. For registers/immediates this is just
+/// `parse_operand`. For memory operands we emit a Load into a fresh temp
+/// and return the temp, so callers always get a readable value (rather
+/// than the raw address).
+fn read_operand(ctx: &mut LiftContext, s: &str) -> VarNode {
+    if let Some(size) = memory_operand_size(s) {
+        let addr = parse_operand(ctx, s);
+        let tmp = ctx.new_temp(size);
+        ctx.emit(IrOp::Load { dst: tmp.clone(), addr });
+        tmp
+    } else {
+        parse_operand(ctx, s)
+    }
+}
+
+/// Write `value` into an operand. For registers this is a Copy; for memory
+/// operands this is a Store at the effective address.
+fn write_operand(ctx: &mut LiftContext, s: &str, value: VarNode) {
+    if is_memory_operand(s) {
+        let addr = parse_operand(ctx, s);
+        ctx.emit(IrOp::Store { addr, src: value });
+    } else {
+        let dst = parse_operand(ctx, s);
+        ctx.emit(IrOp::Copy { dst, src: value });
+    }
 }
 
 fn lift_binop(ctx: &mut LiftContext, operands: &str, op: BinOp) {
@@ -366,14 +416,64 @@ fn lift_cjmp(ctx: &mut LiftContext, operands: &str, kind: CondKind) {
     ctx.emit(IrOp::CBranch { cond, target });
 }
 
-fn lift_call(ctx: &mut LiftContext, operands: &str) {
+fn lift_call(ctx: &mut LiftContext, operands: &str, insn_size: usize) {
     let operands = operands.trim();
+
+    // Direct call: `call 0x401000`
     if let Some(target) = parse_immediate(operands) {
         ctx.emit(IrOp::Call { target });
-    } else {
-        let target = parse_operand(ctx, operands);
-        ctx.emit(IrOp::CallInd { target });
+        return;
     }
+
+    // x86-64 rip-relative IAT dispatch: `call qword ptr [rip + 0x1234]`
+    // resolves to an absolute address = next_ip + disp.
+    if let Some(disp) = parse_rip_relative(operands) {
+        let next_ip = ctx.current_address.wrapping_add(insn_size as u64);
+        let target = next_ip.wrapping_add(disp);
+        ctx.emit(IrOp::Call { target });
+        return;
+    }
+
+    // Indirect call through a bare memory constant, e.g. `call [0x40a028]` or
+    // `call dword ptr [0x00404028]`. On x86-32 PE this is the classic IAT
+    // dispatch pattern. We model it as a direct Call whose target is the IAT
+    // slot address; the decompiler's function_names map resolves that address
+    // to the import name.
+    let target = parse_operand(ctx, operands);
+    if is_memory_operand(operands) && target.space == VarSpace::Constant {
+        ctx.emit(IrOp::Call { target: target.offset });
+        return;
+    }
+
+    ctx.emit(IrOp::CallInd { target });
+}
+
+/// Parse a rip-relative memory operand of the form `[rip + disp]` or
+/// `[rip - disp]`, optionally with a `qword ptr ` / `dword ptr ` prefix.
+/// Returns the signed displacement as u64 (two's-complement).
+fn parse_rip_relative(operands: &str) -> Option<u64> {
+    let s = operands
+        .trim()
+        .trim_start_matches("qword ptr ")
+        .trim_start_matches("dword ptr ")
+        .trim_start_matches("word ptr ")
+        .trim_start_matches("byte ptr ")
+        .trim();
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?.trim();
+    // Accept "rip + imm", "rip - imm", or bare "rip" (disp = 0).
+    let rest = inner.strip_prefix("rip")?.trim_start();
+    if rest.is_empty() {
+        return Some(0);
+    }
+    let (sign, rest) = if let Some(r) = rest.strip_prefix('+') {
+        (1i64, r.trim())
+    } else if let Some(r) = rest.strip_prefix('-') {
+        (-1i64, r.trim())
+    } else {
+        return None;
+    };
+    let imm = parse_immediate(rest)?;
+    Some((sign * imm as i64) as u64)
 }
 
 // -- Operand parsing helpers --
@@ -500,6 +600,11 @@ fn parse_register(s: &str) -> Option<VarNode> {
     Some(VarNode::reg(offset, size))
 }
 
+/// Parse the contents of a memory operand and return a varnode *whose value is
+/// the effective address*, NOT a descriptor of the memory location itself.
+/// Callers pass this as `Store.addr` / `Load.addr`, so the one-level Deref
+/// the expression builder wraps around Load/Store addr fields becomes the
+/// correct single dereference.
 fn parse_memory_expression(ctx: &mut LiftContext, s: &str) -> Option<VarNode> {
     // Extract content inside brackets
     let inner = s.trim();
@@ -516,7 +621,8 @@ fn parse_memory_expression(ctx: &mut LiftContext, s: &str) -> Option<VarNode> {
     if parts.len() == 1 {
         // Could be [reg], [reg - imm], or [imm]
         if let Some(reg) = parse_register(parts[0]) {
-            return Some(VarNode::mem(reg.offset, 8));
+            // Address is the register value.
+            return Some(reg);
         }
         // Check for subtraction: "reg - imm"
         if let Some((base_str, off_str)) = parts[0].split_once('-') {
@@ -531,7 +637,8 @@ fn parse_memory_expression(ctx: &mut LiftContext, s: &str) -> Option<VarNode> {
             }
         }
         if let Some(val) = parse_immediate(parts[0]) {
-            return Some(VarNode::mem(val, 8));
+            // Absolute address: the constant IS the address value.
+            return Some(VarNode::constant(val, 8));
         }
     } else if parts.len() == 2 {
         // [reg + imm] or [reg + reg]
@@ -548,4 +655,111 @@ fn parse_memory_expression(ctx: &mut LiftContext, s: &str) -> Option<VarNode> {
     let addr = ctx.new_temp(8);
     ctx.emit(IrOp::Copy { dst: addr.clone(), src: VarNode::constant(0, 8) });
     Some(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lift_one_at(addr: u64, mnemonic: &str, operands: &str, size: usize) -> Vec<IrOp> {
+        let mut ctx = LiftContext::new(addr);
+        ctx.set_address(addr);
+        lift_instruction(
+            &mut ctx,
+            &DisasmInput {
+                address: addr,
+                mnemonic: mnemonic.to_string(),
+                operands: operands.to_string(),
+                bytes: vec![0; size],
+            },
+        );
+        ctx.finish()
+            .into_iter()
+            .flat_map(|b| b.instructions.into_iter().map(|i| i.op))
+            .collect()
+    }
+
+    fn lift_one(mnemonic: &str, operands: &str) -> Vec<IrOp> {
+        lift_one_at(0x1000, mnemonic, operands, 6)
+    }
+
+    #[test]
+    fn call_direct_immediate() {
+        let ops = lift_one("call", "0x401000");
+        assert!(matches!(ops.last(), Some(IrOp::Call { target: 0x401000 })));
+    }
+
+    #[test]
+    fn call_iat_memory_constant_becomes_direct_call() {
+        // `call [0x40a028]` (x86-32 IAT dispatch) should lift to Call { target: 0x40a028 }
+        // so that function_names[0x40a028] (= import name) resolves it at decompile time.
+        let ops = lift_one("call", "dword ptr [0x40a028]");
+        assert!(
+            matches!(ops.last(), Some(IrOp::Call { target: 0x40a028 })),
+            "expected direct Call for IAT indirection, got {:?}",
+            ops.last()
+        );
+    }
+
+    #[test]
+    fn call_register_indirect_stays_indirect() {
+        // `call rax` is a real indirect call, not an IAT lookup.
+        let ops = lift_one("call", "rax");
+        assert!(
+            matches!(ops.last(), Some(IrOp::CallInd { .. })),
+            "expected CallInd for register target, got {:?}",
+            ops.last()
+        );
+    }
+
+    #[test]
+    fn call_rip_relative_resolves_to_absolute() {
+        // x86-64 `call qword ptr [rip + 0x2034]` at 0x140001000 with 6-byte
+        // encoding resolves to 0x140001000 + 6 + 0x2034 = 0x14000303a.
+        let ops = lift_one_at(0x140001000, "call", "qword ptr [rip + 0x2034]", 6);
+        assert!(
+            matches!(ops.last(), Some(IrOp::Call { target: 0x14000303a })),
+            "got {:?}",
+            ops.last()
+        );
+    }
+
+    #[test]
+    fn store_to_absolute_address_uses_constant_addr() {
+        // `mov [0x40dfd8], eax` must produce Store { addr: Constant(0x40dfd8), ... }
+        // (NOT a Memory-space varnode, which the expression builder would
+        // double-deref into `*(*(0x40dfd8)) = eax`).
+        let ops = lift_one("mov", "dword ptr [0x40dfd8], eax");
+        let last = ops.last().expect("no ops");
+        match last {
+            IrOp::Store { addr, .. } => {
+                assert_eq!(addr.space, VarSpace::Constant, "addr space must be Constant, got {:?}", addr.space);
+                assert_eq!(addr.offset, 0x40dfd8);
+            }
+            other => panic!("expected Store, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn load_from_absolute_address_uses_constant_addr() {
+        let ops = lift_one("mov", "eax, dword ptr [0x40dfd8]");
+        let last = ops.last().expect("no ops");
+        match last {
+            IrOp::Load { addr, .. } => {
+                assert_eq!(addr.space, VarSpace::Constant);
+                assert_eq!(addr.offset, 0x40dfd8);
+            }
+            other => panic!("expected Load, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn call_rip_relative_negative_disp() {
+        let ops = lift_one_at(0x140001000, "call", "qword ptr [rip - 0x10]", 6);
+        assert!(
+            matches!(ops.last(), Some(IrOp::Call { target: 0x140000ff6 })),
+            "got {:?}",
+            ops.last()
+        );
+    }
 }

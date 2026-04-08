@@ -13,8 +13,30 @@ pub fn build_statements(
 
     for block in &ir.blocks {
         let mut stmts = Vec::new();
+        // Deferred stack writes that look like x86-32 stdcall/cdecl argument
+        // setup (`push x; push y; call f`). We hold onto them until we see a
+        // Call (where they become arguments) or any other instruction (where
+        // we flush them as plain `*(rsp) = x` statements — i.e. they weren't
+        // call args after all).
+        let mut pending_stack_writes: Vec<(VarNode, VarNode)> = Vec::new();
 
         for insn in &block.instructions {
+            // Intercept stores to the stack pointer before the main match
+            // so a run of pushes can be collapsed into a call's argument list.
+            if let IrOp::Store { addr, src } = &insn.op {
+                if is_stack_pointer(addr) {
+                    pending_stack_writes.push((addr.clone(), src.clone()));
+                    continue;
+                }
+            }
+
+            // For any non-Call instruction, the pushes we saw weren't call
+            // arguments — emit them as plain stack writes and continue.
+            let is_call = matches!(insn.op, IrOp::Call { .. } | IrOp::CallInd { .. });
+            if !is_call {
+                flush_stack_writes(&mut stmts, &mut pending_stack_writes);
+            }
+
             match &insn.op {
                 IrOp::Copy { dst, src } => {
                     let lhs = varnode_to_expr(dst);
@@ -95,15 +117,17 @@ pub fn build_statements(
                         .get(target)
                         .cloned()
                         .unwrap_or_else(|| format!("sub_{target:x}"));
+                    let args = drain_pending_as_args(&mut pending_stack_writes);
                     stmts.push(Stmt::ExprStmt(Expr::Call(
                         Box::new(Expr::Var(func_name)),
-                        Vec::new(),
+                        args,
                     )));
                 }
                 IrOp::CallInd { target } => {
+                    let args = drain_pending_as_args(&mut pending_stack_writes);
                     stmts.push(Stmt::ExprStmt(Expr::Call(
                         Box::new(varnode_to_expr(target)),
-                        Vec::new(),
+                        args,
                     )));
                 }
                 IrOp::Return { value } => {
@@ -139,10 +163,49 @@ pub fn build_statements(
             }
         }
 
+        // Flush any stack writes still pending at the end of the block
+        // (e.g. a trailing push with no following call in this block).
+        flush_stack_writes(&mut stmts, &mut pending_stack_writes);
         result.insert(block.address, stmts);
     }
 
     result
+}
+
+/// Is this varnode the architectural stack pointer (x86 rsp/esp, ARM64 sp)?
+/// Matches the register-offset convention used by the IR lifters.
+fn is_stack_pointer(vn: &VarNode) -> bool {
+    if vn.space != VarSpace::Register {
+        return false;
+    }
+    // x86_64 RSP = 4, ARM64 SP = 31 (see reghidra-ir lifters).
+    vn.offset == 4 || vn.offset == 31
+}
+
+/// Emit any deferred stack writes as plain `*(rsp) = value` assignments.
+/// Called when we decide the pushes weren't actually call-argument setup.
+fn flush_stack_writes(stmts: &mut Vec<Stmt>, pending: &mut Vec<(VarNode, VarNode)>) {
+    for (addr, src) in pending.drain(..) {
+        let lhs = Expr::Deref(
+            Box::new(varnode_to_expr(&addr)),
+            CType::from_size(src.size, false),
+        );
+        let rhs = varnode_to_expr(&src);
+        stmts.push(Stmt::Assign(lhs, rhs));
+    }
+}
+
+/// Consume the pending stack writes and return them as call arguments.
+/// Pushes happen in reverse order relative to the source-level argument
+/// list (the first argument is the *last* push before the call), so we
+/// reverse here to restore source order.
+fn drain_pending_as_args(pending: &mut Vec<(VarNode, VarNode)>) -> Vec<Expr> {
+    let args: Vec<Expr> = pending
+        .drain(..)
+        .rev()
+        .map(|(_, src)| varnode_to_expr(&src))
+        .collect();
+    args
 }
 
 fn emit_binop(stmts: &mut Vec<Stmt>, dst: &VarNode, a: &VarNode, b: &VarNode, op: BinOp) {
@@ -219,5 +282,115 @@ fn register_name(offset: u64, size: u8) -> String {
         (n, 8) if n <= 28 => format!("x{n}"),
         (n, 4) if n <= 28 => format!("w{n}"),
         _ => format!("r{}_{}", offset, size),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reghidra_ir::op::{Operand, VarNode};
+    use reghidra_ir::types::{IrBlock, IrFunction, IrInstruction};
+
+    fn mk_ir(ops: Vec<IrOp>) -> IrFunction {
+        let mut block = IrBlock::new(0x1000);
+        for (i, op) in ops.into_iter().enumerate() {
+            block.instructions.push(IrInstruction {
+                address: 0x1000,
+                sub_index: i as u16,
+                op,
+            });
+        }
+        IrFunction {
+            name: "f".into(),
+            entry_address: 0x1000,
+            blocks: vec![block],
+        }
+    }
+
+    fn empty_ctx() -> DecompileContext {
+        DecompileContext {
+            function_names: Default::default(),
+            string_literals: Default::default(),
+            successors: Default::default(),
+            predecessors: Default::default(),
+            label_names: Default::default(),
+            variable_names: Default::default(),
+        }
+    }
+
+    fn rsp4() -> VarNode {
+        // x86-32 esp: offset=4, size=4 (matches the lifter's RSP constant)
+        VarNode::reg(4, 4)
+    }
+
+    #[test]
+    fn three_pushes_before_call_become_three_args() {
+        // push 1; push 2; push 3; call 0x2000  ->  sub_2000(3, 2, 1)
+        let ir = mk_ir(vec![
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(1, 4) },
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(2, 4) },
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(3, 4) },
+            IrOp::Call { target: 0x2000 },
+        ]);
+        let ctx = empty_ctx();
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        assert_eq!(stmts.len(), 1, "pushes should collapse into the call, got {stmts:?}");
+        match &stmts[0] {
+            Stmt::ExprStmt(Expr::Call(callee, args)) => {
+                assert!(matches!(**callee, Expr::Var(ref name) if name == "sub_2000"));
+                // Args appear in source order: first-pushed is last arg
+                assert_eq!(args.len(), 3);
+                match &args[0] {
+                    Expr::IntLit(3, _) => {}
+                    other => panic!("arg 0 should be 3, got {other:?}"),
+                }
+                match &args[2] {
+                    Expr::IntLit(1, _) => {}
+                    other => panic!("arg 2 should be 1, got {other:?}"),
+                }
+            }
+            other => panic!("expected Call stmt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_without_call_flushes_as_stack_write() {
+        // push 1; nop  ->  *(esp) = 1; (no call)
+        let ir = mk_ir(vec![
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(1, 4) },
+            IrOp::Return { value: Operand::None },
+        ]);
+        let ctx = empty_ctx();
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        // Expect a flushed Assign then a Return.
+        assert!(matches!(&stmts[0], Stmt::Assign(..)));
+        assert!(matches!(stmts.last(), Some(Stmt::Return(None))));
+    }
+
+    #[test]
+    fn intervening_non_call_flushes_earlier_push() {
+        // push 1; mov eax, 5; push 2; call 0x2000  ->
+        //   *(esp) = 1; eax = 5; sub_2000(2)
+        let eax = VarNode::reg(0, 4);
+        let ir = mk_ir(vec![
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(1, 4) },
+            IrOp::Copy { dst: eax, src: VarNode::constant(5, 4) },
+            IrOp::Store { addr: rsp4(), src: VarNode::constant(2, 4) },
+            IrOp::Call { target: 0x2000 },
+        ]);
+        let ctx = empty_ctx();
+        let result = build_statements(&ir, &ctx);
+        let stmts = &result[&0x1000];
+        assert_eq!(stmts.len(), 3);
+        assert!(matches!(stmts[0], Stmt::Assign(..)), "earlier push should be flushed");
+        assert!(matches!(stmts[1], Stmt::Assign(..)), "the mov should be emitted");
+        match &stmts[2] {
+            Stmt::ExprStmt(Expr::Call(_, args)) => {
+                assert_eq!(args.len(), 1, "only the second push should be an arg");
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
     }
 }

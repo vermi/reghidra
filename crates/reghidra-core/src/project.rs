@@ -184,6 +184,11 @@ impl Project {
                 .unwrap_or_else(|| func.name.clone());
             function_names.insert(func.entry_address, name);
         }
+        // Expose imports by IAT-slot address so that `call [IAT]` (lifted as
+        // a direct Call whose target is the IAT slot) displays the import name.
+        for (addr, name) in &self.binary.import_addr_map {
+            function_names.entry(*addr).or_insert_with(|| name.clone());
+        }
 
         let string_literals: HashMap<u64, String> = self
             .binary
@@ -233,6 +238,11 @@ impl Project {
                 .cloned()
                 .unwrap_or_else(|| func.name.clone());
             function_names.insert(func.entry_address, name);
+        }
+        // Expose imports by IAT-slot address so that `call [IAT]` (lifted as
+        // a direct Call whose target is the IAT slot) displays the import name.
+        for (addr, name) in &self.binary.import_addr_map {
+            function_names.entry(*addr).or_insert_with(|| name.clone());
         }
 
         let string_literals: HashMap<u64, String> = self

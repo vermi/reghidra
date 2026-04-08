@@ -48,6 +48,8 @@ pub struct FlirtModule {
     pub length: u32,
     pub tail_bytes: Vec<TailByte>,
     pub referenced_functions: Vec<ReferencedFunction>,
+    /// True if the picked name is from a static (local) function, not a public symbol.
+    pub is_local: bool,
 }
 
 pub struct TailByte {
@@ -378,11 +380,20 @@ fn parse_leaves(reader: &mut SigReader, version: u8) -> Result<Vec<CrcGroup>, Co
     Ok(groups)
 }
 
+// Function attribute flags (the optional pre-name byte, < 0x20).
+// Source: rizinorg/rizin librz/sign/flirt.c
+const FUNCTION_LOCAL: u8 = 0x02;
+const FUNCTION_UNRESOLVED_COLLISION: u8 = 0x08;
+
 fn parse_module(reader: &mut SigReader, version: u8, length: u32) -> Result<(FlirtModule, u8), CoreError> {
-    // Read public functions (at least one)
+    // Read public functions (at least one). A module may declare multiple
+    // public names, some marked as static (local) or as unresolved-collision
+    // placeholders. We want to surface the best one for renaming.
     let mut offset: u32 = 0;
     let mut best_name = String::new();
     let mut best_offset: u32 = 0;
+    let mut best_is_local = false;
+    let mut best_is_collision = true; // start pessimistic so any real name wins
     let mut flags: u8;
 
     loop {
@@ -396,9 +407,14 @@ fn parse_module(reader: &mut SigReader, version: u8, length: u32) -> Result<(Fli
 
         let mut current_byte = reader.read_byte()?;
 
-        // Attribute flags (if < 0x20)
+        // Optional function-attribute byte (one byte, < 0x20). Bits we care about:
+        //   0x02 = static (local) function
+        //   0x08 = unresolved collision (sigmake placeholder; name is bogus, e.g. "?")
+        let mut is_local = false;
+        let mut is_collision = false;
         if current_byte < 0x20 {
-            // Skip attribute byte, read next for name start
+            is_local = current_byte & FUNCTION_LOCAL != 0;
+            is_collision = current_byte & FUNCTION_UNRESOLVED_COLLISION != 0;
             current_byte = reader.read_byte()?;
         }
 
@@ -409,18 +425,45 @@ fn parse_module(reader: &mut SigReader, version: u8, length: u32) -> Result<(Fli
             current_byte = reader.read_byte()?;
         }
 
-        // current_byte is now the flags byte
+        // current_byte is now the structural flags byte
         flags = current_byte;
 
-        // Keep the first public name at offset 0 (most useful), or any name
-        if best_name.is_empty() || (offset == 0 && !name.is_empty()) {
+        // Pick the best name for this module:
+        //   1. Real (non-collision) > collision-placeholder
+        //   2. Public > local (static)
+        //   3. Earlier offset wins on ties
+        let candidate_better = if name.is_empty() {
+            false
+        } else if best_name.is_empty() {
+            true
+        } else if best_is_collision && !is_collision {
+            true
+        } else if !best_is_collision && is_collision {
+            false
+        } else if best_is_local && !is_local {
+            true
+        } else if !best_is_local && is_local {
+            false
+        } else {
+            offset < best_offset
+        };
+
+        if candidate_better {
             best_name = name;
             best_offset = offset;
+            best_is_local = is_local;
+            best_is_collision = is_collision;
         }
 
         if flags & MORE_PUBLIC_NAMES == 0 {
             break;
         }
+    }
+
+    // If the only names we saw were collision placeholders, drop the name
+    // entirely so apply_signatures will skip this module.
+    if best_is_collision {
+        best_name.clear();
     }
 
     // Tail bytes
@@ -482,6 +525,7 @@ fn parse_module(reader: &mut SigReader, version: u8, length: u32) -> Result<(Fli
             length,
             tail_bytes,
             referenced_functions,
+            is_local: best_is_local,
         },
         flags,
     ))

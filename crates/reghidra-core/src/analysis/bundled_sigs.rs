@@ -39,9 +39,25 @@ fn sig_subdirs(format: BinaryFormat, arch: Architecture) -> Vec<&'static str> {
     }
 }
 
+/// Returns true if a sig filename (stem) is one of the rizinorg/sigdb-sourced
+/// databases. IDA-sourced sigs take precedence over these: at apply time the
+/// first database to match a function wins, so non-rizinorg sigs are loaded
+/// first.
+fn is_rizinorg_sig(stem: &str) -> bool {
+    stem.starts_with("VisualStudio")
+        || stem.starts_with("ubuntu-")
+        || stem.starts_with("fedora-")
+        || stem.starts_with("android-")
+        || matches!(stem, "masm32" | "mingw32-zlib" | "winsdk")
+}
+
 /// Collect all bundled .sig file entries matching the given format and architecture.
+///
+/// Order: IDA-sourced sigs first, rizinorg/sigdb sigs last. This gives IDA
+/// signatures precedence when the same function matches both sources.
 fn collect_bundled_sigs(format: BinaryFormat, arch: Architecture) -> Vec<BundledSig> {
-    let mut sigs = Vec::new();
+    let mut ida = Vec::new();
+    let mut rizinorg = Vec::new();
 
     for subdir_path in sig_subdirs(format, arch) {
         if let Some(subdir) = SIGNATURES_DIR.get_dir(subdir_path) {
@@ -53,17 +69,23 @@ fn collect_bundled_sigs(format: BinaryFormat, arch: Architecture) -> Vec<Bundled
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("unknown");
-                        sigs.push(BundledSig {
+                        let entry = BundledSig {
                             name,
                             data: file.contents(),
-                        });
+                        };
+                        if is_rizinorg_sig(name) {
+                            rizinorg.push(entry);
+                        } else {
+                            ida.push(entry);
+                        }
                     }
                 }
             }
         }
     }
 
-    sigs
+    ida.extend(rizinorg);
+    ida
 }
 
 /// Load and apply all bundled FLIRT signature databases that match the given
@@ -143,5 +165,22 @@ mod tests {
         let (dbs, status) = load_bundled_signatures(BinaryFormat::Elf, Architecture::X86_64);
         assert!(!dbs.is_empty());
         assert!(!status.is_empty());
+    }
+
+    #[test]
+    fn test_load_bundled_pe_signatures_parse() {
+        // Every bundled PE sig (including merged IDA sigs) must parse.
+        for (fmt, arch) in [
+            (BinaryFormat::Pe, Architecture::X86_32),
+            (BinaryFormat::Pe, Architecture::X86_64),
+        ] {
+            let entries = collect_bundled_sigs(fmt, arch);
+            assert!(!entries.is_empty(), "no bundled sigs for {fmt:?}/{arch:?}");
+            for e in &entries {
+                let src = PathBuf::from(format!("bundled:{}", e.name));
+                FlirtDatabase::parse(e.data, src)
+                    .unwrap_or_else(|err| panic!("sig {} failed: {err}", e.name));
+            }
+        }
     }
 }
