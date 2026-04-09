@@ -395,6 +395,277 @@ pub fn type_ref_to_ctype(ty: &TypeRef) -> crate::ast::CType {
     }
 }
 
+/// Resolve the byte width of a [`crate::ast::CType`], following
+/// [`CType::Named`] aliases through the supplied archives. Returns
+/// `None` when the type's width can't be determined: an unrecognized
+/// `Named` (no archive entry, or an entry that's a struct/union/enum
+/// without a known size), or a void primitive.
+///
+/// Used by the slot-subsumption pass: when the user retypes a slot,
+/// we need to know how many bytes the new type covers so we can
+/// decide which neighboring slots to fold into the widened parent.
+/// "Don't know" → fall back to a type-only retype with no
+/// subsumption, which keeps opaque struct names from accidentally
+/// eating siblings.
+pub fn ctype_size_bytes(
+    ty: &crate::ast::CType,
+    archives: &[Arc<TypeArchive>],
+) -> Option<u8> {
+    use crate::ast::CType;
+    match ty {
+        CType::Void => None,
+        CType::Int8 | CType::UInt8 => Some(1),
+        CType::Int16 | CType::UInt16 => Some(2),
+        CType::Int32 | CType::UInt32 => Some(4),
+        CType::Int64 | CType::UInt64 => Some(8),
+        // Pointer width follows the target binary's pointer width;
+        // every loaded archive in this PR is consumed by a 32-bit
+        // *or* 64-bit binary uniformly, but we don't have a target
+        // word-size handle here. Treat pointer-to-X as 8 bytes by
+        // default and rely on the caller (which knows whether the
+        // current binary is 32-bit) to override when it matters.
+        // The slot-subsumption use case is dominated by widening
+        // from `unk32` to `int64_t`, where the explicit primitive
+        // path covers it; pointers come up only when the user
+        // retypes to e.g. `void*`, and on x86-32 they should not
+        // widen anything (current sibling is also 4 bytes).
+        CType::Pointer(_) => Some(8),
+        CType::Unknown(s) => Some(*s),
+        CType::Named(name) => {
+            for archive in archives {
+                if let Some(def) = archive.types.get(name) {
+                    return type_def_size(def, archives, 0);
+                }
+            }
+            // Common Win32/POSIX width aliases that may not be in
+            // the archive's `types` map (POSIX archives don't ship
+            // a `DWORD` typedef, etc.). Match parse_user_ctype's
+            // recognized name set so user retypes round-trip.
+            match name.as_str() {
+                "char" | "BYTE" | "byte" => Some(1),
+                "WORD" => Some(2),
+                "DWORD" | "BOOL" | "float" => Some(4),
+                "QWORD" | "double" | "size_t" | "SIZE_T" => Some(8),
+                "wchar_t" => Some(2),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn type_def_size(
+    def: &TypeDef,
+    archives: &[Arc<TypeArchive>],
+    depth: u8,
+) -> Option<u8> {
+    if depth >= 8 {
+        return None;
+    }
+    match &def.kind {
+        TypeDefKind::Alias(target) => {
+            type_ref_size(target, archives, depth + 1)
+        }
+        TypeDefKind::Struct { size, .. } | TypeDefKind::Union { size, .. } => {
+            // u32 → u8 narrowing: any struct ≥ 256 bytes gets None
+            // because the slot-subsumption pass only consumes 8-byte
+            // primitive widths anyway. A None here just falls back
+            // to type-only retype, which is the right behavior for
+            // a giant struct landing in a 4-byte slot.
+            size.and_then(|s| u8::try_from(s).ok())
+        }
+        TypeDefKind::Enum { underlying, .. } => Some(underlying.size().max(1)),
+    }
+}
+
+fn type_ref_size(
+    ty: &TypeRef,
+    archives: &[Arc<TypeArchive>],
+    depth: u8,
+) -> Option<u8> {
+    if depth >= 8 {
+        return None;
+    }
+    match ty {
+        TypeRef::Primitive(p) => {
+            let s = p.size();
+            if s == 0 { None } else { Some(s) }
+        }
+        TypeRef::Pointer(_) | TypeRef::FunctionPointer(_) => Some(8),
+        TypeRef::Array(elem, len) => {
+            let elem_size = type_ref_size(elem, archives, depth + 1)?;
+            let total = (elem_size as u32).checked_mul(*len)?;
+            u8::try_from(total).ok()
+        }
+        TypeRef::Named(name) => {
+            for archive in archives {
+                if let Some(def) = archive.types.get(name) {
+                    return type_def_size(def, archives, depth + 1);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Decide whether a value of type `src` can flow into a slot of type
+/// `dst` without needing a visible cast in the decompile output.
+///
+/// "Assignment-compatible" here is intentionally narrower than C's
+/// implicit conversion rules: we want the cast to disappear when the
+/// user has *already told us the types match* (via a retype, an
+/// archive prototype, or a primitive that happens to line up with
+/// the parameter type). It's deliberately wider than strict equality
+/// because primitive aliases (`uint32_t` ≡ `DWORD`) and unknown-width
+/// slots (`unk32` against `int32_t`) should not produce a visible
+/// cast — the cast is visual compensation for a typing gap, and if
+/// the gap is closed the cast is just noise.
+///
+/// Rules:
+///
+/// - Identical → compatible.
+/// - `Void` on either side → never compatible (a void cast is its
+///   own special case and we don't generate one anyway).
+/// - `Unknown(n)` matches anything that resolves to `n` bytes — the
+///   slot's width is known but its semantic type isn't, so a typed
+///   destination of the same width is a strict refinement.
+/// - Two integer types of the same byte width AND the same
+///   signedness category → compatible. Sign mismatch (`int32_t` vs
+///   `uint32_t`) stays as a cast because narrowing/widening
+///   semantics differ between the two.
+/// - `Pointer(a)` vs `Pointer(b)` → compatible iff the pointee types
+///   are themselves compatible (recursive). `void*` to/from any
+///   other pointer is NOT compatible at this level — that's a
+///   real semantic conversion, not a typedef alias.
+/// - Either side `Named(n)` → resolve via `archives[i].types`,
+///   follow `TypeDefKind::Alias`, recurse. Cap recursion at 8 for
+///   cycle safety. Names not present in any archive but in the
+///   built-in width-alias table (`DWORD` → 4 bytes unsigned, etc.)
+///   resolve to a synthesized primitive — this is what makes
+///   `uint32_t` → `DWORD` cast-free even when the archive doesn't
+///   carry the typedef.
+/// - Anything else → incompatible (be conservative).
+pub fn is_assignment_compatible(
+    src: &crate::ast::CType,
+    dst: &crate::ast::CType,
+    archives: &[Arc<TypeArchive>],
+) -> bool {
+    is_assignment_compatible_inner(src, dst, archives, 0)
+}
+
+fn is_assignment_compatible_inner(
+    src: &crate::ast::CType,
+    dst: &crate::ast::CType,
+    archives: &[Arc<TypeArchive>],
+    depth: u8,
+) -> bool {
+    use crate::ast::CType;
+    if depth >= 8 {
+        return false;
+    }
+    if src == dst {
+        return true;
+    }
+    if matches!(src, CType::Void) || matches!(dst, CType::Void) {
+        return false;
+    }
+    // Resolve named aliases on either side and retry. Built-in
+    // width aliases (DWORD = uint32, HANDLE = void*, etc.) come
+    // back as resolved CTypes and the recursion handles them.
+    if let CType::Named(name) = src {
+        if let Some(resolved) = resolve_named_to_ctype(name, archives, depth + 1) {
+            return is_assignment_compatible_inner(&resolved, dst, archives, depth + 1);
+        }
+    }
+    if let CType::Named(name) = dst {
+        if let Some(resolved) = resolve_named_to_ctype(name, archives, depth + 1) {
+            return is_assignment_compatible_inner(src, &resolved, archives, depth + 1);
+        }
+    }
+    // Unknown(n) matches anything resolving to n bytes — a typed
+    // destination of the same width is a strict refinement of an
+    // unknown-typed source (and vice versa).
+    if let CType::Unknown(n) = src {
+        if let Some(other) = ctype_size_bytes(dst, archives) {
+            return *n == other;
+        }
+    }
+    if let CType::Unknown(n) = dst {
+        if let Some(other) = ctype_size_bytes(src, archives) {
+            return *n == other;
+        }
+    }
+    // Same-signedness, same-width integer pair.
+    if let (Some(a), Some(b)) = (int_signedness_width(src), int_signedness_width(dst)) {
+        return a == b;
+    }
+    // Pointer-to-X compatibility: recurse on the inner type. We
+    // intentionally do NOT treat `void*` as compatible with other
+    // pointer types — that's a real semantic conversion in C.
+    if let (CType::Pointer(a), CType::Pointer(b)) = (src, dst) {
+        return is_assignment_compatible_inner(a, b, archives, depth + 1);
+    }
+    false
+}
+
+/// Resolve a named type to a [`crate::ast::CType`] by following its
+/// archive entry's `Alias` chain. Returns `None` for non-alias
+/// `TypeDef`s (struct/union/enum) and for names that aren't in any
+/// archive but are also not in the built-in width-alias table.
+fn resolve_named_to_ctype(
+    name: &str,
+    archives: &[Arc<TypeArchive>],
+    depth: u8,
+) -> Option<crate::ast::CType> {
+    use crate::ast::CType;
+    if depth >= 8 {
+        return None;
+    }
+    for archive in archives {
+        if let Some(def) = archive.types.get(name) {
+            if let TypeDefKind::Alias(target) = &def.kind {
+                return Some(type_ref_to_ctype(target));
+            }
+            // Non-alias (struct/union/enum) — no further resolution.
+            return None;
+        }
+    }
+    // Built-in width aliases not present in archive `types` maps.
+    // These mirror the recognized name set in `parse_user_ctype` and
+    // `ctype_size_bytes`'s tail fallback so a user retype to `DWORD`
+    // is treated identically to one to `uint32_t`.
+    Some(match name {
+        "char" => CType::Int8,
+        "BYTE" | "byte" => CType::UInt8,
+        "WORD" => CType::UInt16,
+        "DWORD" | "BOOL" => CType::UInt32,
+        "QWORD" | "size_t" | "SIZE_T" => CType::UInt64,
+        // float/double don't have a CType variant; they only matter
+        // for the size table, not for assignment compatibility.
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignednessWidth {
+    Signed(u8),
+    Unsigned(u8),
+}
+
+fn int_signedness_width(ty: &crate::ast::CType) -> Option<SignednessWidth> {
+    use crate::ast::CType;
+    Some(match ty {
+        CType::Int8 => SignednessWidth::Signed(1),
+        CType::Int16 => SignednessWidth::Signed(2),
+        CType::Int32 => SignednessWidth::Signed(4),
+        CType::Int64 => SignednessWidth::Signed(8),
+        CType::UInt8 => SignednessWidth::Unsigned(1),
+        CType::UInt16 => SignednessWidth::Unsigned(2),
+        CType::UInt32 => SignednessWidth::Unsigned(4),
+        CType::UInt64 => SignednessWidth::Unsigned(8),
+        _ => return None,
+    })
+}
+
 fn primitive_to_ctype(p: Primitive) -> crate::ast::CType {
     use crate::ast::CType;
     match p {
@@ -652,6 +923,116 @@ mod tests {
         assert_eq!(which_archive_resolves("_CreateFileA", &archives), Some(0));
         // Truly missing → None.
         assert_eq!(which_archive_resolves("definitely_not_here", &archives), None);
+    }
+
+    /// `DWORD` is a Win32 alias for `uint32_t`. The compatibility
+    /// predicate should resolve the built-in width-alias table and
+    /// treat `uint32_t` as compatible with `DWORD` even when the
+    /// loaded archive doesn't carry an explicit `DWORD` typedef
+    /// (POSIX archives never do).
+    #[test]
+    fn compat_uint32_dword_via_alias() {
+        use crate::ast::CType;
+        let archives: Vec<Arc<TypeArchive>> = vec![Arc::new(sample_archive())];
+        assert!(is_assignment_compatible(
+            &CType::UInt32,
+            &CType::Named("DWORD".to_string()),
+            &archives,
+        ));
+        assert!(is_assignment_compatible(
+            &CType::Named("DWORD".to_string()),
+            &CType::UInt32,
+            &archives,
+        ));
+    }
+
+    /// `HANDLE` is an alias of `void*` in Win32. The sample archive
+    /// carries this typedef explicitly. The predicate should follow
+    /// the alias and report `HANDLE` and `void*` as compatible.
+    #[test]
+    fn compat_handle_void_pointer_via_alias() {
+        use crate::ast::CType;
+        let archives: Vec<Arc<TypeArchive>> = vec![Arc::new(sample_archive())];
+        let void_ptr = CType::Pointer(Box::new(CType::Void));
+        assert!(is_assignment_compatible(
+            &void_ptr,
+            &CType::Named("HANDLE".to_string()),
+            &archives,
+        ));
+    }
+
+    /// `int32_t` and `uint32_t` differ only in signedness. The
+    /// predicate must NOT treat them as compatible — sign matters
+    /// for arithmetic and printf-style formatting, and silently
+    /// dropping the cast would hide a semantic difference.
+    #[test]
+    fn compat_int32_uint32_sign_mismatch() {
+        use crate::ast::CType;
+        let archives: Vec<Arc<TypeArchive>> = vec![];
+        assert!(!is_assignment_compatible(
+            &CType::Int32,
+            &CType::UInt32,
+            &archives,
+        ));
+        assert!(!is_assignment_compatible(
+            &CType::UInt32,
+            &CType::Int32,
+            &archives,
+        ));
+    }
+
+    /// `Unknown(4)` is the default ctype for an undiscovered slot.
+    /// A typed destination of the matching width should be
+    /// compatible — the slot's actual semantic type is just
+    /// "whatever this resolves to," and a same-width primitive is
+    /// the only refinement we can make without more information.
+    #[test]
+    fn compat_unknown_unk32_int32() {
+        use crate::ast::CType;
+        let archives: Vec<Arc<TypeArchive>> = vec![];
+        assert!(is_assignment_compatible(
+            &CType::Unknown(4),
+            &CType::Int32,
+            &archives,
+        ));
+        assert!(is_assignment_compatible(
+            &CType::Int32,
+            &CType::Unknown(4),
+            &archives,
+        ));
+        // Width mismatch should still fail.
+        assert!(!is_assignment_compatible(
+            &CType::Unknown(4),
+            &CType::Int64,
+            &archives,
+        ));
+    }
+
+    /// `ctype_size_bytes` should return:
+    /// - the explicit primitive width for primitives,
+    /// - the resolved alias width for archive-known names,
+    /// - the built-in width for `DWORD`/`BYTE`/etc. even without
+    ///   an archive typedef,
+    /// - `None` for unrecognized opaque names (so the slot
+    ///   subsumption pass falls back to type-only retype).
+    #[test]
+    fn ctype_size_bytes_resolves_known_names() {
+        use crate::ast::CType;
+        let archives: Vec<Arc<TypeArchive>> = vec![Arc::new(sample_archive())];
+        assert_eq!(ctype_size_bytes(&CType::UInt32, &archives), Some(4));
+        assert_eq!(ctype_size_bytes(&CType::Int64, &archives), Some(8));
+        assert_eq!(
+            ctype_size_bytes(&CType::Named("HANDLE".to_string()), &archives),
+            Some(8)
+        );
+        assert_eq!(
+            ctype_size_bytes(&CType::Named("DWORD".to_string()), &archives),
+            Some(4)
+        );
+        assert_eq!(
+            ctype_size_bytes(&CType::Named("FOO_OPAQUE".to_string()), &archives),
+            None
+        );
     }
 
     #[test]

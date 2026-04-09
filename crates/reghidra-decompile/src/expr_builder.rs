@@ -673,44 +673,407 @@ fn type_call_returns_stmt(
 ///
 /// No-op fast path when `variable_types` is empty, so binaries
 /// without any user retypes pay zero cost.
-pub fn apply_user_variable_types(stmts: Vec<Stmt>, ctx: &DecompileContext) -> Vec<Stmt> {
+///
+/// # Slot subsumption (Phase 5c follow-up)
+///
+/// When the user retype targets a stack slot (`arg_8`, `local_4`,
+/// etc.) and the new type is wider than the slot's existing
+/// declared width, this pass calls
+/// [`crate::stackframe::FrameLayout::retype_slot`] which marks
+/// neighboring slots inside `[offset, offset + new_size)` as
+/// subsumed children of the parent. Subsumed children are then
+/// (a) removed as `VarDecl`s from the body, and (b) any
+/// `Expr::Var(child_name)` references in the body are rewritten to
+/// the parent's name. This is the "retyping `arg_8` to `uint64_t`
+/// consumes `arg_c` on x86-32" path. The shadow `subsumed_by` map
+/// makes the merge undoable.
+///
+/// `frame_layout` is taken `&mut` because the subsumption operation
+/// mutates the `slots` and `subsumed_by` maps in place. The caller
+/// (`decompile`) keeps the post-pass layout in
+/// `DecompileOutput.frame_layout` so the GUI sees the merged slot
+/// state.
+pub fn apply_user_variable_types(
+    stmts: Vec<Stmt>,
+    ctx: &DecompileContext,
+    frame_layout: &mut crate::stackframe::FrameLayout,
+) -> Vec<Stmt> {
     if ctx.variable_types.is_empty() {
         return stmts;
     }
-    apply_user_variable_types_inner(stmts, ctx)
+    // Walk the user retypes once and apply slot subsumption to the
+    // frame layout. We collect a (child_name → parent_name) map so
+    // a single body walk can rewrite all references.
+    //
+    // We iterate `frame_layout.slots` to find which user-retype
+    // names correspond to actual stack slots. Order matters when
+    // multiple retypes target overlapping slots — apply in
+    // ascending offset so a wider retype on `arg_8` happens before
+    // any incidental retype on `arg_c` (whose state is being
+    // erased anyway). BTreeMap iteration is sorted; that's the
+    // order we use.
+    let mut rename_map: HashMap<String, String> = HashMap::new();
+    let slot_offsets_by_name: HashMap<String, i64> = frame_layout
+        .slots
+        .iter()
+        .map(|(off, slot)| (slot.name.clone(), *off))
+        .collect();
+    let archives = ctx.type_archives.as_slice();
+    // Collect (offset, parsed_ctype) pairs for user retypes that
+    // correspond to known slots. Process in ascending offset.
+    let mut planned: Vec<(i64, crate::ast::CType)> = ctx
+        .variable_types
+        .iter()
+        .filter_map(|(name, raw)| {
+            let offset = *slot_offsets_by_name.get(name)?;
+            let parsed = crate::ast::parse_user_ctype(raw)?;
+            Some((offset, parsed))
+        })
+        .collect();
+    planned.sort_by_key(|(off, _)| *off);
+    for (offset, new_ctype) in planned {
+        let new_size = crate::type_archive::ctype_size_bytes(&new_ctype, archives);
+        let parent_name = frame_layout
+            .slots
+            .get(&offset)
+            .map(|s| s.name.clone());
+        let subsumed = frame_layout.retype_slot(offset, new_ctype, new_size);
+        if let Some(parent_name) = parent_name {
+            for child_offset in &subsumed {
+                if let Some(child_slot) = frame_layout.slots.get(child_offset) {
+                    rename_map.insert(child_slot.name.clone(), parent_name.clone());
+                }
+            }
+        }
+    }
+    apply_user_variable_types_inner(stmts, ctx, frame_layout, &rename_map)
 }
 
-fn apply_user_variable_types_inner(stmts: Vec<Stmt>, ctx: &DecompileContext) -> Vec<Stmt> {
+fn apply_user_variable_types_inner(
+    stmts: Vec<Stmt>,
+    ctx: &DecompileContext,
+    frame_layout: &crate::stackframe::FrameLayout,
+    rename_map: &HashMap<String, String>,
+) -> Vec<Stmt> {
     stmts
         .into_iter()
-        .map(|s| apply_user_variable_types_stmt(s, ctx))
+        .filter_map(|s| apply_user_variable_types_stmt(s, ctx, frame_layout, rename_map))
         .collect()
 }
 
-fn apply_user_variable_types_stmt(stmt: Stmt, ctx: &DecompileContext) -> Stmt {
+fn apply_user_variable_types_stmt(
+    stmt: Stmt,
+    ctx: &DecompileContext,
+    frame_layout: &crate::stackframe::FrameLayout,
+    rename_map: &HashMap<String, String>,
+) -> Option<Stmt> {
     match stmt {
         Stmt::VarDecl { name, ctype, init } => {
+            // Drop the VarDecl entirely if this name was subsumed
+            // into a wider parent slot — the parent already
+            // declares the merged byte range.
+            if rename_map.contains_key(&name) {
+                return None;
+            }
+            // Honor the user retype on the surviving (parent) slot,
+            // or any non-slot variable that has an override entry.
             let new_ctype = ctx
                 .variable_types
                 .get(&name)
                 .and_then(|s| crate::ast::parse_user_ctype(s))
                 .unwrap_or(ctype);
-            Stmt::VarDecl { name, ctype: new_ctype, init }
+            Some(Stmt::VarDecl { name, ctype: new_ctype, init })
         }
+        Stmt::If { cond, then_body, else_body } => Some(Stmt::If {
+            cond: rewrite_var_refs(cond, rename_map),
+            then_body: apply_user_variable_types_inner(then_body, ctx, frame_layout, rename_map),
+            else_body: apply_user_variable_types_inner(else_body, ctx, frame_layout, rename_map),
+        }),
+        Stmt::While { cond, body } => Some(Stmt::While {
+            cond: rewrite_var_refs(cond, rename_map),
+            body: apply_user_variable_types_inner(body, ctx, frame_layout, rename_map),
+        }),
+        Stmt::Loop { body } => Some(Stmt::Loop {
+            body: apply_user_variable_types_inner(body, ctx, frame_layout, rename_map),
+        }),
+        Stmt::Assign(lhs, rhs) => Some(Stmt::Assign(
+            rewrite_var_refs(lhs, rename_map),
+            rewrite_var_refs(rhs, rename_map),
+        )),
+        Stmt::ExprStmt(e) => Some(Stmt::ExprStmt(rewrite_var_refs(e, rename_map))),
+        Stmt::Return(Some(e)) => Some(Stmt::Return(Some(rewrite_var_refs(e, rename_map)))),
+        other => Some(other),
+    }
+}
+
+/// Rewrite every `Expr::Var(child)` whose name appears in
+/// `rename_map` to `Expr::Var(parent)`. Used by the slot-subsumption
+/// pass so the body refers to the merged parent slot instead of the
+/// no-longer-declared child name.
+fn rewrite_var_refs(expr: Expr, rename_map: &HashMap<String, String>) -> Expr {
+    if rename_map.is_empty() {
+        return expr;
+    }
+    match expr {
+        Expr::Var(name) => {
+            if let Some(parent) = rename_map.get(&name) {
+                Expr::Var(parent.clone())
+            } else {
+                Expr::Var(name)
+            }
+        }
+        Expr::Unary(op, e) => Expr::Unary(op, Box::new(rewrite_var_refs(*e, rename_map))),
+        Expr::Binary(op, a, b) => Expr::Binary(
+            op,
+            Box::new(rewrite_var_refs(*a, rename_map)),
+            Box::new(rewrite_var_refs(*b, rename_map)),
+        ),
+        Expr::Call(callee, args) => Expr::Call(
+            Box::new(rewrite_var_refs(*callee, rename_map)),
+            args.into_iter()
+                .map(|a| rewrite_var_refs(a, rename_map))
+                .collect(),
+        ),
+        Expr::Index(b, i) => Expr::Index(
+            Box::new(rewrite_var_refs(*b, rename_map)),
+            Box::new(rewrite_var_refs(*i, rename_map)),
+        ),
+        Expr::Member(e, f) => Expr::Member(Box::new(rewrite_var_refs(*e, rename_map)), f),
+        Expr::Cast(t, e) => Expr::Cast(t, Box::new(rewrite_var_refs(*e, rename_map))),
+        Expr::Deref(e, t) => Expr::Deref(Box::new(rewrite_var_refs(*e, rename_map)), t),
+        Expr::AddrOf(e) => Expr::AddrOf(Box::new(rewrite_var_refs(*e, rename_map))),
+        Expr::Ternary(c, a, b) => Expr::Ternary(
+            Box::new(rewrite_var_refs(*c, rename_map)),
+            Box::new(rewrite_var_refs(*a, rename_map)),
+            Box::new(rewrite_var_refs(*b, rename_map)),
+        ),
+        other => other,
+    }
+}
+
+/// Post-pass: walk every `Expr::Call(callee, args)` in the body and
+/// strip `Expr::Cast(target, inner)` wrappers from arguments whose
+/// inner expression already has an assignment-compatible type.
+///
+/// Why this pass exists: `annotate_call_args` (in `build_statements`,
+/// Step 1 of the decompile pipeline) wraps every call argument in
+/// `Cast(declared_type, expr)` unconditionally when the callee has a
+/// known prototype. The cast is *visual compensation* for a typing
+/// gap — at Step 1 the arg expressions are still raw register or
+/// constant references with no type information. By Step 6.5 (this
+/// pass) the typing gap may have been closed by:
+///
+/// - The stack-frame pass populating `arg_8.ctype` from the current
+///   function's prototype.
+/// - The user's explicit "Set Type..." retype overriding a slot or
+///   `result` variable.
+/// - `type_call_returns` typing the LHS of a previous call's
+///   assignment from the callee's return type.
+///
+/// When the gap is closed, the cast wrapper is just noise. This pass
+/// detects "the inner expression already has the right type" via
+/// [`crate::type_archive::is_assignment_compatible`] and unwraps the
+/// `Cast` so the rendered output reads
+/// `TerminateProcess(hProc, exit_code)` instead of
+/// `TerminateProcess((HANDLE)hProc, (DWORD)exit_code)`.
+///
+/// What it does NOT do (intentionally):
+///
+/// - Touch casts the IR lifter generates directly (e.g.
+///   `IntZext`/`IntSext` rendered as `Cast(target, inner)`). Those
+///   casts encode a real semantic widening, not a typing gap, and
+///   we don't have an authoritative way here to tell them apart
+///   from prototype-driven casts. The gating is conservative —
+///   only call-arg-position casts are considered.
+/// - Track register types. Only `Var(name)` references whose name
+///   appears as a `VarDecl` in the body get a known source type.
+///   Raw register references (`rax`, `rcx`) keep their casts.
+/// - Strip pointer-to-X / X-to-pointer casts where the inner is
+///   numeric. The compatibility check requires same-shape on both
+///   sides.
+pub fn strip_compatible_call_casts(stmts: Vec<Stmt>, ctx: &DecompileContext) -> Vec<Stmt> {
+    if ctx.type_archives.is_empty() {
+        // No archives loaded → annotate_call_args produced no
+        // casts → nothing for this pass to strip. Fast path keeps
+        // archive-less projects from paying the walk cost.
+        return stmts;
+    }
+    let local_types = collect_local_types(&stmts);
+    strip_compatible_call_casts_inner(stmts, ctx, &local_types)
+}
+
+fn collect_local_types(stmts: &[Stmt]) -> HashMap<String, CType> {
+    let mut map = HashMap::new();
+    walk_var_decls(stmts, &mut |name, ctype| {
+        map.insert(name.to_string(), ctype.clone());
+    });
+    map
+}
+
+fn walk_var_decls<'a>(stmts: &'a [Stmt], f: &mut dyn FnMut(&'a str, &'a CType)) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::VarDecl { name, ctype, .. } => f(name, ctype),
+            Stmt::If { then_body, else_body, .. } => {
+                walk_var_decls(then_body, f);
+                walk_var_decls(else_body, f);
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body } => walk_var_decls(body, f),
+            _ => {}
+        }
+    }
+}
+
+fn strip_compatible_call_casts_inner(
+    stmts: Vec<Stmt>,
+    ctx: &DecompileContext,
+    local_types: &HashMap<String, CType>,
+) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .map(|s| strip_casts_stmt(s, ctx, local_types))
+        .collect()
+}
+
+fn strip_casts_stmt(
+    stmt: Stmt,
+    ctx: &DecompileContext,
+    local_types: &HashMap<String, CType>,
+) -> Stmt {
+    match stmt {
+        Stmt::Assign(lhs, rhs) => Stmt::Assign(
+            strip_casts_expr(lhs, ctx, local_types),
+            strip_casts_expr(rhs, ctx, local_types),
+        ),
+        Stmt::ExprStmt(e) => Stmt::ExprStmt(strip_casts_expr(e, ctx, local_types)),
+        Stmt::Return(Some(e)) => Stmt::Return(Some(strip_casts_expr(e, ctx, local_types))),
+        Stmt::VarDecl { name, ctype, init } => Stmt::VarDecl {
+            name,
+            ctype,
+            init: init.map(|e| strip_casts_expr(e, ctx, local_types)),
+        },
         Stmt::If { cond, then_body, else_body } => Stmt::If {
-            cond,
-            then_body: apply_user_variable_types_inner(then_body, ctx),
-            else_body: apply_user_variable_types_inner(else_body, ctx),
+            cond: strip_casts_expr(cond, ctx, local_types),
+            then_body: strip_compatible_call_casts_inner(then_body, ctx, local_types),
+            else_body: strip_compatible_call_casts_inner(else_body, ctx, local_types),
         },
         Stmt::While { cond, body } => Stmt::While {
-            cond,
-            body: apply_user_variable_types_inner(body, ctx),
+            cond: strip_casts_expr(cond, ctx, local_types),
+            body: strip_compatible_call_casts_inner(body, ctx, local_types),
         },
         Stmt::Loop { body } => Stmt::Loop {
-            body: apply_user_variable_types_inner(body, ctx),
+            body: strip_compatible_call_casts_inner(body, ctx, local_types),
         },
         other => other,
     }
+}
+
+fn strip_casts_expr(
+    expr: Expr,
+    ctx: &DecompileContext,
+    local_types: &HashMap<String, CType>,
+) -> Expr {
+    match expr {
+        Expr::Call(callee, args) => {
+            // Resolve the callee's prototype. If it's not in any
+            // archive, leave the args alone — there are no archive-
+            // driven casts to strip in that case.
+            let proto = if let Expr::Var(callee_name) = callee.as_ref() {
+                ctx.lookup_prototype(callee_name)
+            } else {
+                None
+            };
+            // Recurse into the callee expression first (rare — most
+            // callees are bare Vars — but possible for member calls).
+            let callee = Box::new(strip_casts_expr(*callee, ctx, local_types));
+            let new_args: Vec<Expr> = args
+                .into_iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    // First recurse into the arg so any nested
+                    // calls inside it get processed too.
+                    let arg = strip_casts_expr(arg, ctx, local_types);
+                    let Some(proto) = proto else { return arg };
+                    let Some(proto_arg) = proto.args.get(i) else {
+                        return arg;
+                    };
+                    let dst_ctype =
+                        crate::type_archive::type_ref_to_ctype(&proto_arg.ty);
+                    maybe_strip_cast(arg, &dst_ctype, ctx, local_types)
+                })
+                .collect();
+            Expr::Call(callee, new_args)
+        }
+        Expr::Unary(op, e) => Expr::Unary(op, Box::new(strip_casts_expr(*e, ctx, local_types))),
+        Expr::Binary(op, a, b) => Expr::Binary(
+            op,
+            Box::new(strip_casts_expr(*a, ctx, local_types)),
+            Box::new(strip_casts_expr(*b, ctx, local_types)),
+        ),
+        Expr::Index(b, i) => Expr::Index(
+            Box::new(strip_casts_expr(*b, ctx, local_types)),
+            Box::new(strip_casts_expr(*i, ctx, local_types)),
+        ),
+        Expr::Member(e, f) => Expr::Member(Box::new(strip_casts_expr(*e, ctx, local_types)), f),
+        Expr::Cast(t, e) => Expr::Cast(t, Box::new(strip_casts_expr(*e, ctx, local_types))),
+        Expr::Deref(e, t) => Expr::Deref(Box::new(strip_casts_expr(*e, ctx, local_types)), t),
+        Expr::AddrOf(e) => Expr::AddrOf(Box::new(strip_casts_expr(*e, ctx, local_types))),
+        Expr::Ternary(c, a, b) => Expr::Ternary(
+            Box::new(strip_casts_expr(*c, ctx, local_types)),
+            Box::new(strip_casts_expr(*a, ctx, local_types)),
+            Box::new(strip_casts_expr(*b, ctx, local_types)),
+        ),
+        other => other,
+    }
+}
+
+/// If `arg` is `Expr::Cast(_, inner)` and the inner expression's
+/// known source type is assignment-compatible with `dst_ctype`,
+/// return the unwrapped inner. Otherwise return `arg` unchanged.
+///
+/// Source type resolution:
+///
+/// - `Expr::Var(name)` → `local_types.get(name)`. The walk over
+///   `VarDecl`s populated this map ahead of time.
+/// - `Expr::IntLit(_, ctype)` → the literal already carries its
+///   declared width via [`CType::from_size`].
+/// - Anything else → no known source type, keep the cast.
+fn maybe_strip_cast(
+    arg: Expr,
+    dst_ctype: &CType,
+    ctx: &DecompileContext,
+    local_types: &HashMap<String, CType>,
+) -> Expr {
+    let Expr::Cast(target, inner) = arg else {
+        return arg;
+    };
+    // We only strip a cast whose target matches what
+    // annotate_call_args would have written for this prototype arg.
+    // (If something already wrapped the inner with a different
+    // target, leave it alone — that's a real cast somebody else
+    // chose to insert.)
+    if &target != dst_ctype {
+        return Expr::Cast(target, inner);
+    }
+    // Only consider `Var(name)` sources whose name maps to a known
+    // local type (a `VarDecl` in the body — i.e. a stack slot or a
+    // typed call-return result). Integer literals are intentionally
+    // NOT stripped: a magic constant like `STATUS_FATAL_APP_EXIT
+    // (0xc0000409)` keeps semantic intent from being wrapped in a
+    // `(DWORD)` cast even though the bit pattern is 32 bits wide.
+    // The cast on a literal is annotation; the cast on a variable
+    // is compensation for a typing gap.
+    let src_ctype: Option<CType> = match inner.as_ref() {
+        Expr::Var(name) => local_types.get(name).cloned(),
+        _ => None,
+    };
+    let Some(src_ctype) = src_ctype else {
+        return Expr::Cast(target, inner);
+    };
+    if crate::type_archive::is_assignment_compatible(&src_ctype, dst_ctype, &ctx.type_archives) {
+        return *inner;
+    }
+    Expr::Cast(target, inner)
 }
 
 fn emit_binop(stmts: &mut Vec<Stmt>, dst: &VarNode, a: &VarNode, b: &VarNode, op: BinOp) {
@@ -1460,7 +1823,8 @@ mod tests {
         let mut ctx = empty_ctx();
         ctx.variable_types.insert("arg_8".into(), "HANDLE".into());
         ctx.variable_types.insert("local_4".into(), "char*".into());
-        let out = apply_user_variable_types(stmts, &ctx);
+        let mut layout = crate::stackframe::FrameLayout::default();
+        let out = apply_user_variable_types(stmts, &ctx, &mut layout);
         match &out[0] {
             Stmt::VarDecl { ctype, .. } => {
                 assert!(matches!(ctype, CType::Named(n) if n == "HANDLE"));
@@ -1480,6 +1844,164 @@ mod tests {
         assert!(matches!(&out[2], Stmt::Return(None)));
     }
 
+    /// `strip_compatible_call_casts` should remove a
+    /// `Cast(HANDLE, Var("arg_8"))` from a call argument list when
+    /// the body's `VarDecl arg_8` declares the slot as `HANDLE` and
+    /// the prototype's first arg type is also `HANDLE`. This is
+    /// the user-retype-flow-through use case in its purest form,
+    /// driven directly against the AST so the lifter's
+    /// register-intermediate behavior doesn't interfere.
+    #[test]
+    fn strip_pass_removes_matching_cast() {
+        use crate::ast::CType;
+        use crate::type_archive::{
+            ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn, Primitive,
+            TypeArchive, TypeDef, TypeDefKind, TypeRef,
+        };
+        use std::collections::HashMap as Map;
+        use std::sync::Arc;
+
+        let handle_named = CType::Named("HANDLE".to_string());
+        // Body: `HANDLE arg_8; CloseHandle((HANDLE)arg_8); return;`
+        let body = vec![
+            Stmt::VarDecl {
+                name: "arg_8".into(),
+                ctype: handle_named.clone(),
+                init: None,
+            },
+            Stmt::ExprStmt(Expr::Call(
+                Box::new(Expr::Var("CloseHandle".into())),
+                vec![Expr::Cast(
+                    handle_named.clone(),
+                    Box::new(Expr::Var("arg_8".into())),
+                )],
+            )),
+            Stmt::Return(None),
+        ];
+        // Archive: CloseHandle takes HANDLE; HANDLE = void* alias.
+        let mut functions: Map<String, ArchiveFn> = Map::new();
+        functions.insert(
+            "CloseHandle".into(),
+            ArchiveFn {
+                name: "CloseHandle".into(),
+                args: vec![ArchiveArg {
+                    name: "hObject".into(),
+                    ty: TypeRef::Named("HANDLE".into()),
+                }],
+                return_type: TypeRef::Primitive(Primitive::Bool),
+                calling_convention: CallingConvention::Stdcall,
+                is_variadic: false,
+            },
+        );
+        let mut types = Map::new();
+        types.insert(
+            "HANDLE".into(),
+            TypeDef {
+                name: "HANDLE".into(),
+                kind: TypeDefKind::Alias(TypeRef::Pointer(Box::new(TypeRef::Primitive(
+                    Primitive::Void,
+                )))),
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".into(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types,
+        });
+        let mut ctx = empty_ctx();
+        ctx.function_names.insert(0x2000, "CloseHandle".into());
+        ctx.type_archives = vec![archive];
+
+        let out = strip_compatible_call_casts(body, &ctx);
+        // The Cast wrapper should be gone — the call's arg is now
+        // a bare `Expr::Var("arg_8")`.
+        match &out[1] {
+            Stmt::ExprStmt(Expr::Call(_, args)) => {
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    Expr::Var(n) => assert_eq!(n, "arg_8"),
+                    other => panic!("expected bare Var arg, got {other:?}"),
+                }
+            }
+            other => panic!("expected Call ExprStmt, got {other:?}"),
+        }
+    }
+
+    /// Strip pass should NOT remove a cast when the source type is
+    /// incompatible with the destination. Pin the negative case so
+    /// a regression that always strips can't sneak in.
+    #[test]
+    fn strip_pass_keeps_mismatched_cast() {
+        use crate::ast::CType;
+        use crate::type_archive::{
+            ArgType as ArchiveArg, CallingConvention, FunctionType as ArchiveFn, Primitive,
+            TypeArchive, TypeDef, TypeDefKind, TypeRef,
+        };
+        use std::collections::HashMap as Map;
+        use std::sync::Arc;
+
+        let body = vec![
+            // Source variable declared as int32_t — incompatible
+            // with HANDLE (which resolves to void*).
+            Stmt::VarDecl {
+                name: "arg_8".into(),
+                ctype: CType::Int32,
+                init: None,
+            },
+            Stmt::ExprStmt(Expr::Call(
+                Box::new(Expr::Var("CloseHandle".into())),
+                vec![Expr::Cast(
+                    CType::Named("HANDLE".into()),
+                    Box::new(Expr::Var("arg_8".into())),
+                )],
+            )),
+        ];
+        let mut functions: Map<String, ArchiveFn> = Map::new();
+        functions.insert(
+            "CloseHandle".into(),
+            ArchiveFn {
+                name: "CloseHandle".into(),
+                args: vec![ArchiveArg {
+                    name: "hObject".into(),
+                    ty: TypeRef::Named("HANDLE".into()),
+                }],
+                return_type: TypeRef::Primitive(Primitive::Bool),
+                calling_convention: CallingConvention::Stdcall,
+                is_variadic: false,
+            },
+        );
+        let mut types = Map::new();
+        types.insert(
+            "HANDLE".into(),
+            TypeDef {
+                name: "HANDLE".into(),
+                kind: TypeDefKind::Alias(TypeRef::Pointer(Box::new(TypeRef::Primitive(
+                    Primitive::Void,
+                )))),
+            },
+        );
+        let archive = Arc::new(TypeArchive {
+            name: "test".into(),
+            version: crate::type_archive::ARCHIVE_VERSION,
+            functions,
+            types,
+        });
+        let mut ctx = empty_ctx();
+        ctx.type_archives = vec![archive];
+
+        let out = strip_compatible_call_casts(body, &ctx);
+        match &out[1] {
+            Stmt::ExprStmt(Expr::Call(_, args)) => match &args[0] {
+                Expr::Cast(t, _) => {
+                    assert!(matches!(t, CType::Named(n) if n == "HANDLE"))
+                }
+                other => panic!("expected Cast preserved, got {other:?}"),
+            },
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
     /// Empty override string should be treated as "no override" —
     /// the pass should leave the existing ctype untouched. (The
     /// Project::set_variable_type method also removes empty
@@ -1495,7 +2017,8 @@ mod tests {
         }];
         let mut ctx = empty_ctx();
         ctx.variable_types.insert("arg_8".into(), "   ".into());
-        let out = apply_user_variable_types(stmts, &ctx);
+        let mut layout = crate::stackframe::FrameLayout::default();
+        let out = apply_user_variable_types(stmts, &ctx, &mut layout);
         match &out[0] {
             Stmt::VarDecl { ctype, .. } => assert!(matches!(ctype, CType::UInt32)),
             other => panic!("got {other:?}"),

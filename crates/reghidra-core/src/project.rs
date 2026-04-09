@@ -393,6 +393,66 @@ impl Project {
         }
     }
 
+    /// Build the menu of type names the user can pick when
+    /// retyping a local. Returns a sorted, deduped vector of:
+    ///
+    /// - C primitive names (`void`, `int8_t`..`uint64_t`,
+    ///   `char`, `int`, `size_t`, `bool`, `float`, `double`)
+    /// - Every `TypeDef` key from each currently-enabled archive's
+    ///   `types` map (struct/union/enum/typedef names)
+    /// - A small static list of common Win32 / POSIX width aliases
+    ///   that may not be present in the archive's `types` map
+    ///   (`HANDLE`, `DWORD`, `BOOL`, `LPCSTR`, `BYTE`, `WORD`, etc.)
+    ///
+    /// The list is recomputed on each call. The cost is dominated
+    /// by walking each archive's `types` map (low thousands of
+    /// entries even on the largest archives) and is negligible
+    /// against the rest of the popup-render path. Caching is left
+    /// for a follow-up if profiling proves it warranted.
+    pub fn known_type_names(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // C primitives — match what `parse_user_ctype` can resolve
+        // without going through the Named fallback.
+        for p in [
+            "void", "bool", "char", "int", "short", "long", "int8_t", "uint8_t", "int16_t",
+            "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t", "size_t", "float",
+            "double",
+        ] {
+            names.insert(p.to_string());
+        }
+        // Common width aliases that user retypes commonly produce
+        // and that the assignment-compat predicate's built-in
+        // fallback recognizes. Mirrors the tail branches of
+        // `type_archive::ctype_size_bytes` and
+        // `resolve_named_to_ctype` so the dropdown surfaces
+        // every name those functions know about.
+        for w in [
+            "HANDLE", "BOOL", "BYTE", "WORD", "DWORD", "QWORD", "LPCSTR", "LPSTR",
+            "LPCWSTR", "LPWSTR", "LPVOID", "PVOID", "HWND", "HMODULE", "HINSTANCE",
+            "FILE", "wchar_t",
+        ] {
+            names.insert(w.to_string());
+        }
+        // Walk every loaded type archive (regardless of
+        // enable-state — the user may pick a name that lives in a
+        // currently-disabled archive, and the resulting Named
+        // ctype will still render correctly even if the strip
+        // pass can't resolve it). Iterating both enabled and
+        // disabled keeps the picker stable across enable-toggles.
+        for archive in &self.type_archives {
+            for type_name in archive.types.keys() {
+                // Filter out leaked debug-format names from older
+                // walker runs (`Type::Never { ... }`). The same
+                // defensive filter lives in `type_ref_to_ctype`.
+                if type_name.starts_with("Type::") || type_name.contains('{') {
+                    continue;
+                }
+                names.insert(type_name.clone());
+            }
+        }
+        names.into_iter().collect()
+    }
+
     /// Recompute per-source hit counts on the current binary.
     ///
     /// **FLIRT hits** are attributed via `Function::matched_signature_db`
