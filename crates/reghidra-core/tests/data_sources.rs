@@ -27,6 +27,41 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
+fn pe_fixture_credits_windows_archive_for_iat_imports() {
+    // Regression: in the first cut of the data sources panel,
+    // `windows-x86` reported zero hits on the PE fixture even though
+    // 70 Win32 API imports (`CreateFileA`, `GetLastError`, ...) lived
+    // in `binary.import_addr_map` and resolved cleanly through the
+    // archive. The undercount happened because `recompute_hit_counts`
+    // walked only `analysis.functions`, and on PE x86 IAT slot
+    // addresses don't coincide with any function entry, so
+    // `resolve_import_functions` never copied import names onto an
+    // analysis entry. This test pins the post-fix behavior:
+    // import_addr_map names contribute to type archive hit counts.
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+        .expect("open PE fixture");
+
+    let win_idx = project
+        .type_archives
+        .iter()
+        .position(|a| a.name.starts_with("windows-"))
+        .expect("PE fixture should load a windows-* archive");
+    let win_hits = project.type_archive_hits[win_idx];
+
+    // Lower bound is intentionally loose. The fixture currently has
+    // 70 unique Win32 API imports per the diagnostic walk; demanding
+    // >= 30 leaves slack for fixture churn while still catching a
+    // regression to zero or single digits.
+    assert!(
+        win_hits >= 30,
+        "windows archive '{}' has only {win_hits} hits — expected >= 30 \
+         from PE fixture's IAT imports. import_addr_map values may not \
+         be flowing into recompute_hit_counts.",
+        project.type_archives[win_idx].name
+    );
+}
+
+#[test]
 fn pe_fixture_reports_nonzero_type_archive_hits() {
     let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
