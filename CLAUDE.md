@@ -42,7 +42,10 @@ reghidra/
 │   │   ├── undo.rs                     # Undo/redo history (Action enum)
 │   │   ├── help.rs                     # In-app help overlay
 │   │   └── views/                      # disasm, decompile, hex, cfg, ir, xrefs, side_panel
-│   └── reghidra-cli/                   # Headless CLI
+│   └── reghidra-cli/                   # Headless CLI (clap subcommands, --json, sessions)
+│       ├── src/main.rs                 # all subcommand defs + dispatchers
+│       ├── tests/cli.rs                # end-to-end via CARGO_BIN_EXE_reghidra-cli
+│       └── README.md                   # full usage walkthrough for AI agents / scripts
 ├── signatures/                         # Bundled FLIRT .sig (rizinorg/sigdb + IDA packs)
 │   └── {elf,pe}/{arm,mips,sh,x86}/{32,64}/
 ├── types/                              # Bundled .rtarch type archives (Phase 5c)
@@ -192,6 +195,33 @@ pub enum TypeRef {
   - **Action queue pattern.** Both render functions buffer toggle requests into a local `Vec<Action>` during the `egui::Grid::show` immutable borrow, then drain after the closure ends to perform the `&mut project` mutations. Replaces PR 6's snapshot-up-front pattern, which didn't compose with the lazy-load case (we need to call the `&mut self` setter in response to a checkbox click against an unloaded entry whose state isn't even in the snapshot vec).
   - **Tests.** Two new tests in `data_sources.rs`: `enumeration_lists_archives_not_auto_loaded` pins that `available_archive_stems` includes `windows-x64`/`windows-arm64` on the PE x86 fixture even though only `windows-x86` auto-loads; `lazy_load_type_archive_by_stem_appends_and_resolves` pins that `load_type_archive_by_stem` appends to all three parallel vecs, marks the new entry enabled, and is idempotent on a second call.
   - **Roadmap follow-up.** This PR makes intelligent FLIRT pre-selection (Phase 5c remaining work item #4) cleanly implementable: the panel's lazy-load path is the user's escape hatch when the heuristic guesses wrong. Until that lands the auto-load set is still "every sig in the format/arch subdir" — same as before — just now the wrong-toolchain ones are visibly *checked* instead of silently parsed.
+- **PR 7 follow-ups — panel polish + identity fix.** Five fixes driven by user feedback on PR 7's first cut.
+  - **Friendly library names in the FLIRT tree.** `flirt::parse_header` promoted to `pub` (header-only parse, no trie walk) and called at enumeration time in `bundled_sigs::walk_sigs`. `AvailableSig` now carries `library_name: Option<String>` + `n_functions: Option<u32>`. The panel renders the friendly name (`Visual Studio 2010 Professional`) with the file stem trailing in dim monospace — no more staring at `vc32_14` wondering what toolchain you're looking at.
+  - **Status bar → modal.** The bottom status bar's signature count label is now a clickable `egui::Label` with `PointingHand` cursor and an "Open Loaded Data Sources" hover tooltip. Click sets `data_sources_open = true` via a deferred `let mut open_data_sources` local so the `&project` borrow inside the status bar closure doesn't collide with the `&mut self` mutation.
+  - **`(subdir, stem)` identity across arches.** Before this fix, bundled FLIRT was joined on the stem alone, which collapsed `VisualStudio2017.sig` across `pe/x86/32`, `pe/arm/32`, and `pe/arm/64` into a single entry — disabling the ARM 32 row would silently disable ARM 64 and x86 32 too. Now every layer keys on the full (subdir, stem) pair: `BundledSig` carries `subdir: &'static str`, `bundled_sigs::load_bundled_signatures` writes `source_path = bundled:<subdir>/<stem>`, `Project::load_bundled_sig`'s idempotency check joins on the full source_path, and the panel's `loaded_by_key: HashMap<(String, String), usize>` is populated by `rsplit_once('/')`. Hit attribution via `Function::matched_signature_db` still works in practice because only the matching-arch sig produces non-zero matches.
+  - **Cross-leaf column alignment via `ui.set_width`.** The 3-level tree had each leaf's `egui::Grid` sizing its columns to its own content, drifting 20+ pixels between adjacent 32-bit and 64-bit leaves. Fix: pre-measure max widths once across every FLIRT row using `ui.fonts(|f| f.layout_no_wrap(...))`, then wrap each cell in `ui.scope(|ui| { ui.set_width(widths.X); ... })`. `set_width` (both min AND max) is critical: `set_min_width` alone lets a `right_to_left` sub-layout grab `available_width()` from the ScrollArea and slip the trailing column under the scroll bar. Numeric cells additionally use `right_to_left` *inside* the bounded scope for proper digit hugging without overflowing.
+  - **Session persistence for data source state.** `Session` gained `data_source_overrides: Vec<DataSourceOverride>`, `loaded_archive_stems: Vec<String>`, `loaded_bundled_sigs: Vec<(String, String)>`, and `loaded_user_sig_paths: Vec<PathBuf>` (all `#[serde(default)]` for forward compat). `Project::to_session()` / `apply_session()` extracted as the single source of truth, used by `save_session`, `load_session`, and `open_with_session`. Replay order: opt-in lazy loads (archives → bundled sigs → user sigs via `load_signatures`) → enable/disable overrides → one re-analysis (if any FLIRT toggle changed) or hit recompute. The user sig replay path closed a real data-loss bug the CLI test caught: before this fix, `reghidra-cli sources load-user-sig` would save the db into the session but the next CLI invocation would silently drop it because nothing knew to re-read the file.
+
+### Phase 5d — Headless CLI [DONE]
+Full subcommand-based `reghidra-cli` with feature parity for everything content/state-related the GUI exposes. Motivated by "AI agents and Python scripts need a way to drive reghidra without the GUI or a long-running daemon."
+
+**Surface.** `clap` derive-based subcommands split into four groups:
+  - **Inspection (read-only)**: `info`, `functions` (with `--source`/`--name`/`--limit`), `sections`, `strings` (with `--pattern`), `xrefs --to/--from`, `decompile`, `disasm` (defaults to entry point), `ir`, `cfg`, `find`.
+  - **Data sources**: `sources list/flirt/archives/resolve/enable/disable/load-archive/load-sig/load-user-sig`. `--available` on `flirt`/`archives` enumerates embedded-but-unloaded entries (the CLI equivalent of the panel's lazy-load opt-in). `resolve NAME` calls `which_archive_resolves` against the effective archive set, mirroring the decompiler's lookup chain — agents use this to answer "why isn't this prototype typed?"
+  - **Annotations**: `annotate comment/rename/rename-label/rename-var/retype/bookmark/unbookmark/list`.
+  - **Sessions**: `session init/show/refresh`. Refresh re-runs analysis and re-applies overrides — useful when the pipeline changes under an existing session.
+
+**Contract.** Documented in `crates/reghidra-cli/README.md`:
+  - Every read command takes `--binary PATH` OR `--session FILE`. The session form replays data-source overrides + lazy loads via `Project::open_with_session`.
+  - **Mutating commands require `--session` and error out if missing.** Silent drops are worse than no parity.
+  - Every read command supports `--json`. JSON shapes are pinned by the tests in `crates/reghidra-cli/tests/cli.rs` — adding fields is non-breaking, renaming/removing requires a CLI version bump.
+  - Addresses accept `0x` hex or decimal via `parse_address`.
+
+**Tests.** `crates/reghidra-cli/tests/cli.rs` runs `CARGO_BIN_EXE_reghidra-cli` as a subprocess for every subcommand — 25 tests covering the full surface. Every `annotate` subcommand has its own round-trip test (`annotate_comment_round_trips`, `annotate_rename_label_round_trips`, `annotate_rename_var_round_trips`, `annotate_retype_round_trips`, `annotate_bookmark_and_unbookmark`), every `sources` mutation kind has its own toggle test (`sources_enable_disable_bundled_round_trips`, `sources_load_archive_persists`, `sources_load_sig_persists_unloaded_subdir`, `sources_load_user_sig_and_toggle`). `session_refresh_preserves_overrides` verifies the session round-trip via `session refresh`. `mutating_commands_require_session` verifies the error-out contract.
+
+**Session persistence for data sources** lives in the PR 7 follow-ups section above and is the core enabler — without persisted overrides, a CLI mutation would vanish on exit and the feature would be pointless.
+
+**Caveats.** Each invocation re-opens and re-analyzes the binary. For iterative workflows against the same binary this is 3-10 seconds of wasted work per call. The deferred `reghidra-cli serve` daemon (Phase 6-adjacent roadmap) with JSON-RPC over stdio is the follow-up if iteration becomes the bottleneck.
 
 **Hit-rate state.** Post-4f on PE fixture: 9/102 FLIRT-named CRT functions match an archive (`_fclose`, `_printf`, `_exit`, `__exit`, `__close`, `__commit`, ...). The 93 misses are MSVC CRT internals (`__SEH_prolog4`, `__EH4_*`, `__lockexit`, `__mtinit`, `__getptd`, `__fclose_nolock`, ...) absent from windows-sys, libc src/windows, libc src/unix, AND Rizin SDB. Fundamentally needs licensable MS UCRT headers or PDB overlay.
 
@@ -220,7 +250,7 @@ pub enum TypeRef {
 ### Phase 6 — Extensibility + Scripting
 - [ ] Lua scripting API
 - [ ] Rust trait-based plugin system
-- [ ] Headless CLI mode for batch analysis
+- [ ] `reghidra-cli serve` daemon (JSON-RPC over stdio) — avoids re-analyzing the binary on every CLI call for iterative AI-agent workflows
 
 ## Build & Packaging
 - Workspace version lives in `Cargo.toml` under `[workspace.package]` — bump once, all crates inherit.
@@ -232,6 +262,15 @@ pub enum TypeRef {
 - `thiserror` for library errors, `anyhow` in CLI/GUI.
 - Public APIs have doc comments. Test with real binaries in `tests/fixtures/`.
 - Never mention AI tools in commit messages or code comments.
+
+## CLI parity rule
+Anything the GUI can show or change about a binary's analysis state must have a `reghidra-cli` equivalent. The CLI is the contract for AI agents and Python scripts; if a feature exists only in egui, it doesn't exist as far as automation is concerned. Specifically:
+- New `Project` field exposed by the GUI? Add a corresponding CLI accessor (read), and if the GUI lets the user toggle it, add a `sources`/`annotate` subcommand to mutate it.
+- Mutating CLI commands MUST require `--session <FILE>` and persist via `Project::save_session`. A mutation that vanishes on exit is worse than no mutation.
+- Every mutation must round-trip through `Session` serde — extend `Session` (with `#[serde(default)]` on new fields for forward compat) and update `Project::to_session` / `apply_session`.
+- Read commands take either `--binary` OR `--session`; the session form replays data-source overrides via `Project::open_with_session`.
+- All read commands support `--json`. The shape is the contract — adding fields is non-breaking, renaming/removing fields requires a CLI version bump. The integration tests in `crates/reghidra-cli/tests/cli.rs` pin the shape.
+- Update `crates/reghidra-cli/README.md` when adding a subcommand. The README is what the AI agent reads when it gets confused.
 
 ## Decompile output style
 Follows the UChicago C style guide (https://uchicago-cs.github.io/student-resource-guide/style-guide/c.html):

@@ -40,3 +40,4 @@ flate2 = "1"
 include_dir = "0.7"
 msvc-demangler = "0.11"
 postcard = { version = "1", features = ["alloc"], default-features = false }
+clap = { version = "4", features = ["derive"] }
