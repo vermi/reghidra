@@ -8,8 +8,13 @@ use super::flirt::FlirtDatabase;
 /// Embedded signature files from https://github.com/rizinorg/sigdb
 static SIGNATURES_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../signatures");
 
-/// A bundled signature entry: name and raw .sig bytes.
+/// A bundled signature entry: subdir + name + raw .sig bytes. The
+/// subdir is part of the identity because the same stem can appear
+/// under multiple arch directories (e.g. `VisualStudio2017.sig`
+/// shipped for `pe/x86/32`, `pe/arm/32`, `pe/arm/64`) and they must
+/// be addressable independently for the per-source toggle UI.
 struct BundledSig {
+    subdir: &'static str,
     name: &'static str,
     data: &'static [u8],
 }
@@ -51,6 +56,86 @@ fn is_rizinorg_sig(stem: &str) -> bool {
         || matches!(stem, "masm32" | "mingw32-zlib" | "winsdk")
 }
 
+/// Metadata for an embedded `.sig` file: its tree-relative subdir
+/// (`pe/x86/32`, `elf/arm/64`, ...), filename stem (`vc32_14`,
+/// `ubuntu-libc6`), and the friendly library name + function count
+/// pulled from the .sig header. Library name is `None` only if the
+/// header parse failed — which would also kill the full parse, so
+/// such sigs would be unusable anyway.
+///
+/// The header parse is cheap (no trie walk), so we eat the cost at
+/// enumeration time to make the Loaded Data Sources tree show
+/// `Visual Studio 2010 Professional` instead of `vc32_14`.
+#[derive(Debug, Clone)]
+pub struct AvailableSig {
+    pub subdir: String,
+    pub stem: String,
+    pub library_name: Option<String>,
+    pub n_functions: Option<u32>,
+}
+
+/// Walk the entire embedded `signatures/` tree and return one
+/// [`AvailableSig`] per `.sig` file. Two-level recursion (format then
+/// arch then bitness); the rizinorg/sigdb layout is fixed at three
+/// levels deep so an explicit walker is fine. Sorted by `(subdir,
+/// stem)` for stable display order.
+pub fn available_sigs() -> Vec<AvailableSig> {
+    let mut out = Vec::new();
+    walk_sigs(&SIGNATURES_DIR, &mut out);
+    out.sort_by(|a, b| a.subdir.cmp(&b.subdir).then(a.stem.cmp(&b.stem)));
+    out
+}
+
+fn walk_sigs(dir: &Dir<'static>, out: &mut Vec<AvailableSig>) {
+    for f in dir.files() {
+        let path = f.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sig") {
+            continue;
+        }
+        let Some(parent) = path.parent().and_then(|p| p.to_str()) else {
+            continue;
+        };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Header parse failures get logged but still emit a row, so
+        // the tree doesn't silently drop a sig over a parser bug; the
+        // panel will fall back to the file stem.
+        let (library_name, n_functions) = match super::flirt::parse_header(f.contents()) {
+            Ok((hdr, _)) => (Some(hdr.name), Some(hdr.n_functions)),
+            Err(e) => {
+                log::debug!("sig header parse failed for {}: {e}", path.display());
+                (None, None)
+            }
+        };
+        out.push(AvailableSig {
+            subdir: parent.to_string(),
+            stem: stem.to_string(),
+            library_name,
+            n_functions,
+        });
+    }
+    for sub in dir.dirs() {
+        walk_sigs(sub, out);
+    }
+}
+
+/// Look up an embedded `.sig` file's raw bytes by `(subdir, stem)`.
+/// Used by `Project` to lazy-load a sig the user toggled on from the
+/// Loaded Data Sources panel without re-walking the whole tree.
+pub fn embedded_sig_bytes(subdir: &str, stem: &str) -> Option<&'static [u8]> {
+    let path = format!("{subdir}/{stem}.sig");
+    SIGNATURES_DIR.get_file(&path).map(|f| f.contents())
+}
+
+/// Subdir paths that the format/arch heuristic would auto-load. Used by
+/// `Project` to seed the enabled flags for embedded sigs at open time:
+/// sigs whose subdir is in this list start checked, everything else
+/// starts unchecked. Mirrors [`sig_subdirs`].
+pub fn auto_load_subdirs(format: BinaryFormat, arch: Architecture) -> Vec<&'static str> {
+    sig_subdirs(format, arch)
+}
+
 /// Collect all bundled .sig file entries matching the given format and architecture.
 ///
 /// Order: IDA-sourced sigs first, rizinorg/sigdb sigs last. This gives IDA
@@ -70,6 +155,7 @@ fn collect_bundled_sigs(format: BinaryFormat, arch: Architecture) -> Vec<Bundled
                             .and_then(|s| s.to_str())
                             .unwrap_or("unknown");
                         let entry = BundledSig {
+                            subdir: subdir_path,
                             name,
                             data: file.contents(),
                         };
@@ -106,7 +192,11 @@ pub fn load_bundled_signatures(
     let mut loaded_names = Vec::new();
 
     for entry in &entries {
-        let source_path = PathBuf::from(format!("bundled:{}", entry.name));
+        // `bundled:<subdir>/<stem>` — subdir is essential because the
+        // same stem can come from multiple arch dirs and the GUI keys
+        // its loaded-vs-available join on the full (subdir, stem) pair.
+        let source_path =
+            PathBuf::from(format!("bundled:{}/{}", entry.subdir, entry.name));
         match FlirtDatabase::parse(entry.data, source_path) {
             Ok(db) => {
                 loaded_names.push(entry.name);
@@ -177,7 +267,7 @@ mod tests {
             let entries = collect_bundled_sigs(fmt, arch);
             assert!(!entries.is_empty(), "no bundled sigs for {fmt:?}/{arch:?}");
             for e in &entries {
-                let src = PathBuf::from(format!("bundled:{}", e.name));
+                let src = PathBuf::from(format!("bundled:{}/{}", e.subdir, e.name));
                 FlirtDatabase::parse(e.data, src)
                     .unwrap_or_else(|err| panic!("sig {} failed: {err}", e.name));
             }

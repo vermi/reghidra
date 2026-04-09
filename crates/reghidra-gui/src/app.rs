@@ -1000,6 +1000,7 @@ impl eframe::App for ReghidraApp {
         });
 
         // Status bar
+        let mut open_data_sources = false;
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some(ref project) = self.project {
@@ -1022,10 +1023,27 @@ impl eframe::App for ReghidraApp {
                         project.binary.strings.len(),
                     ));
 
-                    // Show signature status
+                    // Show signature status. Clickable so the user can
+                    // jump straight from "N signatures matched" into
+                    // the Loaded Data Sources panel and see *which*
+                    // dbs/archives are responsible.
                     if let Some(ref status) = project.sig_status {
                         ui.separator();
-                        ui.colored_label(self.theme.func_header_sig, status);
+                        let resp = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(status)
+                                        .color(self.theme.func_header_sig),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Open Loaded Data Sources");
+                        if resp.hovered() {
+                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.clicked() {
+                            open_data_sources = true;
+                        }
                     }
 
                     // Show bookmark indicator
@@ -1064,6 +1082,9 @@ impl eframe::App for ReghidraApp {
                 }
             });
         });
+        if open_data_sources {
+            self.data_sources_open = true;
+        }
 
         if self.project.is_none() {
             // Load logo texture on first frame

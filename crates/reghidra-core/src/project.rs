@@ -121,6 +121,19 @@ pub struct Project {
     pub bundled_db_hits: Vec<usize>,
     pub user_db_hits: Vec<usize>,
     pub type_archive_hits: Vec<usize>,
+    /// Every embedded type archive stem the binary ships with, regardless
+    /// of whether the format/arch heuristic auto-loaded it. Used by the
+    /// Loaded Data Sources panel so the user can see (and opt into) the
+    /// archives that weren't auto-selected — e.g. on a PE x86 binary,
+    /// `windows-x64` and `windows-arm64` are listed but unchecked, and
+    /// checking one lazy-loads it via [`Self::set_type_archive_loaded`].
+    /// Sorted lexicographically for stable display.
+    pub available_archive_stems: Vec<String>,
+    /// Every embedded `.sig` file the binary ships with, regardless of
+    /// whether the format/arch subdir match auto-loaded it. Same opt-in
+    /// flow as [`Self::available_archive_stems`]. Grouped by `subdir` in
+    /// the panel for the platform/arch tree view.
+    pub available_bundled_sigs: Vec<bundled_sigs::AvailableSig>,
 }
 
 impl Project {
@@ -170,6 +183,9 @@ impl Project {
         let bundled_db_hits = vec![0; bundled_dbs.len()];
         let type_archive_hits = vec![0; type_archives.len()];
 
+        let available_archive_stems = type_archive::available_stems();
+        let available_bundled_sigs = bundled_sigs::available_sigs();
+
         let mut project = Self {
             binary,
             instructions,
@@ -190,6 +206,8 @@ impl Project {
             bundled_db_hits,
             user_db_hits: Vec::new(),
             type_archive_hits,
+            available_archive_stems,
+            available_bundled_sigs,
         };
         project.recompute_hit_counts();
         Ok(project)
@@ -293,6 +311,68 @@ impl Project {
             }
             *slot = enabled;
             self.reanalyze_with_current_signatures();
+        }
+    }
+
+    /// Lazy-load an embedded type archive by stem (one of
+    /// [`Self::available_archive_stems`]) and append it to
+    /// [`Self::type_archives`] enabled. No-op if already loaded. Returns
+    /// the index in `type_archives` (newly assigned or existing) so the
+    /// caller can flip enable state.
+    ///
+    /// "Loaded but disabled" is the resting state when the user unchecks
+    /// an entry — we keep the parsed archive in memory so re-checking
+    /// is instant. Memory cost is bounded by the embedded `types/` tree
+    /// (~25 MB total even if everything ends up loaded), well below
+    /// what would justify a drop-and-reparse churn cycle.
+    pub fn load_type_archive_by_stem(&mut self, stem: &str) -> Option<usize> {
+        if let Some(idx) = self.type_archives.iter().position(|a| a.name == stem) {
+            return Some(idx);
+        }
+        let archive = type_archive::load_embedded(stem)?;
+        let idx = self.type_archives.len();
+        self.type_archives.push(archive);
+        self.type_archive_enabled.push(true);
+        self.type_archive_hits.push(0);
+        self.recompute_hit_counts();
+        Some(idx)
+    }
+
+    /// Lazy-load an embedded FLIRT signature database by `(subdir, stem)`
+    /// and append it to [`Self::bundled_dbs`] enabled. No-op if already
+    /// loaded. Returns the new (or existing) index. Triggers a full
+    /// re-analysis since FLIRT renames bake in at analysis time.
+    ///
+    /// Identity is `(subdir, stem)`, NOT just stem — the same stem can
+    /// ship under multiple arch dirs (e.g. `VisualStudio2017` exists
+    /// in `pe/x86/32`, `pe/arm/32`, `pe/arm/64`) and they must remain
+    /// independently toggleable. The `source_path` encodes both as
+    /// `bundled:<subdir>/<stem>` so the GUI's loaded-by-key map can
+    /// recover both halves.
+    pub fn load_bundled_sig(&mut self, subdir: &str, stem: &str) -> Option<usize> {
+        let key = format!("bundled:{subdir}/{stem}");
+        if let Some(idx) = self
+            .bundled_dbs
+            .iter()
+            .position(|db| db.source_path.to_str() == Some(key.as_str()))
+        {
+            return Some(idx);
+        }
+        let bytes = bundled_sigs::embedded_sig_bytes(subdir, stem)?;
+        let source_path = PathBuf::from(&key);
+        match FlirtDatabase::parse(bytes, source_path) {
+            Ok(db) => {
+                let idx = self.bundled_dbs.len();
+                self.bundled_dbs.push(db);
+                self.bundled_db_enabled.push(true);
+                self.bundled_db_hits.push(0);
+                self.reanalyze_with_current_signatures();
+                Some(idx)
+            }
+            Err(e) => {
+                log::warn!("Failed to lazy-load bundled sig '{stem}': {e}");
+                None
+            }
         }
     }
 
@@ -701,7 +781,87 @@ impl Project {
 
     /// Save user annotations to a session file.
     pub fn save_session(&self, path: &Path) -> Result<(), CoreError> {
-        let session = Session {
+        let session = self.to_session();
+        let json = serde_json::to_string_pretty(&session)
+            .map_err(|e| CoreError::Other(format!("Failed to serialize session: {e}")))?;
+        std::fs::write(path, json)
+            .map_err(|e| CoreError::Other(format!("Failed to write session file: {e}")))?;
+        Ok(())
+    }
+
+    /// Build a [`Session`] snapshot of the current project state.
+    /// Mostly used by [`Self::save_session`], exposed publicly so the
+    /// CLI can manipulate sessions without re-deriving the field set.
+    pub fn to_session(&self) -> Session {
+        // Snapshot per-source enable flags as overrides. We persist EVERY
+        // current flag (not just diffs from default) because the auto-load
+        // default depends on the binary's format/arch and the embedded
+        // sig set, both of which can change between runs. Storing the full
+        // snapshot makes the persisted state self-describing.
+        let mut overrides = Vec::new();
+        for (i, db) in self.bundled_dbs.iter().enumerate() {
+            let key = db
+                .source_path
+                .to_str()
+                .and_then(|s| s.strip_prefix("bundled:"))
+                .unwrap_or("")
+                .to_string();
+            if !key.is_empty() {
+                overrides.push(DataSourceOverride {
+                    kind: "bundled".to_string(),
+                    key,
+                    enabled: self.bundled_db_enabled.get(i).copied().unwrap_or(true),
+                });
+            }
+        }
+        for (i, db) in self.user_dbs.iter().enumerate() {
+            overrides.push(DataSourceOverride {
+                kind: "user".to_string(),
+                key: db.header.name.clone(),
+                enabled: self.user_db_enabled.get(i).copied().unwrap_or(true),
+            });
+        }
+        for (i, archive) in self.type_archives.iter().enumerate() {
+            overrides.push(DataSourceOverride {
+                kind: "archive".to_string(),
+                key: archive.name.clone(),
+                enabled: self.type_archive_enabled.get(i).copied().unwrap_or(true),
+            });
+        }
+
+        // Persist every currently-loaded archive stem, including ones the
+        // user lazy-loaded after open. On replay, `apply_data_source_state`
+        // iterates this list and calls `load_type_archive_by_stem` so the
+        // opt-in selection survives a session round-trip.
+        let loaded_archive_stems = self
+            .type_archives
+            .iter()
+            .map(|a| a.name.clone())
+            .collect();
+
+        // Same logic for bundled FLIRT: anything currently loaded that
+        // isn't part of the auto-load set was either auto-selected for a
+        // different (subdir, stem) or explicitly opted in. We replay the
+        // full set so behavior is reproducible.
+        let loaded_bundled_sigs = self
+            .bundled_dbs
+            .iter()
+            .filter_map(|db| {
+                let s = db.source_path.to_str()?.strip_prefix("bundled:")?;
+                let (subdir, stem) = s.rsplit_once('/')?;
+                Some((subdir.to_string(), stem.to_string()))
+            })
+            .collect();
+
+        // User-loaded sigs come from filesystem paths via
+        // `load_signatures`; persist the paths so reload can replay them.
+        let loaded_user_sig_paths: Vec<PathBuf> = self
+            .user_dbs
+            .iter()
+            .map(|db| db.source_path.clone())
+            .collect();
+
+        Session {
             version: 1,
             binary_path: self.binary.info.path.clone(),
             comments: self.comments.clone(),
@@ -718,12 +878,11 @@ impl Project {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-        };
-        let json = serde_json::to_string_pretty(&session)
-            .map_err(|e| CoreError::Other(format!("Failed to serialize session: {e}")))?;
-        std::fs::write(path, json)
-            .map_err(|e| CoreError::Other(format!("Failed to write session file: {e}")))?;
-        Ok(())
+            data_source_overrides: overrides,
+            loaded_archive_stems,
+            loaded_bundled_sigs,
+            loaded_user_sig_paths,
+        }
     }
 
     /// Load a session file and apply saved annotations to this project.
@@ -732,13 +891,114 @@ impl Project {
             .map_err(|e| CoreError::Other(format!("Failed to read session file: {e}")))?;
         let session: Session = serde_json::from_str(&data)
             .map_err(|e| CoreError::Other(format!("Failed to parse session file: {e}")))?;
+        self.apply_session(session);
+        Ok(())
+    }
+
+    /// Apply a deserialized [`Session`] to this project. Mutates in place.
+    /// Used by both [`Self::load_session`] and [`Self::open_with_session`]
+    /// so the replay logic for data source overrides only lives once.
+    pub fn apply_session(&mut self, session: Session) {
         self.comments = session.comments;
         self.renamed_functions = session.renamed_functions;
         self.bookmarks = session.bookmarks;
         self.label_names = session.label_names;
         self.variable_names = session.variable_names.into_iter().collect();
         self.variable_types = session.variable_types.into_iter().collect();
-        Ok(())
+
+        // Replay opt-in lazy loads first so the override pass below has
+        // something to find. Failures (missing stems, parse errors) are
+        // logged but don't abort the load — sessions should be tolerant
+        // of moving fixtures around.
+        for stem in &session.loaded_archive_stems {
+            if !self.type_archives.iter().any(|a| a.name == *stem) {
+                if self.load_type_archive_by_stem(stem).is_none() {
+                    log::warn!("session: failed to lazy-load type archive '{stem}'");
+                }
+            }
+        }
+        for (subdir, stem) in &session.loaded_bundled_sigs {
+            let key = format!("bundled:{subdir}/{stem}");
+            let already_loaded = self
+                .bundled_dbs
+                .iter()
+                .any(|db| db.source_path.to_str() == Some(key.as_str()));
+            if !already_loaded {
+                if self.load_bundled_sig(subdir, stem).is_none() {
+                    log::warn!(
+                        "session: failed to lazy-load bundled sig '{subdir}/{stem}'"
+                    );
+                }
+            }
+        }
+        // Replay user-loaded sigs by re-reading them from disk. Missing
+        // files are warned + skipped so a moved/renamed sig doesn't
+        // poison the whole session.
+        for path in &session.loaded_user_sig_paths {
+            let already_loaded = self
+                .user_dbs
+                .iter()
+                .any(|db| db.source_path == *path);
+            if !already_loaded {
+                if let Err(e) = self.load_signatures(path) {
+                    log::warn!(
+                        "session: failed to reload user sig '{}': {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        // Apply per-source enable overrides. Anything not mentioned keeps
+        // its post-open default (enabled).
+        let mut needs_reanalysis = false;
+        for ov in &session.data_source_overrides {
+            match ov.kind.as_str() {
+                "bundled" => {
+                    let target_path = format!("bundled:{}", ov.key);
+                    if let Some(idx) = self
+                        .bundled_dbs
+                        .iter()
+                        .position(|db| db.source_path.to_str() == Some(target_path.as_str()))
+                    {
+                        if let Some(slot) = self.bundled_db_enabled.get_mut(idx) {
+                            if *slot != ov.enabled {
+                                *slot = ov.enabled;
+                                needs_reanalysis = true;
+                            }
+                        }
+                    }
+                }
+                "user" => {
+                    if let Some(idx) =
+                        self.user_dbs.iter().position(|db| db.header.name == ov.key)
+                    {
+                        if let Some(slot) = self.user_db_enabled.get_mut(idx) {
+                            if *slot != ov.enabled {
+                                *slot = ov.enabled;
+                                needs_reanalysis = true;
+                            }
+                        }
+                    }
+                }
+                "archive" => {
+                    if let Some(idx) =
+                        self.type_archives.iter().position(|a| a.name == ov.key)
+                    {
+                        if let Some(slot) = self.type_archive_enabled.get_mut(idx) {
+                            *slot = ov.enabled;
+                        }
+                    }
+                }
+                other => log::warn!("session: unknown data source kind '{other}'"),
+            }
+        }
+
+        if needs_reanalysis {
+            self.reanalyze_with_current_signatures();
+        } else {
+            self.recompute_hit_counts();
+        }
     }
 
     /// Open a binary and restore a session file's annotations.
@@ -749,12 +1009,7 @@ impl Project {
             .map_err(|e| CoreError::Other(format!("Failed to parse session file: {e}")))?;
 
         let mut project = Self::open(&session.binary_path)?;
-        project.comments = session.comments;
-        project.renamed_functions = session.renamed_functions;
-        project.bookmarks = session.bookmarks;
-        project.label_names = session.label_names;
-        project.variable_names = session.variable_names.into_iter().collect();
-        project.variable_types = session.variable_types.into_iter().collect();
+        project.apply_session(session);
         Ok(project)
     }
 }
@@ -776,4 +1031,39 @@ pub struct Session {
     /// `variable_names`; values are free-form type strings.
     #[serde(default)]
     pub variable_types: Vec<((u64, String), String)>,
+    /// Per-data-source enable overrides. Persisted as `(kind, key, enabled)`
+    /// triples so the file remains schema-stable when entries are added or
+    /// reordered between runs. `kind` is one of `bundled` / `user` / `archive`.
+    /// `key` is `<subdir>/<stem>` for bundled FLIRT, the stem (header name)
+    /// for user FLIRT, and the archive stem for type archives. Entries that
+    /// don't appear in this list inherit the auto-loaded default (enabled).
+    /// Used by both the GUI's Loaded Data Sources panel and `reghidra-cli
+    /// sources enable/disable`.
+    #[serde(default)]
+    pub data_source_overrides: Vec<DataSourceOverride>,
+    /// Lazy-loaded type archives that the user opted into via the panel
+    /// or `reghidra-cli sources load-archive`. Replayed on session load
+    /// so opt-in archives don't disappear on reopen.
+    #[serde(default)]
+    pub loaded_archive_stems: Vec<String>,
+    /// Lazy-loaded bundled FLIRT sigs that the user opted into. Each
+    /// entry is a `(subdir, stem)` pair so the same stem under multiple
+    /// arch dirs stays independently addressable.
+    #[serde(default)]
+    pub loaded_bundled_sigs: Vec<(String, String)>,
+    /// Filesystem paths of `.sig` files the user loaded via
+    /// `load_signatures` (CLI: `sources load-user-sig`, GUI: File →
+    /// Load Signatures). Replayed on session reload so user sigs
+    /// survive across CLI invocations. Missing files are warned and
+    /// skipped — sessions should be tolerant of moving fixtures.
+    #[serde(default)]
+    pub loaded_user_sig_paths: Vec<PathBuf>,
+}
+
+/// One persisted enable/disable override. See [`Session::data_source_overrides`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataSourceOverride {
+    pub kind: String,
+    pub key: String,
+    pub enabled: bool,
 }
