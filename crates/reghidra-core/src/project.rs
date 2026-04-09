@@ -362,12 +362,26 @@ impl Project {
         let source_path = PathBuf::from(&key);
         match FlirtDatabase::parse(bytes, source_path) {
             Ok(db) => {
-                let idx = self.bundled_dbs.len();
-                self.bundled_dbs.push(db);
-                self.bundled_db_enabled.push(true);
-                self.bundled_db_hits.push(0);
+                // Insert at the FRONT of `bundled_dbs` so the newly
+                // lazy-loaded sig gets first-match priority on the
+                // next re-analyze pass. The user explicitly clicked
+                // "enable" on this sig in the Loaded Data Sources
+                // panel (or called `sources load-sig` via the CLI);
+                // giving it priority over the auto-loaded set matches
+                // intent and — combined with the longer-match-wins
+                // fix in `apply_signatures` — means a lazy-loaded
+                // legacy sig can actually claim its CRT thunks
+                // instead of being blocked by a generic modern sig
+                // that happened to match a short `jmp` pattern first.
+                //
+                // `bundled_db_enabled` and `bundled_db_hits` have
+                // parallel indexing with `bundled_dbs`, so they get
+                // the same insertion.
+                self.bundled_dbs.insert(0, db);
+                self.bundled_db_enabled.insert(0, true);
+                self.bundled_db_hits.insert(0, 0);
                 self.reanalyze_with_current_signatures();
-                Some(idx)
+                Some(0)
             }
             Err(e) => {
                 log::warn!("Failed to lazy-load bundled sig '{stem}': {e}");

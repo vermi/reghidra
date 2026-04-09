@@ -53,6 +53,16 @@ pub struct Theme {
     pub hex_ascii: Color32,
     pub column_header: Color32,
 
+    // Disasm minimap lane (left of the disasm scroll area). Each function
+    // entry is plotted as a horizontal stripe at its proportional row
+    // position; the color encodes which data sources contributed metadata
+    // for that function. `both` indicates a single address that has both
+    // a FLIRT signature match and a type archive prototype hit.
+    pub minimap_bg: Color32,
+    pub minimap_sig: Color32,
+    pub minimap_type: Color32,
+    pub minimap_both: Color32,
+
     // Decompile — token-level syntax categories. The highlighter walks
     // each rendered line and classifies every lexeme into one of these
     // buckets so that keywords, types, numbers, strings, operators, and
@@ -147,6 +157,11 @@ impl Theme {
             hex_ascii: Color32::from_rgb(180, 220, 180),
             column_header: Color32::from_rgb(150, 150, 150),
 
+            minimap_bg: Color32::from_rgb(24, 24, 30),
+            minimap_sig: Color32::from_rgb(0, 188, 212),    // teal — matches func_header_sig
+            minimap_type: Color32::from_rgb(143, 188, 187), // Nord Frost — matches decomp_type
+            minimap_both: Color32::from_rgb(255, 200, 60),  // gold — matches func_header
+
             // Dark: Nord-inspired palette. Each category is visually
             // distinct at small font sizes while still sitting in the
             // same harmony family (cool blues + muted earth tones). The
@@ -235,6 +250,11 @@ impl Theme {
             hex_bytes: Color32::from_rgb(50, 50, 50),
             hex_ascii: Color32::from_rgb(30, 120, 30),
             column_header: Color32::from_rgb(100, 100, 100),
+
+            minimap_bg: Color32::from_rgb(232, 232, 238),
+            minimap_sig: Color32::from_rgb(0, 140, 160),
+            minimap_type: Color32::from_rgb(42, 161, 152),
+            minimap_both: Color32::from_rgb(180, 130, 0),
 
             // Light: same categories mapped to Solarized-style darker
             // hues so they read clearly on a pale background. Punctuation

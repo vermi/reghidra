@@ -64,7 +64,7 @@ fn smoke_decompile_all(fixture_name: &str) {
 
 #[test]
 fn pe_fixture_decompile_smoke() {
-    smoke_decompile_all("pe-mingw32-strip.exe");
+    smoke_decompile_all("wildfire-test-pe-file.exe");
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn macos_fixture_decompile_smoke() {
 /// which only worked on the previous hand-crafted PE fixture.
 #[test]
 fn pe_fixture_iat_call_decompiles_cleanly() {
-    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     // Snapshot the import names so we can check decomp output
@@ -178,12 +178,17 @@ fn pe_fixture_iat_call_decompiles_cleanly() {
 /// expanded to whatever the new fixture happens to expose.
 #[test]
 fn pe_fixture_flirt_crt_picks_up_typed_signature() {
-    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
+    // The `wildfire-test-pe-file.exe` fixture is MSVC-built, so the
+    // CRT wrappers come from the Visual Studio 2008/2010 FLIRT sigs
+    // (rizin.re) plus the `Microsoft VisualC 2-14/net runtime` IDA
+    // sig — all of which auto-load on PE x86. The canaries below
+    // cover names those sigs actually produce on this binary.
     let canaries: &[&str] = &[
-        "_realloc", "_srand", "_malloc", "_fclose", "_printf",
-        "_exit", "__exit", "__close",
+        "__realloc_crt", "_malloc", "_realloc", "_free",
+        "__fclose_nolock", "_fclose", "_printf", "_exit",
     ];
     let mut checked = 0usize;
     let mut typed = 0usize;

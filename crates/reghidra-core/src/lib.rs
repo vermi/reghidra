@@ -24,3 +24,10 @@ pub use reghidra_decompile::AnnotatedLine;
 pub mod ast {
     pub use reghidra_decompile::ast::{parse_user_ctype, CType};
 }
+
+/// Re-export of the decompile-layer type-archive helpers so GUI / CLI
+/// consumers can call `which_archive_resolves` (the precedence-aware
+/// lookup) without a direct `reghidra-decompile` dependency.
+pub mod type_archive {
+    pub use reghidra_decompile::type_archive::{which_archive_resolves, TypeArchive};
+}

@@ -56,6 +56,83 @@ fn is_rizinorg_sig(stem: &str) -> bool {
         || matches!(stem, "masm32" | "mingw32-zlib" | "winsdk")
 }
 
+/// Returns true if a sig filename (stem) is for a legacy toolchain
+/// that the user is unlikely to encounter in modern targets. Legacy
+/// sigs still ship in the embedded tree and are visible in the
+/// Loaded Data Sources panel, but they are NOT auto-loaded at
+/// `Project::open` time: the user must opt in via the panel's
+/// lazy-load path. This cuts open-time memory and parse cost
+/// dramatically on PE x86 — the Borland/Watcom/Delphi/MFC2-era sigs
+/// account for the bulk of the old `collect_bundled_sigs` working
+/// set even though they almost never produce matches on binaries
+/// built in the last 15 years.
+///
+/// Categories currently flagged:
+///
+/// - **Borland / Delphi / C++ Builder** — `b*`, `bds*`, `bh32*`,
+///   `c4vcl`, `d3-d5vcl`, `bcb*`, `bdsboost`, `bdsext`
+/// - **Watcom** — `wa32rt*`, `og70`
+/// - **Digital Mars / Symantec** — `dm*`, `sm32rw32`, `omvc60`,
+///   `osc60`, `otp60`
+/// - **Old MFC (MSVC 2.x, 1990s)** — `msmfc2`, `msmfc2d`, `msmfc2u`
+/// - **VisualAge C++ / Intel C / misc 1990s linkers** — `vac35wc`,
+///   `iclapp`, `iclmat`, `ulink`, `mccor`, `vireobc`, `vireoms`
+///
+/// Flipping a sig between modern and legacy is a one-line edit to
+/// this function. If a category later becomes relevant (e.g. we
+/// start caring about Delphi targets), moving it out of the legacy
+/// set re-enables auto-load without any file moves or session
+/// migration.
+pub fn is_legacy_sig(stem: &str) -> bool {
+    // Borland / Delphi / C++ Builder. `bcb*` catches `bcb5rt` etc.
+    // `bds*` catches `bds`, `bds2006`, `bds40`, `bds8*`, `bdsboost`,
+    // `bdsext`. `b32vcl`, `b5132mfc`, `b532cgw` all start with `b`
+    // followed by a digit — we gate on that to avoid false-positives
+    // against sigs like `bridge*` or anything else modern that may
+    // start with `b`.
+    if stem.starts_with("bds")
+        || stem.starts_with("bcb")
+        || stem.starts_with("bh32")
+        || stem.starts_with("c4vcl")
+        || matches!(stem, "d3vcl" | "d4vcl" | "d5vcl")
+    {
+        return true;
+    }
+    if let Some(rest) = stem.strip_prefix('b') {
+        if rest
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    // Watcom
+    if stem.starts_with("wa32rt") || stem == "og70" {
+        return true;
+    }
+    // Digital Mars / Symantec
+    if stem.starts_with("dm")
+        || matches!(stem, "sm32rw32" | "omvc60" | "osc60" | "otp60")
+    {
+        return true;
+    }
+    // Old MFC (MSVC 2.x)
+    if matches!(stem, "msmfc2" | "msmfc2d" | "msmfc2u") {
+        return true;
+    }
+    // VisualAge / Intel C / misc 1990s linkers
+    if matches!(
+        stem,
+        "vac35wc" | "iclapp" | "iclmat" | "iclapp64" | "iclmat64" | "ulink"
+            | "ulink64" | "mccor" | "vireobc" | "vireoms"
+    ) {
+        return true;
+    }
+    false
+}
+
 /// Metadata for an embedded `.sig` file: its tree-relative subdir
 /// (`pe/x86/32`, `elf/arm/64`, ...), filename stem (`vc32_14`,
 /// `ubuntu-libc6`), and the friendly library name + function count
@@ -72,6 +149,12 @@ pub struct AvailableSig {
     pub stem: String,
     pub library_name: Option<String>,
     pub n_functions: Option<u32>,
+    /// True when this sig's stem matches [`is_legacy_sig`]. Legacy
+    /// sigs are enumerated and shown in the Loaded Data Sources
+    /// panel but are NOT auto-loaded at project open time. Computed
+    /// once at walk time so the panel doesn't have to re-check on
+    /// every render.
+    pub is_legacy: bool,
 }
 
 /// Walk the entire embedded `signatures/` tree and return one
@@ -113,6 +196,7 @@ fn walk_sigs(dir: &Dir<'static>, out: &mut Vec<AvailableSig>) {
             stem: stem.to_string(),
             library_name,
             n_functions,
+            is_legacy: is_legacy_sig(stem),
         });
     }
     for sub in dir.dirs() {
@@ -154,6 +238,18 @@ fn collect_bundled_sigs(format: BinaryFormat, arch: Architecture) -> Vec<Bundled
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("unknown");
+                        // Legacy sigs (Borland/Watcom/Digital Mars/
+                        // old MFC/etc.) are enumerated by
+                        // `available_sigs` and reachable via the
+                        // panel's lazy-load path, but they are not
+                        // auto-loaded. Skipping them here cuts the
+                        // open-time FLIRT working set substantially
+                        // on PE x86 targets where ~half the shipped
+                        // sigs are pre-2010 toolchains that almost
+                        // never match modern binaries.
+                        if is_legacy_sig(name) {
+                            continue;
+                        }
                         let entry = BundledSig {
                             subdir: subdir_path,
                             name,

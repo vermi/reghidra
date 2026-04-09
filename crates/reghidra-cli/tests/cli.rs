@@ -46,7 +46,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn pe() -> PathBuf {
-    fixture("pe-mingw32-strip.exe")
+    fixture("wildfire-test-pe-file.exe")
 }
 
 fn run_json(args: &[&str]) -> Value {
@@ -351,9 +351,8 @@ fn functions_command_with_filters() {
         }
     }
 
-    // --name filter. `realloc` appears as `_realloc` etc. via FLIRT
-    // on the PE fixture (the wrapper is called from many call sites,
-    // so the FLIRT match shows up many times across the binary).
+    // --name filter. `realloc` appears as `__realloc_crt` via the
+    // Microsoft Visual Studio 2008 FLIRT sig on the PE fixture.
     let v = run_json(&[
         "functions",
         "--binary",
@@ -513,9 +512,8 @@ fn decompile_disasm_ir_cfg_for_entry_point() {
 #[test]
 fn find_command_substring_match() {
     let pe = pe();
-    // `realloc` appears as `_realloc` etc. via FLIRT-named CRT
-    // wrappers on the PE fixture, and also reliably appears in any
-    // string referencing the malloc family.
+    // `realloc` appears as `__realloc_crt` via the Microsoft Visual
+    // Studio 2008 FLIRT sig on the PE fixture.
     let v = run_json(&[
         "find",
         "--binary",
