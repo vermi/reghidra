@@ -8,8 +8,13 @@ use super::flirt::FlirtDatabase;
 /// Embedded signature files from https://github.com/rizinorg/sigdb
 static SIGNATURES_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../signatures");
 
-/// A bundled signature entry: name and raw .sig bytes.
+/// A bundled signature entry: subdir + name + raw .sig bytes. The
+/// subdir is part of the identity because the same stem can appear
+/// under multiple arch directories (e.g. `VisualStudio2017.sig`
+/// shipped for `pe/x86/32`, `pe/arm/32`, `pe/arm/64`) and they must
+/// be addressable independently for the per-source toggle UI.
 struct BundledSig {
+    subdir: &'static str,
     name: &'static str,
     data: &'static [u8],
 }
@@ -52,14 +57,21 @@ fn is_rizinorg_sig(stem: &str) -> bool {
 }
 
 /// Metadata for an embedded `.sig` file: its tree-relative subdir
-/// (`pe/x86/32`, `elf/arm/64`, ...) and its stem (`vc32_14`, `ubuntu-libc6`).
-/// Used by the Loaded Data Sources panel to enumerate every shipped sig
-/// without parsing any of them; the panel groups by `subdir` for the
-/// platform/arch tree view.
+/// (`pe/x86/32`, `elf/arm/64`, ...), filename stem (`vc32_14`,
+/// `ubuntu-libc6`), and the friendly library name + function count
+/// pulled from the .sig header. Library name is `None` only if the
+/// header parse failed — which would also kill the full parse, so
+/// such sigs would be unusable anyway.
+///
+/// The header parse is cheap (no trie walk), so we eat the cost at
+/// enumeration time to make the Loaded Data Sources tree show
+/// `Visual Studio 2010 Professional` instead of `vc32_14`.
 #[derive(Debug, Clone)]
 pub struct AvailableSig {
     pub subdir: String,
     pub stem: String,
+    pub library_name: Option<String>,
+    pub n_functions: Option<u32>,
 }
 
 /// Walk the entire embedded `signatures/` tree and return one
@@ -86,9 +98,21 @@ fn walk_sigs(dir: &Dir<'static>, out: &mut Vec<AvailableSig>) {
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
+        // Header parse failures get logged but still emit a row, so
+        // the tree doesn't silently drop a sig over a parser bug; the
+        // panel will fall back to the file stem.
+        let (library_name, n_functions) = match super::flirt::parse_header(f.contents()) {
+            Ok((hdr, _)) => (Some(hdr.name), Some(hdr.n_functions)),
+            Err(e) => {
+                log::debug!("sig header parse failed for {}: {e}", path.display());
+                (None, None)
+            }
+        };
         out.push(AvailableSig {
             subdir: parent.to_string(),
             stem: stem.to_string(),
+            library_name,
+            n_functions,
         });
     }
     for sub in dir.dirs() {
@@ -131,6 +155,7 @@ fn collect_bundled_sigs(format: BinaryFormat, arch: Architecture) -> Vec<Bundled
                             .and_then(|s| s.to_str())
                             .unwrap_or("unknown");
                         let entry = BundledSig {
+                            subdir: subdir_path,
                             name,
                             data: file.contents(),
                         };
@@ -167,7 +192,11 @@ pub fn load_bundled_signatures(
     let mut loaded_names = Vec::new();
 
     for entry in &entries {
-        let source_path = PathBuf::from(format!("bundled:{}", entry.name));
+        // `bundled:<subdir>/<stem>` — subdir is essential because the
+        // same stem can come from multiple arch dirs and the GUI keys
+        // its loaded-vs-available join on the full (subdir, stem) pair.
+        let source_path =
+            PathBuf::from(format!("bundled:{}/{}", entry.subdir, entry.name));
         match FlirtDatabase::parse(entry.data, source_path) {
             Ok(db) => {
                 loaded_names.push(entry.name);
@@ -238,7 +267,7 @@ mod tests {
             let entries = collect_bundled_sigs(fmt, arch);
             assert!(!entries.is_empty(), "no bundled sigs for {fmt:?}/{arch:?}");
             for e in &entries {
-                let src = PathBuf::from(format!("bundled:{}", e.name));
+                let src = PathBuf::from(format!("bundled:{}/{}", e.subdir, e.name));
                 FlirtDatabase::parse(e.data, src)
                     .unwrap_or_else(|err| panic!("sig {} failed: {err}", e.name));
             }
