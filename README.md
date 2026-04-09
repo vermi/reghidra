@@ -22,7 +22,9 @@ A Rust-based reverse engineering framework reimplementing Ghidra's core function
 - **Interactive GUI** — synchronized disassembly, decompile, hex, CFG, IR, and xref views with dark/light themes
 - **Keyboard-driven workflow** — Vim-like navigation, command palette (Cmd+K), fuzzy search, inline annotations, undo/redo
 - **Right-click context menu** — navigate, comment, rename (functions, labels, variables), bookmark, show xrefs, copy address/string from any symbol across disasm, decompile, xrefs, and side panels
-- **Session persistence** — comments, function/label/variable renames, variable type overrides, and bookmarks are saved to and loaded from session files
+- **Session persistence** — comments, function/label/variable renames, variable type overrides, bookmarks, and data-source enable overrides are saved to and loaded from session files
+- **Loaded Data Sources panel** — View → Loaded Data Sources surfaces every bundled and user FLIRT database plus every loaded type archive, with hit counts on the current binary, a 3-level nested tree of the embedded sig set (format → arch → bits), and lazy-load opt-in for anything the format/arch auto-selection skipped. Library names are pulled from each `.sig` header so the tree shows "Visual Studio 2010 Professional" instead of `vc32_14`. Clicking the signature status in the bottom status bar opens the panel.
+- **Headless CLI** — `reghidra-cli` is a full subcommand-based interface with feature parity for everything content/state-related the GUI exposes: function listing, decompile, disasm, IR, CFG, xrefs, strings, sections, find, data-source view/select, annotations (comment/rename/retype/bookmark), and session management. Every read command supports `--json` for AI-agent and Python-script consumers, every mutation persists to a session file, and the full surface is tested end-to-end. See [`crates/reghidra-cli/README.md`](crates/reghidra-cli/README.md) for the walkthrough.
 
 ## Installation
 
@@ -56,7 +58,8 @@ cargo build --release
 cargo run --release -p reghidra-gui
 
 # Run the CLI
-cargo run --release -p reghidra-cli -- <binary>
+cargo run --release -p reghidra-cli -- info --binary <binary>
+cargo run --release -p reghidra-cli -- --help
 ```
 
 ## Keyboard Shortcuts
@@ -94,7 +97,7 @@ reghidra/
 
 - [ ] Lua scripting API
 - [ ] Rust trait-based plugin system
-- [ ] Headless CLI batch analysis mode
+- [ ] Long-running `reghidra-cli serve` daemon (JSON-RPC over stdio) for iterated AI-agent use without re-analysis on every call
 
 ## License
 
