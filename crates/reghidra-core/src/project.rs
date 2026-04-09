@@ -121,6 +121,19 @@ pub struct Project {
     pub bundled_db_hits: Vec<usize>,
     pub user_db_hits: Vec<usize>,
     pub type_archive_hits: Vec<usize>,
+    /// Every embedded type archive stem the binary ships with, regardless
+    /// of whether the format/arch heuristic auto-loaded it. Used by the
+    /// Loaded Data Sources panel so the user can see (and opt into) the
+    /// archives that weren't auto-selected — e.g. on a PE x86 binary,
+    /// `windows-x64` and `windows-arm64` are listed but unchecked, and
+    /// checking one lazy-loads it via [`Self::set_type_archive_loaded`].
+    /// Sorted lexicographically for stable display.
+    pub available_archive_stems: Vec<String>,
+    /// Every embedded `.sig` file the binary ships with, regardless of
+    /// whether the format/arch subdir match auto-loaded it. Same opt-in
+    /// flow as [`Self::available_archive_stems`]. Grouped by `subdir` in
+    /// the panel for the platform/arch tree view.
+    pub available_bundled_sigs: Vec<bundled_sigs::AvailableSig>,
 }
 
 impl Project {
@@ -170,6 +183,9 @@ impl Project {
         let bundled_db_hits = vec![0; bundled_dbs.len()];
         let type_archive_hits = vec![0; type_archives.len()];
 
+        let available_archive_stems = type_archive::available_stems();
+        let available_bundled_sigs = bundled_sigs::available_sigs();
+
         let mut project = Self {
             binary,
             instructions,
@@ -190,6 +206,8 @@ impl Project {
             bundled_db_hits,
             user_db_hits: Vec::new(),
             type_archive_hits,
+            available_archive_stems,
+            available_bundled_sigs,
         };
         project.recompute_hit_counts();
         Ok(project)
@@ -293,6 +311,56 @@ impl Project {
             }
             *slot = enabled;
             self.reanalyze_with_current_signatures();
+        }
+    }
+
+    /// Lazy-load an embedded type archive by stem (one of
+    /// [`Self::available_archive_stems`]) and append it to
+    /// [`Self::type_archives`] enabled. No-op if already loaded. Returns
+    /// the index in `type_archives` (newly assigned or existing) so the
+    /// caller can flip enable state.
+    ///
+    /// "Loaded but disabled" is the resting state when the user unchecks
+    /// an entry — we keep the parsed archive in memory so re-checking
+    /// is instant. Memory cost is bounded by the embedded `types/` tree
+    /// (~25 MB total even if everything ends up loaded), well below
+    /// what would justify a drop-and-reparse churn cycle.
+    pub fn load_type_archive_by_stem(&mut self, stem: &str) -> Option<usize> {
+        if let Some(idx) = self.type_archives.iter().position(|a| a.name == stem) {
+            return Some(idx);
+        }
+        let archive = type_archive::load_embedded(stem)?;
+        let idx = self.type_archives.len();
+        self.type_archives.push(archive);
+        self.type_archive_enabled.push(true);
+        self.type_archive_hits.push(0);
+        self.recompute_hit_counts();
+        Some(idx)
+    }
+
+    /// Lazy-load an embedded FLIRT signature database by `(subdir, stem)`
+    /// and append it to [`Self::bundled_dbs`] enabled. No-op if already
+    /// loaded. Returns the new (or existing) index. Triggers a full
+    /// re-analysis since FLIRT renames bake in at analysis time.
+    pub fn load_bundled_sig(&mut self, subdir: &str, stem: &str) -> Option<usize> {
+        if let Some(idx) = self.bundled_dbs.iter().position(|db| db.header.name == stem) {
+            return Some(idx);
+        }
+        let bytes = bundled_sigs::embedded_sig_bytes(subdir, stem)?;
+        let source_path = PathBuf::from(format!("bundled:{stem}"));
+        match FlirtDatabase::parse(bytes, source_path) {
+            Ok(db) => {
+                let idx = self.bundled_dbs.len();
+                self.bundled_dbs.push(db);
+                self.bundled_db_enabled.push(true);
+                self.bundled_db_hits.push(0);
+                self.reanalyze_with_current_signatures();
+                Some(idx)
+            }
+            Err(e) => {
+                log::warn!("Failed to lazy-load bundled sig '{stem}': {e}");
+                None
+            }
         }
     }
 

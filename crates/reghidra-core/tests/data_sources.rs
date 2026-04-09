@@ -153,6 +153,60 @@ fn disabling_type_archive_recomputes_hit_counts() {
 }
 
 #[test]
+fn enumeration_lists_archives_not_auto_loaded() {
+    // Regression: PE x86 fixture only auto-loads `windows-x86`, but the
+    // panel should still surface `windows-x64` and `windows-arm64` as
+    // available-but-unloaded so the user can opt in. If
+    // `available_archive_stems` regresses to just the loaded set, the
+    // opt-in flow disappears and the panel becomes lossy again.
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+        .expect("open PE fixture");
+
+    let stems = &project.available_archive_stems;
+    assert!(
+        stems.iter().any(|s| s == "windows-x64"),
+        "windows-x64 should appear in available stems even when not auto-loaded; got {stems:?}"
+    );
+    assert!(
+        stems.iter().any(|s| s == "windows-arm64"),
+        "windows-arm64 should appear in available stems even when not auto-loaded; got {stems:?}"
+    );
+
+    // The auto-loaded one is in the loaded set; the others are not.
+    let loaded: Vec<&str> = project.type_archives.iter().map(|a| a.name.as_str()).collect();
+    assert!(loaded.contains(&"windows-x86"), "windows-x86 should be auto-loaded");
+    assert!(!loaded.contains(&"windows-x64"), "windows-x64 must NOT be auto-loaded on x86 fixture");
+}
+
+#[test]
+fn lazy_load_type_archive_by_stem_appends_and_resolves() {
+    let mut project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+        .expect("open PE fixture");
+
+    let before = project.type_archives.len();
+    assert!(
+        !project.type_archives.iter().any(|a| a.name == "windows-x64"),
+        "test precondition: windows-x64 should not be auto-loaded on x86 fixture"
+    );
+
+    let idx = project
+        .load_type_archive_by_stem("windows-x64")
+        .expect("windows-x64 should lazy-load");
+
+    assert_eq!(project.type_archives.len(), before + 1);
+    assert_eq!(project.type_archives[idx].name, "windows-x64");
+    assert!(project.type_archive_enabled[idx], "newly loaded archive should be enabled");
+    // Vec lengths must stay parallel — same invariant the panel relies on.
+    assert_eq!(project.type_archives.len(), project.type_archive_enabled.len());
+    assert_eq!(project.type_archives.len(), project.type_archive_hits.len());
+
+    // No-op idempotency: a second call returns the same idx, doesn't append.
+    let idx2 = project.load_type_archive_by_stem("windows-x64").unwrap();
+    assert_eq!(idx, idx2);
+    assert_eq!(project.type_archives.len(), before + 1);
+}
+
+#[test]
 fn disabling_all_type_archives_strips_typed_signatures() {
     let mut project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
