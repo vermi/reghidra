@@ -175,7 +175,11 @@ fn read_le_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
 }
 
-fn parse_header(data: &[u8]) -> Result<(SigHeader, usize), CoreError> {
+/// Parse just the .sig file header (magic + version + library name +
+/// function count). Cheap — no trie walk. Used by the Loaded Data
+/// Sources panel to surface library names for unloaded sigs without
+/// paying the full parse cost up front.
+pub fn parse_header(data: &[u8]) -> Result<(SigHeader, usize), CoreError> {
     if data.len() < 7 {
         return Err(CoreError::Signature("file too small".into()));
     }

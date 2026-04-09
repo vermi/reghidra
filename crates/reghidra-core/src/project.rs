@@ -342,12 +342,24 @@ impl Project {
     /// and append it to [`Self::bundled_dbs`] enabled. No-op if already
     /// loaded. Returns the new (or existing) index. Triggers a full
     /// re-analysis since FLIRT renames bake in at analysis time.
+    ///
+    /// Identity is `(subdir, stem)`, NOT just stem — the same stem can
+    /// ship under multiple arch dirs (e.g. `VisualStudio2017` exists
+    /// in `pe/x86/32`, `pe/arm/32`, `pe/arm/64`) and they must remain
+    /// independently toggleable. The `source_path` encodes both as
+    /// `bundled:<subdir>/<stem>` so the GUI's loaded-by-key map can
+    /// recover both halves.
     pub fn load_bundled_sig(&mut self, subdir: &str, stem: &str) -> Option<usize> {
-        if let Some(idx) = self.bundled_dbs.iter().position(|db| db.header.name == stem) {
+        let key = format!("bundled:{subdir}/{stem}");
+        if let Some(idx) = self
+            .bundled_dbs
+            .iter()
+            .position(|db| db.source_path.to_str() == Some(key.as_str()))
+        {
             return Some(idx);
         }
         let bytes = bundled_sigs::embedded_sig_bytes(subdir, stem)?;
-        let source_path = PathBuf::from(format!("bundled:{stem}"));
+        let source_path = PathBuf::from(&key);
         match FlirtDatabase::parse(bytes, source_path) {
             Ok(db) => {
                 let idx = self.bundled_dbs.len();
