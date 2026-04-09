@@ -273,6 +273,29 @@ pub fn is_embedded(stem: &str) -> bool {
     TYPES_DIR.get_file(format!("{stem}.rtarch")).is_some()
 }
 
+/// Enumerate every embedded type archive stem in the `types/` tree without
+/// decoding any of them. Used by the Loaded Data Sources panel so that the
+/// user can see *every* shipped archive (not just the ones the
+/// format/arch heuristic auto-loaded) and opt into the others on demand.
+/// Stems are sorted lexicographically for stable display order.
+pub fn available_stems() -> Vec<String> {
+    let mut stems: Vec<String> = TYPES_DIR
+        .files()
+        .filter_map(|f| {
+            let path = f.path();
+            (path.extension().and_then(|e| e.to_str()) == Some("rtarch"))
+                .then(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                })
+                .flatten()
+        })
+        .collect();
+    stems.sort();
+    stems
+}
+
 /// Find the index of the first archive in `archives` that defines a
 /// prototype for `name`, mirroring the same precedence and underscore-
 /// strip fallback as

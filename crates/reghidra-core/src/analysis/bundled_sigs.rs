@@ -51,6 +51,67 @@ fn is_rizinorg_sig(stem: &str) -> bool {
         || matches!(stem, "masm32" | "mingw32-zlib" | "winsdk")
 }
 
+/// Metadata for an embedded `.sig` file: its tree-relative subdir
+/// (`pe/x86/32`, `elf/arm/64`, ...) and its stem (`vc32_14`, `ubuntu-libc6`).
+/// Used by the Loaded Data Sources panel to enumerate every shipped sig
+/// without parsing any of them; the panel groups by `subdir` for the
+/// platform/arch tree view.
+#[derive(Debug, Clone)]
+pub struct AvailableSig {
+    pub subdir: String,
+    pub stem: String,
+}
+
+/// Walk the entire embedded `signatures/` tree and return one
+/// [`AvailableSig`] per `.sig` file. Two-level recursion (format then
+/// arch then bitness); the rizinorg/sigdb layout is fixed at three
+/// levels deep so an explicit walker is fine. Sorted by `(subdir,
+/// stem)` for stable display order.
+pub fn available_sigs() -> Vec<AvailableSig> {
+    let mut out = Vec::new();
+    walk_sigs(&SIGNATURES_DIR, &mut out);
+    out.sort_by(|a, b| a.subdir.cmp(&b.subdir).then(a.stem.cmp(&b.stem)));
+    out
+}
+
+fn walk_sigs(dir: &Dir<'static>, out: &mut Vec<AvailableSig>) {
+    for f in dir.files() {
+        let path = f.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sig") {
+            continue;
+        }
+        let Some(parent) = path.parent().and_then(|p| p.to_str()) else {
+            continue;
+        };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        out.push(AvailableSig {
+            subdir: parent.to_string(),
+            stem: stem.to_string(),
+        });
+    }
+    for sub in dir.dirs() {
+        walk_sigs(sub, out);
+    }
+}
+
+/// Look up an embedded `.sig` file's raw bytes by `(subdir, stem)`.
+/// Used by `Project` to lazy-load a sig the user toggled on from the
+/// Loaded Data Sources panel without re-walking the whole tree.
+pub fn embedded_sig_bytes(subdir: &str, stem: &str) -> Option<&'static [u8]> {
+    let path = format!("{subdir}/{stem}.sig");
+    SIGNATURES_DIR.get_file(&path).map(|f| f.contents())
+}
+
+/// Subdir paths that the format/arch heuristic would auto-load. Used by
+/// `Project` to seed the enabled flags for embedded sigs at open time:
+/// sigs whose subdir is in this list start checked, everything else
+/// starts unchecked. Mirrors [`sig_subdirs`].
+pub fn auto_load_subdirs(format: BinaryFormat, arch: Architecture) -> Vec<&'static str> {
+    sig_subdirs(format, arch)
+}
+
 /// Collect all bundled .sig file entries matching the given format and architecture.
 ///
 /// Order: IDA-sourced sigs first, rizinorg/sigdb sigs last. This gives IDA
