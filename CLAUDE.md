@@ -223,14 +223,14 @@ Full subcommand-based `reghidra-cli` with feature parity for everything content/
 
 **Caveats.** Each invocation re-opens and re-analyzes the binary. For iterative workflows against the same binary this is 3-10 seconds of wasted work per call. The deferred `reghidra-cli serve` daemon (Phase 6-adjacent roadmap) with JSON-RPC over stdio is the follow-up if iteration becomes the bottleneck.
 
-**Hit-rate state.** Post-4f on PE fixture: 9/102 FLIRT-named CRT functions match an archive (`_fclose`, `_printf`, `_exit`, `__exit`, `__close`, `__commit`, ...). The 93 misses are MSVC CRT internals (`__SEH_prolog4`, `__EH4_*`, `__lockexit`, `__mtinit`, `__getptd`, `__fclose_nolock`, ...) absent from windows-sys, libc src/windows, libc src/unix, AND Rizin SDB. Fundamentally needs licensable MS UCRT headers or PDB overlay.
+**Hit-rate state.** On `pe-mingw32-strip.exe` (the current PE fixture, vendored from `JonathanSalwan/binary-samples`): 130 type archive hits total (windows-x86: 48, ucrt: 72, posix: 5, rizin-libc: 5) and 163 FLIRT matches. The MSVC CRT internals gap (`__SEH_prolog4`, `__EH4_*`, `__lockexit`, `__mtinit`, `__getptd`, `__fclose_nolock`, ...) remains unresolved across windows-sys, libc src/windows, libc src/unix, AND Rizin SDB — fundamentally needs licensable MS UCRT headers or PDB overlay.
 
 **Gotchas to watch for.**
 - `windows-sys` gates everything behind Cargo features. Typegen must enable the right feature set or `syn` won't see most APIs.
 - `FrameLayout` is now plumbed back through `DecompileContext`; don't regress to discarding it.
 - `CType` (decompile AST) is a simpler subset of `TypeRef`. Use `type_ref_to_ctype` to bridge.
 
-**Where to verify.** `tests/fixtures/` PE with imports; `CreateFileA`/`GetModuleHandleW`/etc. as canaries. Unit tests in `reghidra-decompile::type_archive::tests`. End-to-end in `crates/reghidra-core/tests/rizin_visibility.rs` (asserts archives loaded, `EnumChildWindows` resolves, `__fclose_nolock` is intentionally unresolvable as a negative canary pinning the documented gap — invert it the day a UCRT-internals source lands).
+**Where to verify.** `tests/fixtures/pe-mingw32-strip.exe` is the primary PE fixture (vendored from `JonathanSalwan/binary-samples` — see `tests/fixtures/SOURCES.md`); `_realloc`/`_srand` are the FLIRT-CRT canaries that exercise the typed-signature path. Unit tests in `reghidra-decompile::type_archive::tests`. End-to-end in `crates/reghidra-core/tests/rizin_visibility.rs` (asserts archives loaded, `EnumChildWindows` is resolvable *via the archive contents themselves* — independent of which fixture is loaded — and `__fclose_nolock` is intentionally unresolvable as a negative canary pinning the documented gap; invert it the day a UCRT-internals source lands).
 
 **Remaining Phase 5c work — priorities.** Target workload is PE-heavy with some ELF/Mach-O; ARM is out of scope.
 

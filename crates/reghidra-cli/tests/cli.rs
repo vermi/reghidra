@@ -46,7 +46,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn pe() -> PathBuf {
-    fixture("wildfire-test-pe-file.exe")
+    fixture("pe-mingw32-strip.exe")
 }
 
 fn run_json(args: &[&str]) -> Value {
@@ -351,19 +351,21 @@ fn functions_command_with_filters() {
         }
     }
 
-    // --name filter.
+    // --name filter. `realloc` appears as `_realloc` etc. via FLIRT
+    // on the PE fixture (the wrapper is called from many call sites,
+    // so the FLIRT match shows up many times across the binary).
     let v = run_json(&[
         "functions",
         "--binary",
         pe.to_str().unwrap(),
         "--json",
         "--name",
-        "security",
+        "realloc",
     ]);
     let arr = v.as_array().expect("functions array");
     assert!(
         !arr.is_empty(),
-        "PE fixture should have at least one function with 'security' in the name"
+        "PE fixture should have at least one function with 'realloc' in the name"
     );
 }
 
@@ -511,17 +513,18 @@ fn decompile_disasm_ir_cfg_for_entry_point() {
 #[test]
 fn find_command_substring_match() {
     let pe = pe();
-    // "security" appears in __security_check_cookie and friends, which
-    // FLIRT renames into the fixture reliably.
+    // `realloc` appears as `_realloc` etc. via FLIRT-named CRT
+    // wrappers on the PE fixture, and also reliably appears in any
+    // string referencing the malloc family.
     let v = run_json(&[
         "find",
         "--binary",
         pe.to_str().unwrap(),
         "--json",
-        "security",
+        "realloc",
     ]);
     let hits = v.as_array().expect("find array");
-    assert!(!hits.is_empty(), "find 'security' should match");
+    assert!(!hits.is_empty(), "find 'realloc' should match");
 }
 
 #[test]

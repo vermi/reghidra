@@ -31,7 +31,7 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn rizin_windows_archive_is_loaded_for_pe_x86() {
-    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
         .expect("open PE fixture");
 
     // The PE x86 stem chain in `archive_stems_for` is
@@ -68,7 +68,7 @@ fn rizin_windows_archive_is_loaded_for_pe_x86() {
 /// the canary for one that remains rizin-only.
 #[test]
 fn rizin_only_win32_function_resolves_via_archive_chain() {
-    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
         .expect("open PE fixture");
 
     let mut found_in_rizin = false;
@@ -104,7 +104,7 @@ fn rizin_only_win32_function_resolves_via_archive_chain() {
 /// behavior in the GUI will go away on its own.
 #[test]
 fn fclose_nolock_remains_unresolvable_until_msvc_crt_source_lands() {
-    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
         .expect("open PE fixture");
 
     // The lookup chain in `DecompileContext::lookup_prototype` tries
@@ -134,7 +134,7 @@ fn fclose_nolock_remains_unresolvable_until_msvc_crt_source_lands() {
 /// end-to-end visibility check the user asked for.
 #[test]
 fn rizin_archive_drives_typed_signature_when_function_present() {
-    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
+    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
         .expect("open PE fixture");
 
     // Build the union of names that are *only* in rizin archives
