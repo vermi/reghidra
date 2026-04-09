@@ -110,14 +110,16 @@ enum FlirtAction {
     SetUserEnabled { idx: usize, enabled: bool },
 }
 
+/// Three-level nested tree of bundled FLIRT sigs:
+///   `format` (`pe`/`elf`) → `arch` (`x86`/`arm`/`mips`/`sh`) →
+///   `bits` (`32`/`64`) → leaves (sig rows).
+/// `BTreeMap` at every level so display order is deterministic
+/// (alphabetical) without an extra sort step.
+type FlirtTree = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<FlirtRowSnapshot>>>>;
+
 fn render_flirt_section(ui: &mut egui::Ui, project: &mut reghidra_core::Project) {
     ui.heading("FLIRT signature databases");
 
-    // Build the bundled tree: every embedded sig grouped by subdir,
-    // joined with the parsed-db state by stem. The two sources almost
-    // always agree (every parsed bundled db originated from the
-    // embedded tree), but the join is by stem so a future refactor
-    // that loads sigs from a non-embedded source still survives.
     let loaded_by_stem: std::collections::HashMap<&str, usize> = project
         .bundled_dbs
         .iter()
@@ -125,7 +127,12 @@ fn render_flirt_section(ui: &mut egui::Ui, project: &mut reghidra_core::Project)
         .map(|(i, db)| (db.header.name.as_str(), i))
         .collect();
 
-    let mut tree: BTreeMap<String, Vec<FlirtRowSnapshot>> = BTreeMap::new();
+    // Walk every available sig and bucket into the 3-level tree.
+    // `subdir` looks like `pe/x86/32` or `elf/arm/64`; we split on
+    // `/` and treat any non-3-component path as a single fallback
+    // bucket so a future signatures/ layout change doesn't lose rows.
+    let mut tree: FlirtTree = BTreeMap::new();
+    let mut orphans: Vec<FlirtRowSnapshot> = Vec::new();
     for sig in &project.available_bundled_sigs {
         let loaded_idx = loaded_by_stem.get(sig.stem.as_str()).copied();
         let (enabled, sig_count, hits) = match loaded_idx {
@@ -136,19 +143,29 @@ fn render_flirt_section(ui: &mut egui::Ui, project: &mut reghidra_core::Project)
             ),
             None => (false, None, None),
         };
-        tree.entry(sig.subdir.clone()).or_default().push(FlirtRowSnapshot {
+        let row = FlirtRowSnapshot {
             subdir: sig.subdir.clone(),
             stem: sig.stem.clone(),
             loaded_idx,
             enabled,
             sig_count,
             hits,
-        });
+        };
+        let parts: Vec<&str> = sig.subdir.split('/').collect();
+        match parts.as_slice() {
+            [format, arch, bits] => {
+                tree.entry((*format).to_string())
+                    .or_default()
+                    .entry((*arch).to_string())
+                    .or_default()
+                    .entry((*bits).to_string())
+                    .or_default()
+                    .push(row);
+            }
+            _ => orphans.push(row),
+        }
     }
 
-    // User-loaded sigs (via File → Load Signatures…) live outside the
-    // embedded tree. Render them in their own group below the embedded
-    // ones so the bundled-vs-user distinction stays visible.
     let user_rows: Vec<FlirtRowSnapshot> = project
         .user_dbs
         .iter()
@@ -163,33 +180,82 @@ fn render_flirt_section(ui: &mut egui::Ui, project: &mut reghidra_core::Project)
         })
         .collect();
 
-    if tree.is_empty() && user_rows.is_empty() {
+    if tree.is_empty() && user_rows.is_empty() && orphans.is_empty() {
         ui.label("(no signature databases shipped with this build)");
         return;
     }
 
     let mut actions: Vec<FlirtAction> = Vec::new();
 
-    for (subdir, rows) in &tree {
-        // Loaded count in the header makes the auto-loaded subdir
-        // visually distinct (everything checked) from a wholly opt-in
-        // one (everything unchecked).
-        let loaded = rows.iter().filter(|r| r.loaded_idx.is_some()).count();
-        let header_label = format!("{subdir}  ({loaded}/{} loaded)", rows.len());
-        // Default-open subdirs that have any loaded entries; collapsed
-        // for fully-opt-in subdirs so the long Borland/Watcom/etc.
-        // lists don't drown out the relevant ones.
-        egui::CollapsingHeader::new(header_label)
-            .id_salt(format!("flirt_subdir::{subdir}"))
-            .default_open(loaded > 0)
+    for (format, arches) in &tree {
+        let format_loaded: usize = arches
+            .values()
+            .flat_map(|a| a.values())
+            .flat_map(|b| b.iter())
+            .filter(|r| r.loaded_idx.is_some())
+            .count();
+        let format_total: usize = arches
+            .values()
+            .flat_map(|a| a.values())
+            .map(|b| b.len())
+            .sum();
+        // Default-open the format branch if anything inside is loaded
+        // — that's almost always true for the binary's own format and
+        // false for the others, which is the right starting state.
+        egui::CollapsingHeader::new(format!(
+            "{format}  ({format_loaded}/{format_total} loaded)"
+        ))
+        .id_salt(format!("flirt_fmt::{format}"))
+        .default_open(format_loaded > 0)
+        .show(ui, |ui| {
+            for (arch, bitsmap) in arches {
+                let arch_loaded: usize = bitsmap
+                    .values()
+                    .flat_map(|b| b.iter())
+                    .filter(|r| r.loaded_idx.is_some())
+                    .count();
+                let arch_total: usize = bitsmap.values().map(|b| b.len()).sum();
+                egui::CollapsingHeader::new(format!(
+                    "{arch}  ({arch_loaded}/{arch_total} loaded)"
+                ))
+                .id_salt(format!("flirt_arch::{format}/{arch}"))
+                .default_open(arch_loaded > 0)
+                .show(ui, |ui| {
+                    for (bits, rows) in bitsmap {
+                        let bits_loaded =
+                            rows.iter().filter(|r| r.loaded_idx.is_some()).count();
+                        egui::CollapsingHeader::new(format!(
+                            "{bits}-bit  ({bits_loaded}/{} loaded)",
+                            rows.len()
+                        ))
+                        .id_salt(format!("flirt_bits::{format}/{arch}/{bits}"))
+                        .default_open(bits_loaded > 0)
+                        .show(ui, |ui| {
+                            emit_flirt_table(
+                                ui,
+                                &format!("flirt_grid::{format}/{arch}/{bits}"),
+                                rows,
+                                &mut actions,
+                            );
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    if !orphans.is_empty() {
+        egui::CollapsingHeader::new(format!("(other)  ({} entries)", orphans.len()))
+            .id_salt("flirt_fmt::orphans")
+            .default_open(false)
             .show(ui, |ui| {
-                emit_flirt_table(ui, &format!("flirt_grid::{subdir}"), rows, &mut actions);
+                emit_flirt_table(ui, "flirt_grid::orphans", &orphans, &mut actions);
             });
     }
 
     if !user_rows.is_empty() {
         egui::CollapsingHeader::new(format!("user  ({} loaded)", user_rows.len()))
-            .id_salt("flirt_subdir::user")
+            .id_salt("flirt_fmt::user")
             .default_open(true)
             .show(ui, |ui| {
                 emit_flirt_table(ui, "flirt_grid::user", &user_rows, &mut actions);
@@ -261,8 +327,7 @@ fn emit_flirt_table(
                             stem: row.stem.clone(),
                         });
                     }
-                    // Unloaded bundled row unchecked → no-op (was
-                    // already off; nothing to do).
+                    // Unloaded bundled row unchecked → no-op.
                     (None, _, false) => {}
                 }
             }
