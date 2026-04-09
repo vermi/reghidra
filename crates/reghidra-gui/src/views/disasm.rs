@@ -5,6 +5,7 @@ use crate::context_menu::{
 use egui::{RichText, Ui};
 
 /// Each item in the flat display list is exactly one row height.
+#[derive(Clone)]
 enum DisplayLine {
     /// Spacer before a function header (if not the first).
     Spacer,
@@ -49,6 +50,79 @@ pub fn reset_scroll_gen() {
     *DISASM_LAST_GEN.lock().unwrap() = [(0, 0); 2];
 }
 
+/// Build the flat per-row display list for the disassembly view from
+/// the project state. This is the O(N_instructions) walk that the
+/// disasm view used to perform every frame; the call site now caches
+/// the result and only re-runs it when one of its inputs (function
+/// renames, bookmark add/remove) has actually changed, gated by
+/// `app.disasm_display_generation`.
+///
+/// Inputs that affect the result:
+///
+/// - `project.instructions` (only changes on file open / re-analysis)
+/// - `project.analysis.functions` and their source classifications
+///   (only changes on re-analysis)
+/// - `project.analysis.xrefs` ref counts (only changes on re-analysis)
+/// - `project.renamed_functions` for `FuncHeaderName.display_name`
+/// - `project.bookmarks` for the `Bookmark` rows
+///
+/// Theme colors are baked in at build time. Switching the theme
+/// invalidates the cache via `disasm_display_generation` (see the
+/// theme toggle path).
+fn build_display_lines(
+    project: &reghidra_core::Project,
+    theme: &crate::theme::Theme,
+) -> Vec<DisplayLine> {
+    let mut display_lines: Vec<DisplayLine> = Vec::with_capacity(project.instructions.len() + 64);
+    for (idx, insn) in project.instructions.iter().enumerate() {
+        if let Some(func) = project.analysis.function_at(insn.address) {
+            let is_user_renamed = project.renamed_functions.contains_key(&insn.address);
+            let display_name = project
+                .renamed_functions
+                .get(&insn.address)
+                .cloned()
+                .unwrap_or_else(|| reghidra_core::demangle::display_name_short(&func.name).into_owned());
+            let header_color = if is_user_renamed {
+                theme.func_header
+            } else if func.source == reghidra_core::FunctionSource::Signature {
+                theme.func_header_sig
+            } else if func.source == reghidra_core::FunctionSource::AutoNamed {
+                theme.func_header_auto
+            } else {
+                theme.func_header
+            };
+            let xref_count = project.analysis.xrefs.ref_count_to(insn.address);
+            if idx > 0 {
+                display_lines.push(DisplayLine::Spacer);
+            }
+            display_lines.push(DisplayLine::FuncHeaderRule { color: header_color });
+            display_lines.push(DisplayLine::FuncHeaderName {
+                address: insn.address,
+                display_name,
+                color: header_color,
+            });
+            display_lines.push(DisplayLine::FuncHeaderStats {
+                address: insn.address,
+                insn_count: func.instruction_count,
+                xref_count,
+                color: header_color,
+            });
+            display_lines.push(DisplayLine::FuncHeaderRule { color: header_color });
+        }
+        let xrefs_to = project.analysis.xrefs.xrefs_to(insn.address);
+        if !xrefs_to.is_empty() && project.analysis.function_at(insn.address).is_none() {
+            display_lines.push(DisplayLine::XrefHint {
+                count: xrefs_to.len(),
+            });
+        }
+        if project.bookmarks.contains(&insn.address) {
+            display_lines.push(DisplayLine::Bookmark);
+        }
+        display_lines.push(DisplayLine::Instruction { idx });
+    }
+    display_lines
+}
+
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let Some(ref project) = app.project else {
         return;
@@ -87,71 +161,48 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         }
     };
 
-    // Build a flat display list where each item = one fixed-height row
-    let mut display_lines: Vec<DisplayLine> = Vec::new();
-    let mut scroll_to_display_row: Option<usize> = None;
-
-    for (idx, insn) in project.instructions.iter().enumerate() {
-        // Function header
-        if let Some(func) = project.analysis.function_at(insn.address) {
-            let is_user_renamed = project.renamed_functions.contains_key(&insn.address);
-            let display_name = project
-                .renamed_functions
-                .get(&insn.address)
-                .cloned()
-                .unwrap_or_else(|| reghidra_core::demangle::display_name_short(&func.name).into_owned());
-
-            let header_color = if is_user_renamed {
-                theme.func_header
-            } else if func.source == reghidra_core::FunctionSource::Signature {
-                theme.func_header_sig
-            } else if func.source == reghidra_core::FunctionSource::AutoNamed {
-                theme.func_header_auto
-            } else {
-                theme.func_header
-            };
-
-            let xref_count = project.analysis.xrefs.ref_count_to(insn.address);
-
-            if idx > 0 {
-                display_lines.push(DisplayLine::Spacer);
-            }
-            // Blocky multi-line header: top rule, name, stats, bottom rule.
-            display_lines.push(DisplayLine::FuncHeaderRule { color: header_color });
-            display_lines.push(DisplayLine::FuncHeaderName {
-                address: insn.address,
-                display_name,
-                color: header_color,
-            });
-            display_lines.push(DisplayLine::FuncHeaderStats {
-                address: insn.address,
-                insn_count: func.instruction_count,
-                xref_count,
-                color: header_color,
-            });
-            display_lines.push(DisplayLine::FuncHeaderRule { color: header_color });
+    // Cached display list. Pre-PR: rebuilt every frame, walking all
+    // ~226k instructions on a real PE binary and burning 80% CPU on
+    // a 1393-function fixture. Now: rebuild only when
+    // `disasm_display_generation` changes (function rename, bookmark
+    // toggle, file open). The cache is stored as `Box<dyn Any>` on
+    // the App so app.rs doesn't need to know `DisplayLine`'s shape.
+    let cache_gen = app.disasm_display_generation;
+    let cache_hit = match &app.disasm_lines_cache {
+        Some((cached_gen, any)) => {
+            *cached_gen == cache_gen && any.downcast_ref::<Vec<DisplayLine>>().is_some()
         }
-
-        // Xrefs TO this address (non-function-entry branch targets)
-        let xrefs_to = project.analysis.xrefs.xrefs_to(insn.address);
-        if !xrefs_to.is_empty() && project.analysis.function_at(insn.address).is_none() {
-            display_lines.push(DisplayLine::XrefHint {
-                count: xrefs_to.len(),
-            });
-        }
-
-        // Bookmark indicator
-        if project.bookmarks.contains(&insn.address) {
-            display_lines.push(DisplayLine::Bookmark);
-        }
-
-        // Track which display row corresponds to the selected instruction
-        if should_scroll && insn.address == selected_addr {
-            scroll_to_display_row = Some(display_lines.len());
-        }
-
-        display_lines.push(DisplayLine::Instruction { idx });
+        None => false,
+    };
+    if !cache_hit {
+        let lines = build_display_lines(project, &theme);
+        app.disasm_lines_cache = Some((cache_gen, Box::new(lines)));
     }
+    // Re-borrow `project` after the &mut app borrow above ended.
+    let Some(ref project) = app.project else {
+        return;
+    };
+    let display_lines: &Vec<DisplayLine> = app
+        .disasm_lines_cache
+        .as_ref()
+        .and_then(|(_, any)| any.downcast_ref::<Vec<DisplayLine>>())
+        .expect("disasm cache populated above");
+
+    // Locate the row to scroll to (if any) by walking the cached
+    // display list. Cheap compared to rebuilding it.
+    let scroll_to_display_row: Option<usize> = if should_scroll {
+        display_lines.iter().position(|line| match line {
+            DisplayLine::Instruction { idx } => {
+                project
+                    .instructions
+                    .get(*idx)
+                    .is_some_and(|insn| insn.address == selected_addr)
+            }
+            _ => false,
+        })
+    } else {
+        None
+    };
 
     let mut navigate_to = None;
     let mut clicked_mnemonic: Option<String> = None;
