@@ -13,6 +13,13 @@ pub struct Function {
     pub name: String,
     pub source: FunctionSource,
     pub instruction_count: usize,
+    /// FLIRT library name (`SigHeader::name`) of the database that matched
+    /// this function, when `source == FunctionSource::Signature`. Powers
+    /// per-database hit attribution in the Loaded Data Sources panel; the
+    /// total `Signature`-source count alone can't tell which bundled or
+    /// user-loaded `.sig` was responsible.
+    #[serde(default)]
+    pub matched_signature_db: Option<String>,
 }
 
 /// How the function was detected.
@@ -139,6 +146,7 @@ pub fn detect_functions(
             name,
             source,
             instruction_count: insn_count,
+            matched_signature_db: None,
         });
         cfgs.insert(entry, cfg);
     }

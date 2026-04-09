@@ -118,6 +118,11 @@ pub struct ReghidraApp {
     pub session_path: Option<PathBuf>,
     /// Status message shown briefly in the status bar.
     pub status_message: Option<(String, std::time::Instant)>,
+    /// Whether the Loaded Data Sources modal window is currently
+    /// shown. Toggled from the View menu and the window's own close
+    /// button. Reset to false on project open so a stale "open" flag
+    /// from the previous binary doesn't trail forward.
+    pub data_sources_open: bool,
 }
 
 impl ReghidraApp {
@@ -156,6 +161,7 @@ impl ReghidraApp {
             rename_generation: 0,
             session_path: None,
             status_message: None,
+            data_sources_open: false,
         }
     }
 
@@ -175,6 +181,7 @@ impl ReghidraApp {
                 self.hovered_address_next = None;
                 self.highlighted_mnemonic = None;
                 self.session_path = None;
+                self.data_sources_open = false;
                 self.nav_generation += 1;
                 // Reset per-pane scroll tracking in all views so they scroll
                 // to the new binary's entry point on first render.
@@ -205,6 +212,7 @@ impl ReghidraApp {
                 self.highlighted_mnemonic = None;
                 self.rename_generation += 1;
                 self.session_path = Some(path);
+                self.data_sources_open = false;
                 self.nav_generation += 1;
                 Self::reset_scroll_tracking();
                 self.set_status("Session loaded");
@@ -517,7 +525,10 @@ impl eframe::App for ReghidraApp {
         }
 
         // Determine input mode: Insert if any text field has focus or modals are open
-        let modals_open = self.palette.open || self.annotation_popup.open || self.help.open;
+        let modals_open = self.palette.open
+            || self.annotation_popup.open
+            || self.help.open
+            || self.data_sources_open;
 
         // Global keyboard shortcuts (always active)
         let mut open_comment = false;
@@ -860,6 +871,11 @@ impl eframe::App for ReghidraApp {
                             ViewLayout::Single => ViewLayout::SplitVertical,
                             ViewLayout::SplitVertical => ViewLayout::Single,
                         };
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Loaded Data Sources...").clicked() {
+                        self.data_sources_open = !self.data_sources_open;
                         ui.close_menu();
                     }
                 });
@@ -1253,6 +1269,9 @@ impl eframe::App for ReghidraApp {
 
         // Help overlay
         self.help.show(ctx, &theme_clone);
+
+        // Loaded Data Sources modal
+        views::data_sources::render_window(self, ctx);
     }
 }
 

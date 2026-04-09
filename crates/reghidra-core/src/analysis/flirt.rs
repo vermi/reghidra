@@ -715,6 +715,7 @@ pub fn apply_signatures(
 
         func.name = best.name.clone();
         func.source = FunctionSource::Signature;
+        func.matched_signature_db = Some(db.header.name.clone());
         match_count += 1;
     }
 
