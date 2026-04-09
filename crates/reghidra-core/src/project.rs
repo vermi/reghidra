@@ -315,21 +315,35 @@ impl Project {
 
     /// Recompute per-source hit counts on the current binary.
     ///
-    /// FLIRT hits are attributed via `Function::matched_signature_db`
+    /// **FLIRT hits** are attributed via `Function::matched_signature_db`
     /// (set by `apply_signatures`) — a one-pass walk over
-    /// `analysis.functions` filtered to `FunctionSource::Signature`,
-    /// matching the lib name against each enabled db's
+    /// `analysis.functions` filtered to those whose `matched_signature_db`
+    /// is set, matching the lib name against each enabled db's
     /// `header.name`. Disabled dbs always show 0.
     ///
-    /// Type archive hits use
+    /// **Type archive hits** mirror what the decompiler actually
+    /// resolves at call sites, which is the union of:
+    ///
+    /// * names in `analysis.functions` — covers FLIRT-renamed CRT
+    ///   stubs, symbol-table imports (ELF PLT), and any function
+    ///   `resolve_import_functions` was able to rename in place;
+    /// * names in `binary.import_addr_map` — covers PE x86/x64 IAT
+    ///   imports whose IAT slot addresses don't coincide with any
+    ///   `Function::entry_address` and so never get renamed onto an
+    ///   `analysis.functions` entry. These are the bulk of Win32 API
+    ///   resolutions on a typical PE binary; missing them was the
+    ///   reason `windows-x64`/`windows-x86` panels appeared as zero
+    ///   hits in the first cut.
+    ///
+    /// The two sources are deduplicated by name (via a `HashSet`) so a
+    /// function that appears as both an analysis entry AND an import
+    /// only counts once.
+    ///
+    /// The lookup uses
     /// [`reghidra_decompile::type_archive::which_archive_resolves`]
     /// over the *enabled* archive list so the count reflects the
-    /// effective precedence chain. The walked key is each function's
-    /// canonical `name` (the same string the decompiler will use to
-    /// resolve a prototype). Imports that show up only in
-    /// `binary.import_addr_map` and not as a separate
-    /// `analysis.functions` entry are not counted in v1; the slight
-    /// undercount is acceptable and noted on the panel.
+    /// effective precedence chain — disabling a higher-precedence
+    /// archive shifts hits to whatever resolves the same name next.
     pub fn recompute_hit_counts(&mut self) {
         let mut bundled_hits = vec![0usize; self.bundled_dbs.len()];
         let mut user_hits = vec![0usize; self.user_dbs.len()];
@@ -353,6 +367,24 @@ impl Project {
             .map(|(i, db)| (db.header.name.as_str(), i))
             .collect();
 
+        // FLIRT attribution: only walks analysis.functions because
+        // FLIRT only ever matches functions that exist as analysis
+        // entries (it operates on byte patterns at function entry
+        // addresses).
+        for func in &self.analysis.functions {
+            if let Some(lib) = func.matched_signature_db.as_deref() {
+                if let Some(&i) = bundled_lookup.get(lib) {
+                    bundled_hits[i] += 1;
+                } else if let Some(&i) = user_lookup.get(lib) {
+                    user_hits[i] += 1;
+                }
+            }
+        }
+
+        // Type archive attribution: walk the deduplicated union of
+        // analysis.functions names and import_addr_map values, which
+        // matches what `build_display_function_names` exposes to
+        // `DecompileContext::lookup_prototype` at decompile time.
         let enabled_indices: Vec<usize> = self
             .type_archive_enabled
             .iter()
@@ -363,18 +395,27 @@ impl Project {
             .iter()
             .map(|i| self.type_archives[*i].clone())
             .collect();
-
-        for func in &self.analysis.functions {
-            if let Some(lib) = func.matched_signature_db.as_deref() {
-                if let Some(&i) = bundled_lookup.get(lib) {
-                    bundled_hits[i] += 1;
-                } else if let Some(&i) = user_lookup.get(lib) {
-                    user_hits[i] += 1;
+        if !enabled_archives.is_empty() {
+            let mut seen: std::collections::HashSet<&str> =
+                std::collections::HashSet::with_capacity(
+                    self.analysis.functions.len() + self.binary.import_addr_map.len(),
+                );
+            for func in &self.analysis.functions {
+                if !seen.insert(func.name.as_str()) {
+                    continue;
                 }
-            }
-            if !enabled_archives.is_empty() {
                 if let Some(local_idx) =
                     type_archive::which_archive_resolves(&func.name, &enabled_archives)
+                {
+                    archive_hits[enabled_indices[local_idx]] += 1;
+                }
+            }
+            for name in self.binary.import_addr_map.values() {
+                if !seen.insert(name.as_str()) {
+                    continue;
+                }
+                if let Some(local_idx) =
+                    type_archive::which_archive_resolves(name, &enabled_archives)
                 {
                     archive_hits[enabled_indices[local_idx]] += 1;
                 }
