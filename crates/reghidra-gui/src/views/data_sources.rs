@@ -80,8 +80,6 @@ fn render_flirt_section(ui: &mut egui::Ui, project: &mut reghidra_core::Project)
         return;
     }
 
-    flirt_table_header(ui);
-
     // Snapshot the names/counts/hits up front so we don't fight the
     // borrow checker on `&mut project` while iterating.
     let bundled: Vec<(String, usize, usize, bool)> = project
@@ -111,48 +109,53 @@ fn render_flirt_section(ui: &mut egui::Ui, project: &mut reghidra_core::Project)
         })
         .collect();
 
-    for (i, (name, sig_count, hits, enabled)) in bundled.into_iter().enumerate() {
-        let mut on = enabled;
-        flirt_row(ui, &mut on, &name, "Bundled", sig_count, hits);
-        if on != enabled {
-            project.set_bundled_db_enabled(i, on);
-        }
-    }
-    for (i, (name, sig_count, hits, enabled)) in user.into_iter().enumerate() {
-        let mut on = enabled;
-        flirt_row(ui, &mut on, &name, "User", sig_count, hits);
-        if on != enabled {
-            project.set_user_db_enabled(i, on);
-        }
-    }
-}
+    let mut bundled_toggle: Option<(usize, bool)> = None;
+    let mut user_toggle: Option<(usize, bool)> = None;
 
-fn flirt_table_header(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.add_space(20.0); // checkbox column
-        ui.add_sized([220.0, 16.0], egui::Label::new(egui::RichText::new("Name").strong()));
-        ui.add_sized([80.0, 16.0], egui::Label::new(egui::RichText::new("Kind").strong()));
-        ui.add_sized([100.0, 16.0], egui::Label::new(egui::RichText::new("Sigs").strong()));
-        ui.add_sized([80.0, 16.0], egui::Label::new(egui::RichText::new("Hits").strong()));
-    });
-    ui.separator();
-}
+    egui::Grid::new("flirt_table")
+        .num_columns(5)
+        .striped(true)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("");
+            ui.label(egui::RichText::new("Name").strong());
+            ui.label(egui::RichText::new("Kind").strong());
+            ui.label(egui::RichText::new("Sigs").strong());
+            ui.label(egui::RichText::new("Hits").strong());
+            ui.end_row();
 
-fn flirt_row(
-    ui: &mut egui::Ui,
-    enabled: &mut bool,
-    name: &str,
-    kind: &str,
-    sig_count: usize,
-    hits: usize,
-) {
-    ui.horizontal(|ui| {
-        ui.checkbox(enabled, "");
-        ui.add_sized([220.0, 16.0], egui::Label::new(name));
-        ui.add_sized([80.0, 16.0], egui::Label::new(kind));
-        ui.add_sized([100.0, 16.0], egui::Label::new(format!("{sig_count}")));
-        ui.add_sized([80.0, 16.0], egui::Label::new(format!("{hits}")));
-    });
+            for (i, (name, sig_count, hits, enabled)) in bundled.into_iter().enumerate() {
+                let mut on = enabled;
+                ui.checkbox(&mut on, "");
+                ui.label(name);
+                ui.label("Bundled");
+                ui.label(format!("{sig_count}"));
+                ui.label(format!("{hits}"));
+                ui.end_row();
+                if on != enabled {
+                    bundled_toggle = Some((i, on));
+                }
+            }
+            for (i, (name, sig_count, hits, enabled)) in user.into_iter().enumerate() {
+                let mut on = enabled;
+                ui.checkbox(&mut on, "");
+                ui.label(name);
+                ui.label("User");
+                ui.label(format!("{sig_count}"));
+                ui.label(format!("{hits}"));
+                ui.end_row();
+                if on != enabled {
+                    user_toggle = Some((i, on));
+                }
+            }
+        });
+
+    if let Some((i, on)) = bundled_toggle {
+        project.set_bundled_db_enabled(i, on);
+    }
+    if let Some((i, on)) = user_toggle {
+        project.set_user_db_enabled(i, on);
+    }
 }
 
 /// Render the type archive section. Returns `true` if any toggle was
@@ -164,8 +167,6 @@ fn render_type_archive_section(ui: &mut egui::Ui, project: &mut reghidra_core::P
         ui.label("(no type archives loaded for this format/architecture)");
         return false;
     }
-
-    archive_table_header(ui);
 
     let archives: Vec<(String, usize, usize, bool)> = project
         .type_archives
@@ -181,33 +182,35 @@ fn render_type_archive_section(ui: &mut egui::Ui, project: &mut reghidra_core::P
         })
         .collect();
 
-    let mut toggled = false;
-    for (i, (name, fn_count, hits, enabled)) in archives.into_iter().enumerate() {
-        let mut on = enabled;
-        archive_row(ui, &mut on, &name, fn_count, hits);
-        if on != enabled {
-            project.set_type_archive_enabled(i, on);
-            toggled = true;
-        }
+    let mut toggle: Option<(usize, bool)> = None;
+
+    egui::Grid::new("type_archive_table")
+        .num_columns(4)
+        .striped(true)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("");
+            ui.label(egui::RichText::new("Name").strong());
+            ui.label(egui::RichText::new("Functions").strong());
+            ui.label(egui::RichText::new("Hits").strong());
+            ui.end_row();
+
+            for (i, (name, fn_count, hits, enabled)) in archives.into_iter().enumerate() {
+                let mut on = enabled;
+                ui.checkbox(&mut on, "");
+                ui.label(name);
+                ui.label(format!("{fn_count}"));
+                ui.label(format!("{hits}"));
+                ui.end_row();
+                if on != enabled {
+                    toggle = Some((i, on));
+                }
+            }
+        });
+
+    if let Some((i, on)) = toggle {
+        project.set_type_archive_enabled(i, on);
+        return true;
     }
-    toggled
-}
-
-fn archive_table_header(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.add_space(20.0);
-        ui.add_sized([220.0, 16.0], egui::Label::new(egui::RichText::new("Name").strong()));
-        ui.add_sized([180.0, 16.0], egui::Label::new(egui::RichText::new("Functions").strong()));
-        ui.add_sized([80.0, 16.0], egui::Label::new(egui::RichText::new("Hits").strong()));
-    });
-    ui.separator();
-}
-
-fn archive_row(ui: &mut egui::Ui, enabled: &mut bool, name: &str, fn_count: usize, hits: usize) {
-    ui.horizontal(|ui| {
-        ui.checkbox(enabled, "");
-        ui.add_sized([220.0, 16.0], egui::Label::new(name));
-        ui.add_sized([180.0, 16.0], egui::Label::new(format!("{fn_count}")));
-        ui.add_sized([80.0, 16.0], egui::Label::new(format!("{hits}")));
-    });
+    false
 }
