@@ -77,22 +77,46 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     let annotated_lines = annotated_lines.clone();
     let var_names = var_names.clone();
 
-    // Build a reverse map: function name -> address
-    let func_name_to_addr: std::collections::HashMap<String, u64> = project
-        .analysis
-        .functions
-        .iter()
-        .map(|f| {
-            // Must match what the decompiler prints so click-to-navigate works
-            // after the demangling pass.
-            let name = project
-                .renamed_functions
-                .get(&f.entry_address)
-                .cloned()
-                .unwrap_or_else(|| reghidra_core::demangle::display_name(&f.name).into_owned());
-            (name, f.entry_address)
-        })
-        .collect();
+    // Reverse map: displayed function name → entry address. Cached
+    // on the App because building it requires demangling every
+    // function name in the binary, which on a real PE fixture is
+    // ~1400 calls into `display_name` per frame and was previously
+    // a meaningful slice of the decompile view's frame budget.
+    // Invalidated by `rename_generation` (which bumps on every
+    // function rename).
+    let cur_rename_gen = app.rename_generation;
+    let cache_hit = matches!(
+        &app.func_name_to_addr_cache,
+        Some((cached_gen, _)) if *cached_gen == cur_rename_gen
+    );
+    if !cache_hit {
+        let map: std::collections::HashMap<String, u64> = project
+            .analysis
+            .functions
+            .iter()
+            .map(|f| {
+                let name = project
+                    .renamed_functions
+                    .get(&f.entry_address)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        reghidra_core::demangle::display_name(&f.name).into_owned()
+                    });
+                (name, f.entry_address)
+            })
+            .collect();
+        app.func_name_to_addr_cache = Some((cur_rename_gen, map));
+    }
+    // Re-borrow project after the &mut app borrow for cache write
+    // ended above.
+    let Some(ref project) = app.project else {
+        return;
+    };
+    let func_name_to_addr: &std::collections::HashMap<String, u64> = app
+        .func_name_to_addr_cache
+        .as_ref()
+        .map(|(_, m)| m)
+        .expect("populated above");
 
     // Build address-to-block mapping for the current function's IR
     let addr_to_block: std::collections::HashMap<u64, u64> =

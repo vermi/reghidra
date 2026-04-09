@@ -114,6 +114,27 @@ pub struct ReghidraApp {
     /// Bumped whenever a function is renamed so decompile cache knows to refresh.
     pub rename_generation: u64,
 
+    /// Bumped on any project mutation that affects the disassembly view's
+    /// flat display list (function renames, bookmark add/remove). Distinct
+    /// from `rename_generation` because the disasm list is invalidated by
+    /// a strictly larger set of changes — bookmarks insert visible rows.
+    /// The disasm view caches its `display_lines` keyed on this counter
+    /// and skips the per-frame O(N_instructions) walk when the cache is
+    /// fresh. Comments don't structurally affect the display list (they
+    /// render inline within the instruction row) so they don't bump it.
+    pub disasm_display_generation: u64,
+    /// Cached opaque (generation, lines) for the disasm view. The
+    /// payload is `Box<dyn Any>` so app.rs doesn't need to know
+    /// `disasm::DisplayLine`'s definition.
+    pub disasm_lines_cache: Option<(u64, Box<dyn std::any::Any + Send + Sync>)>,
+
+    /// Cached reverse map: displayed function name → entry address.
+    /// Used by the decompile view's click-to-navigate tokenizer.
+    /// Pre-cache: rebuilt every frame from `project.analysis.functions`
+    /// by demangling N names — on a 1393-function PE binary that's a
+    /// noticeable per-frame cost. Invalidated by `rename_generation`.
+    pub func_name_to_addr_cache: Option<(u64, std::collections::HashMap<String, u64>)>,
+
     /// Path to the current session file (set after Save/Load Session).
     pub session_path: Option<PathBuf>,
     /// Status message shown briefly in the status bar.
@@ -159,6 +180,9 @@ impl ReghidraApp {
             theme_applied: false,
             decompile_cache: None,
             rename_generation: 0,
+            disasm_display_generation: 0,
+            disasm_lines_cache: None,
+            func_name_to_addr_cache: None,
             session_path: None,
             status_message: None,
             data_sources_open: false,
@@ -177,6 +201,9 @@ impl ReghidraApp {
                 self.loading_error = None;
                 self.undo = UndoHistory::new();
                 self.decompile_cache = None;
+                self.disasm_lines_cache = None;
+                self.func_name_to_addr_cache = None;
+                self.disasm_display_generation += 1;
                 self.hovered_address = None;
                 self.hovered_address_next = None;
                 self.highlighted_mnemonic = None;
@@ -207,10 +234,13 @@ impl ReghidraApp {
                 self.loading_error = None;
                 self.undo = UndoHistory::new();
                 self.decompile_cache = None;
+                self.disasm_lines_cache = None;
+                self.func_name_to_addr_cache = None;
                 self.hovered_address = None;
                 self.hovered_address_next = None;
                 self.highlighted_mnemonic = None;
                 self.rename_generation += 1;
+                self.disasm_display_generation += 1;
                 self.session_path = Some(path);
                 self.data_sources_open = false;
                 self.nav_generation += 1;
@@ -418,6 +448,9 @@ impl ReghidraApp {
                 let action = Action::AddBookmark { address: addr };
                 self.undo.execute(action, project);
             }
+            // Bookmark add/remove inserts a `Bookmark` row into the
+            // disasm display list, so the cached list is now stale.
+            self.disasm_display_generation += 1;
         }
     }
 
@@ -515,8 +548,41 @@ impl eframe::App for ReghidraApp {
         // same value regardless of render order, then clear the write slot.
         self.hovered_address = self.hovered_address_next.take();
 
-        // Throttle repaints: only repaint at ~30 FPS max to avoid pegging CPU
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // Conditional repaint scheduling. Pre-fix: this called
+        // `request_repaint_after(33ms)` unconditionally, pinning the
+        // GUI to a 30 FPS continuous redraw loop even at idle —
+        // 40% CPU and gigabytes of egui frame allocations on a
+        // 226k-instruction PE binary. Now we only ask egui for a
+        // future repaint when there's actual pending work:
+        //
+        // - **Pending hover transition**: cross-view hover highlighting
+        //   uses `hovered_address_next` as a write slot that the next
+        //   frame promotes to `hovered_address`. If the most recent
+        //   frame *consumed* a hover write (i.e. `hovered_address` is
+        //   now `Some`), we need exactly one more paint so views
+        //   re-render with the new highlight. After that frame, the
+        //   write slot is empty and we go idle until the next user
+        //   input event.
+        // - **Status message fade**: the bottom status bar shows a
+        //   transient message that auto-clears after a few seconds.
+        //   Schedule a repaint for the clear deadline.
+        //
+        // Everything else (mouse moves, clicks, key presses, scroll
+        // wheels, focus changes) is handled by egui's reactive mode
+        // — those events naturally request a repaint via the input
+        // path, no help needed from us.
+        if self.hovered_address.is_some() {
+            // One follow-up frame to render the hover highlight.
+            ctx.request_repaint();
+        }
+        if let Some((_, deadline)) = self.status_message {
+            let now = std::time::Instant::now();
+            if let Some(remaining) = deadline.checked_duration_since(now) {
+                ctx.request_repaint_after(remaining);
+            } else {
+                ctx.request_repaint();
+            }
+        }
 
         // Apply theme
         if !self.theme_applied {
@@ -557,6 +623,14 @@ impl eframe::App for ReghidraApp {
                         self.rename_generation += 1;
                         self.decompile_cache = None;
                     }
+                    // Conservative: any undo could touch a bookmark
+                    // (the introspection helper only checks renames),
+                    // so bump the disasm display generation too. The
+                    // cost of an unnecessary cache rebuild is one
+                    // O(N_instructions) walk per undo, which is
+                    // negligible compared to skipping it on undos
+                    // that *do* affect the display list.
+                    self.disasm_display_generation += 1;
                     self.undo.undo(project);
                 }
             }
@@ -566,6 +640,7 @@ impl eframe::App for ReghidraApp {
                         self.rename_generation += 1;
                         self.decompile_cache = None;
                     }
+                    self.disasm_display_generation += 1;
                     self.undo.redo(project);
                 }
             }
@@ -1278,12 +1353,23 @@ impl eframe::App for ReghidraApp {
                 self.annotation_popup.kind,
                 crate::annotations::AnnotationKind::Comment
             );
+            let was_func_rename = matches!(
+                self.annotation_popup.kind,
+                crate::annotations::AnnotationKind::RenameFunction
+            );
             if let Some(ref mut project) = self.project {
                 let committed = self.annotation_popup
                     .show(ctx, &theme_clone, project, &mut self.undo);
                 if committed && was_rename {
                     self.rename_generation += 1;
                     self.decompile_cache = None;
+                }
+                // Function renames change the FuncHeaderName text in
+                // the disasm display list. Other rename kinds (label,
+                // variable) and comments don't affect the disasm
+                // display, so they don't bump this counter.
+                if committed && was_func_rename {
+                    self.disasm_display_generation += 1;
                 }
             }
         }
