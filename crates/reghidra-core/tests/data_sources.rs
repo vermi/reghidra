@@ -37,7 +37,7 @@ fn pe_fixture_credits_windows_archive_for_iat_imports() {
     // entry, so `resolve_import_functions` never copied import names
     // onto an analysis entry. This test pins the post-fix behavior:
     // import_addr_map names contribute to type archive hit counts.
-    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     let win_idx = project
@@ -47,7 +47,7 @@ fn pe_fixture_credits_windows_archive_for_iat_imports() {
         .expect("PE fixture should load a windows-* archive");
     let win_hits = project.type_archive_hits[win_idx];
 
-    // Lower bound is intentionally loose. pe-mingw32-strip.exe has
+    // Lower bound is intentionally loose. wildfire-test-pe-file.exe has
     // ~48 windows-x86 hits via the IAT; demanding >= 20 leaves slack
     // for fixture churn while still catching a regression to zero or
     // single digits.
@@ -62,7 +62,7 @@ fn pe_fixture_credits_windows_archive_for_iat_imports() {
 
 #[test]
 fn pe_fixture_reports_nonzero_type_archive_hits() {
-    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     let total_archive_hits: usize = project.type_archive_hits.iter().sum();
@@ -90,7 +90,7 @@ fn pe_fixture_reports_nonzero_type_archive_hits() {
 
 #[test]
 fn flirt_hit_totals_match_signature_source_count() {
-    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     let signature_count = project
@@ -116,7 +116,7 @@ fn flirt_hit_totals_match_signature_source_count() {
 
 #[test]
 fn disabling_type_archive_recomputes_hit_counts() {
-    let mut project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let mut project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     // Find an archive that actually has hits — there's no point
@@ -158,7 +158,7 @@ fn enumeration_lists_archives_not_auto_loaded() {
     // available-but-unloaded so the user can opt in. If
     // `available_archive_stems` regresses to just the loaded set, the
     // opt-in flow disappears and the panel becomes lossy again.
-    let project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     let stems = &project.available_archive_stems;
@@ -179,7 +179,7 @@ fn enumeration_lists_archives_not_auto_loaded() {
 
 #[test]
 fn lazy_load_type_archive_by_stem_appends_and_resolves() {
-    let mut project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let mut project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     let before = project.type_archives.len();
@@ -207,7 +207,7 @@ fn lazy_load_type_archive_by_stem_appends_and_resolves() {
 
 #[test]
 fn disabling_all_type_archives_strips_typed_signatures() {
-    let mut project = Project::open(&fixture("pe-mingw32-strip.exe"))
+    let mut project = Project::open(&fixture("wildfire-test-pe-file.exe"))
         .expect("open PE fixture");
 
     // Pick a function whose decompile output currently shows a typed

@@ -1,4 +1,4 @@
-use crate::app::ReghidraApp;
+use crate::app::{DecompileAuxCache, ReghidraApp};
 use crate::context_menu::{address_context_menu, apply_context_action, ContextAction};
 use egui::{RichText, Ui};
 use reghidra_core::AnnotatedLine;
@@ -65,7 +65,18 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         }
     }
 
-    let Some((_, _, ref annotated_lines, ref var_names)) = app.decompile_cache else {
+    // Take the decompile cache out for the duration of this frame so we
+    // can borrow its contents without fighting the app mutable borrow
+    // needed for navigate_to / context-action application below. Put it
+    // back unconditionally at the end. Pre-fix: the render path cloned
+    // `annotated_lines` (a Vec<AnnotatedLine> with N owned Strings) and
+    // `var_names` (Vec<String>) every frame to sidestep this conflict —
+    // on a function with thousands of lines that was a meaningful
+    // per-frame allocation cost and is the main reason long-function
+    // scrolling felt chunky.
+    let Some((cached_entry, cached_gen, annotated_lines, var_names)) =
+        app.decompile_cache.take()
+    else {
         ui.label("Could not decompile this function.");
         return;
     };
@@ -74,8 +85,6 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
     ui.separator();
 
     let theme = app.theme.clone();
-    let annotated_lines = annotated_lines.clone();
-    let var_names = var_names.clone();
 
     // Reverse map: displayed function name → entry address. Cached
     // on the App because building it requires demangling every
@@ -118,19 +127,61 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
         .map(|(_, m)| m)
         .expect("populated above");
 
-    // Build address-to-block mapping for the current function's IR
-    let addr_to_block: std::collections::HashMap<u64, u64> =
-        if let Some(ir) = project.analysis.ir_for(func_entry) {
-            let mut map = std::collections::HashMap::new();
-            for block in &ir.blocks {
-                for insn in &block.instructions {
-                    map.insert(insn.address, block.address);
+    // Build or reuse the per-function auxiliary cache (`addr_to_block`
+    // + `function_addrs`). Keyed on `(func_entry, rename_generation)`:
+    // structurally neither of these depends on rename gen, but piggy-
+    // backing on that counter gives us free invalidation on any event
+    // that already bumps it. Pre-cache: `addr_to_block` walked every
+    // IR instruction in the current function every frame (O(ir_insns))
+    // and `function_addrs` walked `analysis.functions` every frame —
+    // both dominated the per-frame cost on long functions.
+    let aux_cur_gen = app.rename_generation;
+    let aux_hit = matches!(
+        &app.decompile_aux_cache,
+        Some((cached_entry, cached_gen, _))
+            if *cached_entry == func_entry && *cached_gen == aux_cur_gen
+    );
+    if !aux_hit {
+        let addr_to_block: std::collections::HashMap<u64, u64> =
+            if let Some(ir) = project.analysis.ir_for(func_entry) {
+                let mut map = std::collections::HashMap::new();
+                for block in &ir.blocks {
+                    for insn in &block.instructions {
+                        map.insert(insn.address, block.address);
+                    }
                 }
-            }
-            map
-        } else {
-            std::collections::HashMap::new()
-        };
+                map
+            } else {
+                std::collections::HashMap::new()
+            };
+        let function_addrs: std::collections::HashSet<u64> = project
+            .analysis
+            .functions
+            .iter()
+            .map(|f| f.entry_address)
+            .collect();
+        app.decompile_aux_cache = Some((
+            func_entry,
+            aux_cur_gen,
+            DecompileAuxCache {
+                addr_to_block,
+                function_addrs,
+            },
+        ));
+    }
+    // Re-borrow after the potential &mut write above.
+    let Some(ref project) = app.project else {
+        // Put the decompile cache back before bailing.
+        app.decompile_cache = Some((cached_entry, cached_gen, annotated_lines, var_names));
+        return;
+    };
+    let aux: &DecompileAuxCache = app
+        .decompile_aux_cache
+        .as_ref()
+        .map(|(_, _, a)| a)
+        .expect("populated above");
+    let addr_to_block: &std::collections::HashMap<u64, u64> = &aux.addr_to_block;
+    let function_addrs: &std::collections::HashSet<u64> = &aux.function_addrs;
 
     // The block address that contains the selected instruction
     let selected_block = addr_to_block.get(&selected_addr).copied();
@@ -173,16 +224,13 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     // Pre-compute bookmark/comment sets used by the context menu — done once
     // here so the per-token render closure doesn't need to re-borrow project.
+    // `function_addrs` is NOT rebuilt here anymore; it's carried on
+    // `decompile_aux_cache` above so the O(N_functions) walk only
+    // happens on function switch or rename.
     let bookmarks: std::collections::HashSet<u64> =
         project.bookmarks.iter().copied().collect();
     let comments: std::collections::HashSet<u64> =
         project.comments.keys().copied().collect();
-    let function_addrs: std::collections::HashSet<u64> = project
-        .analysis
-        .functions
-        .iter()
-        .map(|f| f.entry_address)
-        .collect();
     // Reverse map of user-renamed labels: name → address
     let label_name_to_addr: std::collections::HashMap<String, u64> = project
         .label_names
@@ -243,7 +291,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                         &mut ctx_action,
                         &bookmarks,
                         &comments,
-                        &function_addrs,
+                        function_addrs,
                     );
                 })
                 .response;
@@ -260,6 +308,14 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             }
         }
     });
+
+    // Put the taken decompile cache back. This must happen before any
+    // &mut self method calls that also touch decompile_cache (e.g.
+    // `navigate_to` itself does not, but `apply_context_action` can
+    // for rename actions that null the cache). The cache is
+    // structurally identical to what was taken out — nothing was
+    // mutated during render.
+    app.decompile_cache = Some((cached_entry, cached_gen, annotated_lines, var_names));
 
     // Only update hovered_address if the mouse is actually in this view
     if new_hovered.is_some() {

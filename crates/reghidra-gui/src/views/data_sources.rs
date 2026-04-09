@@ -147,6 +147,11 @@ pub fn render_window(app: &mut ReghidraApp, ctx: &egui::Context) {
         // cache forces the next decompile-view paint to call back into
         // the project with the new effective archive set.
         app.decompile_cache = None;
+        // The disasm view's minimap markers depend on which archives
+        // are currently enabled (type-only / both stripes), so the
+        // cached display list is stale too.
+        app.disasm_lines_cache = None;
+        app.disasm_display_generation += 1;
     }
 }
 
@@ -157,6 +162,7 @@ pub fn render_window(app: &mut ReghidraApp, ctx: &egui::Context) {
 /// Snapshot of one row in the FLIRT tree. Built up front so we can
 /// mutate `project` for toggle actions without fighting the borrow
 /// checker on the iterator state.
+#[derive(Clone)]
 struct FlirtRowSnapshot {
     subdir: String,
     stem: String,
@@ -171,6 +177,14 @@ struct FlirtRowSnapshot {
     enabled: bool,
     sig_count: Option<usize>,
     hits: Option<usize>,
+    /// Mirrors `AvailableSig::is_legacy` — true for Borland/Watcom/
+    /// Digital Mars/old MFC/VisualAge/etc. sigs that ship in the
+    /// embedded tree but don't auto-load. The panel partitions each
+    /// leaf into modern rows (shown directly) and a "Legacy
+    /// toolchains" subgroup so the default view isn't dominated by
+    /// a wall of 1990s compilers. User sigs are always considered
+    /// non-legacy.
+    is_legacy: bool,
 }
 
 /// Action requested by a single click in the FLIRT tree. Drained after
@@ -239,6 +253,7 @@ fn render_flirt_section(
             enabled,
             sig_count,
             hits,
+            is_legacy: sig.is_legacy,
         };
         let parts: Vec<&str> = sig.subdir.split('/').collect();
         match parts.as_slice() {
@@ -272,6 +287,7 @@ fn render_flirt_section(
             enabled: project.user_db_enabled.get(i).copied().unwrap_or(true),
             sig_count: Some(db.signature_count),
             hits: Some(project.user_db_hits.get(i).copied().unwrap_or(0)),
+            is_legacy: false,
         })
         .collect();
 
@@ -340,14 +356,61 @@ fn render_flirt_section(
                             .id_salt(format!("flirt_bits::{format}/{arch}/{bits}"))
                             .default_open(bits_loaded > 0)
                             .show(ui, |ui| {
-                                emit_flirt_table(
-                                    ui,
-                                    theme,
-                                    &format!("flirt_grid::{format}/{arch}/{bits}"),
-                                    rows,
-                                    &widths,
-                                    &mut actions,
-                                );
+                                // Partition the leaf into modern and
+                                // legacy rows. Modern rows render
+                                // directly inline; legacy rows (pre-
+                                // 2010 toolchains: Borland/Watcom/
+                                // Digital Mars/old MFC/etc.) get
+                                // their own nested collapsing header
+                                // that defaults closed unless the
+                                // user has opted into something
+                                // inside it. Keeps the default view
+                                // focused on sigs that actually
+                                // produce hits on modern targets.
+                                let (modern_rows, legacy_rows): (Vec<_>, Vec<_>) =
+                                    rows.iter().partition(|r| !r.is_legacy);
+                                if !modern_rows.is_empty() {
+                                    let modern_owned: Vec<FlirtRowSnapshot> =
+                                        modern_rows.into_iter().cloned().collect();
+                                    emit_flirt_table(
+                                        ui,
+                                        theme,
+                                        &format!("flirt_grid::{format}/{arch}/{bits}"),
+                                        &modern_owned,
+                                        &widths,
+                                        &mut actions,
+                                    );
+                                }
+                                if !legacy_rows.is_empty() {
+                                    let legacy_loaded = legacy_rows
+                                        .iter()
+                                        .filter(|r| r.loaded_idx.is_some())
+                                        .count();
+                                    egui::CollapsingHeader::new(tree_header(
+                                        theme,
+                                        "Legacy toolchains",
+                                        legacy_loaded,
+                                        legacy_rows.len(),
+                                    ))
+                                    .id_salt(format!(
+                                        "flirt_legacy::{format}/{arch}/{bits}"
+                                    ))
+                                    .default_open(legacy_loaded > 0)
+                                    .show(ui, |ui| {
+                                        let legacy_owned: Vec<FlirtRowSnapshot> =
+                                            legacy_rows.into_iter().cloned().collect();
+                                        emit_flirt_table(
+                                            ui,
+                                            theme,
+                                            &format!(
+                                                "flirt_grid_legacy::{format}/{arch}/{bits}"
+                                            ),
+                                            &legacy_owned,
+                                            &widths,
+                                            &mut actions,
+                                        );
+                                    });
+                                }
                             });
                         }
                     });

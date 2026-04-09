@@ -20,6 +20,18 @@ pub struct Function {
     /// user-loaded `.sig` was responsible.
     #[serde(default)]
     pub matched_signature_db: Option<String>,
+    /// `module_length` of the current FLIRT match, when
+    /// `source == FunctionSource::Signature`. Used by `apply_signatures`
+    /// as a match-quality tiebreaker across databases: when a later db
+    /// produces a match with a strictly longer `module_length`, it wins
+    /// over the currently-recorded match. This stops generic sigs
+    /// (e.g. a WDK entry whose pattern is just a short `jmp` thunk)
+    /// from "poisoning" function names and blocking more specific
+    /// later sigs — the canonical case being a lazy-loaded BDS/Borland
+    /// sig that wants to rename a function an earlier auto-loaded sig
+    /// already claimed with a garbage 5-byte match.
+    #[serde(default)]
+    pub matched_signature_length: Option<u32>,
 }
 
 /// How the function was detected.
@@ -147,6 +159,7 @@ pub fn detect_functions(
             source,
             instruction_count: insn_count,
             matched_signature_db: None,
+            matched_signature_length: None,
         });
         cfgs.insert(entry, cfg);
     }

@@ -46,6 +46,13 @@ pub enum ViewLayout {
     SplitVertical,
 }
 
+/// Per-function auxiliary data cached for the decompile view.
+/// See the doc comment on `ReghidraApp::decompile_aux_cache`.
+pub struct DecompileAuxCache {
+    pub addr_to_block: std::collections::HashMap<u64, u64>,
+    pub function_addrs: std::collections::HashSet<u64>,
+}
+
 pub struct ReghidraApp {
     pub logo: Option<egui::TextureHandle>,
     pub project: Option<Project>,
@@ -135,6 +142,22 @@ pub struct ReghidraApp {
     /// noticeable per-frame cost. Invalidated by `rename_generation`.
     pub func_name_to_addr_cache: Option<(u64, std::collections::HashMap<String, u64>)>,
 
+    /// Cached per-function auxiliary data used by the decompile view's
+    /// render loop. Pre-cache: these were all rebuilt every frame inside
+    /// `decompile::render`, which on long functions (thousands of IR
+    /// instructions) was a meaningful per-frame cost and made scrolling
+    /// chunky. Keyed on `(func_entry, rename_generation)` so a rename
+    /// or function switch invalidates cleanly.
+    ///
+    /// Contents:
+    /// - `addr_to_block`: maps each source instruction address in the
+    ///   current function's IR to the block entry address that contains
+    ///   it (used for block highlighting on selection/hover).
+    /// - `function_addrs`: set of all known function entry addresses in
+    ///   the binary — the per-token context menu uses it to decide
+    ///   whether a clicked identifier is a function reference.
+    pub decompile_aux_cache: Option<(u64, u64, DecompileAuxCache)>,
+
     /// Path to the current session file (set after Save/Load Session).
     pub session_path: Option<PathBuf>,
     /// Status message shown briefly in the status bar.
@@ -183,6 +206,7 @@ impl ReghidraApp {
             disasm_display_generation: 0,
             disasm_lines_cache: None,
             func_name_to_addr_cache: None,
+            decompile_aux_cache: None,
             session_path: None,
             status_message: None,
             data_sources_open: false,
@@ -201,6 +225,7 @@ impl ReghidraApp {
                 self.loading_error = None;
                 self.undo = UndoHistory::new();
                 self.decompile_cache = None;
+                self.decompile_aux_cache = None;
                 self.disasm_lines_cache = None;
                 self.func_name_to_addr_cache = None;
                 self.disasm_display_generation += 1;
@@ -234,6 +259,7 @@ impl ReghidraApp {
                 self.loading_error = None;
                 self.undo = UndoHistory::new();
                 self.decompile_cache = None;
+                self.decompile_aux_cache = None;
                 self.disasm_lines_cache = None;
                 self.func_name_to_addr_cache = None;
                 self.hovered_address = None;

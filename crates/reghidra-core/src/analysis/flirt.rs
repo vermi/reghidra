@@ -686,10 +686,24 @@ pub fn apply_signatures(
     let mut match_count = 0;
 
     for func in functions.iter_mut() {
-        // Only rename unnamed functions
-        if !matches!(func.source, FunctionSource::CallTarget | FunctionSource::Prologue) {
-            continue;
-        }
+        // Eligibility:
+        // - `CallTarget`/`Prologue`: never renamed → proceed freely.
+        // - `Signature`: already matched by an earlier db in this
+        //   analysis pass → proceed but require a *strictly better*
+        //   match (longer `module_length`) to overwrite. This stops
+        //   earlier-loaded sigs from poisoning function names with
+        //   tiny generic matches (e.g. a WDK sig matching a 5-byte
+        //   `jmp` thunk as `??0CHAROP@@QAE@XZ`) that would otherwise
+        //   block later, more specific matches from lazy-loaded sigs
+        //   (the BDS / Borland CRT case).
+        // - everything else (EntryPoint, Symbol, AutoNamed, PData,
+        //   GuardCf, TailCallTarget): skip entirely. These carry
+        //   authoritative names from sources we trust more than FLIRT.
+        let current_best_len = match func.source {
+            FunctionSource::CallTarget | FunctionSource::Prologue => None,
+            FunctionSource::Signature => Some(func.matched_signature_length.unwrap_or(0)),
+            _ => continue,
+        };
 
         // Read function bytes from the binary
         // Use at least 256 bytes or the function size, whichever is larger
@@ -717,9 +731,20 @@ pub fn apply_signatures(
             continue;
         }
 
+        // For re-match (source already Signature), require strictly
+        // longer module_length than the existing match. Equal length
+        // is NOT enough — ties preserve the earlier match to keep
+        // analysis deterministic across re-runs.
+        if let Some(existing_len) = current_best_len {
+            if best.module_length <= existing_len {
+                continue;
+            }
+        }
+
         func.name = best.name.clone();
         func.source = FunctionSource::Signature;
         func.matched_signature_db = Some(db.header.name.clone());
+        func.matched_signature_length = Some(best.module_length);
         match_count += 1;
     }
 
