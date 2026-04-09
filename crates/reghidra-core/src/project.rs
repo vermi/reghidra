@@ -101,6 +101,26 @@ pub struct Project {
     /// Kept behind `Arc` because the decompile context clones references
     /// cheaply per-function.
     pub type_archives: Vec<Arc<TypeArchive>>,
+    /// Per-database enable flags for the Loaded Data Sources panel.
+    /// Parallel to [`Self::bundled_dbs`] / [`Self::user_dbs`] /
+    /// [`Self::type_archives`]. Toggling recomputes the effective sets
+    /// returned by [`Self::effective_flirt_db_refs`] and
+    /// [`Self::effective_type_archives`]; FLIRT toggles also force a
+    /// full re-analysis (rename application happens at analysis time,
+    /// not decompile time). Not session-persisted in v1 — these are
+    /// reset every project open.
+    pub bundled_db_enabled: Vec<bool>,
+    pub user_db_enabled: Vec<bool>,
+    pub type_archive_enabled: Vec<bool>,
+    /// Per-source hit counts on the *current* binary, computed against
+    /// the *currently enabled* sources. A disabled source shows 0 even
+    /// if it would otherwise resolve names — that surfaces the
+    /// precedence chain ("disable windows-x64 and watch rizin-windows
+    /// take over"). Recomputed by [`Self::recompute_hit_counts`] after
+    /// every analysis run and after every enable toggle.
+    pub bundled_db_hits: Vec<usize>,
+    pub user_db_hits: Vec<usize>,
+    pub type_archive_hits: Vec<usize>,
 }
 
 impl Project {
@@ -145,7 +165,12 @@ impl Project {
         // in by later PRs (arity capping, typed VarDecls, retype UI).
         let type_archives = load_type_archives(&binary.info);
 
-        Ok(Self {
+        let bundled_db_enabled = vec![true; bundled_dbs.len()];
+        let type_archive_enabled = vec![true; type_archives.len()];
+        let bundled_db_hits = vec![0; bundled_dbs.len()];
+        let type_archive_hits = vec![0; type_archives.len()];
+
+        let mut project = Self {
             binary,
             instructions,
             analysis,
@@ -159,7 +184,15 @@ impl Project {
             user_dbs: Vec::new(),
             sig_status,
             type_archives,
-        })
+            bundled_db_enabled,
+            user_db_enabled: Vec::new(),
+            type_archive_enabled,
+            bundled_db_hits,
+            user_db_hits: Vec::new(),
+            type_archive_hits,
+        };
+        project.recompute_hit_counts();
+        Ok(project)
     }
 
     /// Load a user-provided FLIRT .sig file and re-run analysis with all signatures.
@@ -170,19 +203,10 @@ impl Project {
         let sig_count = db.signature_count;
 
         self.user_dbs.push(db);
+        self.user_db_enabled.push(true);
+        self.user_db_hits.push(0);
 
-        // Re-run analysis with all signature databases (bundled + user)
-        let all_db_refs: Vec<&FlirtDatabase> = self
-            .bundled_dbs
-            .iter()
-            .chain(self.user_dbs.iter())
-            .collect();
-
-        self.analysis = AnalysisResults::analyze_with_signatures(
-            &self.binary,
-            &self.instructions,
-            &all_db_refs,
-        );
+        self.reanalyze_with_current_signatures();
 
         let match_count = self
             .analysis
@@ -196,6 +220,170 @@ impl Project {
         ));
 
         Ok(match_count)
+    }
+
+    /// Re-run analysis using only currently-enabled FLIRT databases.
+    /// Used by [`Self::load_signatures`] and the Loaded Data Sources
+    /// panel toggles. Always followed by a hit-count recompute so the
+    /// panel reflects the new state.
+    fn reanalyze_with_current_signatures(&mut self) {
+        let all_db_refs: Vec<&FlirtDatabase> = self.effective_flirt_db_refs();
+        self.analysis = AnalysisResults::analyze_with_signatures(
+            &self.binary,
+            &self.instructions,
+            &all_db_refs,
+        );
+        self.recompute_hit_counts();
+    }
+
+    /// Currently-enabled FLIRT databases as references, in
+    /// bundled-then-user order. Used by re-analysis after toggles and
+    /// by `load_signatures`. Order matters: the first match wins, so
+    /// bundled IDA-precedence ordering is preserved.
+    pub fn effective_flirt_db_refs(&self) -> Vec<&FlirtDatabase> {
+        self.bundled_dbs
+            .iter()
+            .zip(self.bundled_db_enabled.iter())
+            .filter_map(|(db, on)| on.then_some(db))
+            .chain(
+                self.user_dbs
+                    .iter()
+                    .zip(self.user_db_enabled.iter())
+                    .filter_map(|(db, on)| on.then_some(db)),
+            )
+            .collect()
+    }
+
+    /// Currently-enabled type archives, in declared precedence order.
+    /// Cloned cheaply since each archive is `Arc`-wrapped. Plumbed
+    /// into [`reghidra_decompile::DecompileContext`] at decompile time
+    /// instead of `self.type_archives` so that disabling an archive
+    /// from the Loaded Data Sources panel takes effect on the next
+    /// re-render without needing to rebuild the project.
+    pub fn effective_type_archives(&self) -> Vec<Arc<TypeArchive>> {
+        self.type_archives
+            .iter()
+            .zip(self.type_archive_enabled.iter())
+            .filter(|(_, on)| **on)
+            .map(|(a, _)| a.clone())
+            .collect()
+    }
+
+    /// Toggle a bundled FLIRT database on/off. Triggers a full
+    /// re-analysis because FLIRT renames are baked in at analysis time
+    /// (`apply_signatures` mutates `Function::name` / `Function::source`).
+    /// Caller is responsible for forcing any UI re-render that depends
+    /// on function names.
+    pub fn set_bundled_db_enabled(&mut self, idx: usize, enabled: bool) {
+        if let Some(slot) = self.bundled_db_enabled.get_mut(idx) {
+            if *slot == enabled {
+                return;
+            }
+            *slot = enabled;
+            self.reanalyze_with_current_signatures();
+        }
+    }
+
+    /// Toggle a user-loaded FLIRT database on/off. See
+    /// [`Self::set_bundled_db_enabled`].
+    pub fn set_user_db_enabled(&mut self, idx: usize, enabled: bool) {
+        if let Some(slot) = self.user_db_enabled.get_mut(idx) {
+            if *slot == enabled {
+                return;
+            }
+            *slot = enabled;
+            self.reanalyze_with_current_signatures();
+        }
+    }
+
+    /// Toggle a bundled type archive on/off. Does NOT re-run analysis
+    /// because type archives are consumed at decompile time, not at
+    /// analysis time — the next call to [`Self::decompile`] /
+    /// [`Self::decompile_annotated`] picks up the new effective set
+    /// via [`Self::effective_type_archives`]. The hit counts are
+    /// recomputed inline so the panel reflects the new precedence
+    /// chain immediately.
+    pub fn set_type_archive_enabled(&mut self, idx: usize, enabled: bool) {
+        if let Some(slot) = self.type_archive_enabled.get_mut(idx) {
+            if *slot == enabled {
+                return;
+            }
+            *slot = enabled;
+            self.recompute_hit_counts();
+        }
+    }
+
+    /// Recompute per-source hit counts on the current binary.
+    ///
+    /// FLIRT hits are attributed via `Function::matched_signature_db`
+    /// (set by `apply_signatures`) — a one-pass walk over
+    /// `analysis.functions` filtered to `FunctionSource::Signature`,
+    /// matching the lib name against each enabled db's
+    /// `header.name`. Disabled dbs always show 0.
+    ///
+    /// Type archive hits use
+    /// [`reghidra_decompile::type_archive::which_archive_resolves`]
+    /// over the *enabled* archive list so the count reflects the
+    /// effective precedence chain. The walked key is each function's
+    /// canonical `name` (the same string the decompiler will use to
+    /// resolve a prototype). Imports that show up only in
+    /// `binary.import_addr_map` and not as a separate
+    /// `analysis.functions` entry are not counted in v1; the slight
+    /// undercount is acceptable and noted on the panel.
+    pub fn recompute_hit_counts(&mut self) {
+        let mut bundled_hits = vec![0usize; self.bundled_dbs.len()];
+        let mut user_hits = vec![0usize; self.user_dbs.len()];
+        let mut archive_hits = vec![0usize; self.type_archives.len()];
+
+        // Pre-resolve which db slot owns each lib name; lookup tables
+        // beat re-scanning the db lists per function and avoid the
+        // self-borrow tangle of nested iter+find inside the loop.
+        let bundled_lookup: HashMap<&str, usize> = self
+            .bundled_dbs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.bundled_db_enabled[*i])
+            .map(|(i, db)| (db.header.name.as_str(), i))
+            .collect();
+        let user_lookup: HashMap<&str, usize> = self
+            .user_dbs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.user_db_enabled[*i])
+            .map(|(i, db)| (db.header.name.as_str(), i))
+            .collect();
+
+        let enabled_indices: Vec<usize> = self
+            .type_archive_enabled
+            .iter()
+            .enumerate()
+            .filter_map(|(i, on)| on.then_some(i))
+            .collect();
+        let enabled_archives: Vec<Arc<TypeArchive>> = enabled_indices
+            .iter()
+            .map(|i| self.type_archives[*i].clone())
+            .collect();
+
+        for func in &self.analysis.functions {
+            if let Some(lib) = func.matched_signature_db.as_deref() {
+                if let Some(&i) = bundled_lookup.get(lib) {
+                    bundled_hits[i] += 1;
+                } else if let Some(&i) = user_lookup.get(lib) {
+                    user_hits[i] += 1;
+                }
+            }
+            if !enabled_archives.is_empty() {
+                if let Some(local_idx) =
+                    type_archive::which_archive_resolves(&func.name, &enabled_archives)
+                {
+                    archive_hits[enabled_indices[local_idx]] += 1;
+                }
+            }
+        }
+
+        self.bundled_db_hits = bundled_hits;
+        self.user_db_hits = user_hits;
+        self.type_archive_hits = archive_hits;
     }
 
     /// Get the display name for a function at the given address.
@@ -377,7 +565,7 @@ impl Project {
             variable_names: var_names_for_func,
             variable_types: var_types_for_func,
             current_function_display_name: self.current_function_display_name(entry, &ir.name),
-            type_archives: self.type_archives.clone(),
+            type_archives: self.effective_type_archives(),
         };
 
         // The FrameLayout returned here is currently discarded at the
@@ -437,7 +625,7 @@ impl Project {
             variable_names: var_names_for_func,
             variable_types: var_types_for_func,
             current_function_display_name: self.current_function_display_name(entry, &ir.name),
-            type_archives: self.type_archives.clone(),
+            type_archives: self.effective_type_archives(),
         };
 
         // Same frame-layout discard as `decompile` above — see that comment.

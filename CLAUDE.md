@@ -8,342 +8,205 @@ Reghidra is a Rust-based reverse engineering framework reimplementing Ghidra's c
 reghidra/
 ├── Cargo.toml                          # workspace root
 ├── crates/
-│   ├── reghidra-core/
-│   │   └── src/
-│   │       ├── lib.rs                  # public API re-exports
-│   │       ├── arch.rs                 # Architecture enum
-│   │       ├── binary.rs               # ELF/PE/Mach-O loader (goblin)
-│   │       ├── demangle.rs             # MSVC C++ + @/_stdcall decoration stripping
-│   │       ├── disasm.rs               # Disassembler (capstone)
-│   │       ├── error.rs                # CoreError
-│   │       ├── project.rs              # Project (ties everything together)
-│   │       └── analysis/
-│   │           ├── mod.rs              # AnalysisResults
-│   │           ├── functions.rs        # Function detection
-│   │           ├── cfg.rs              # Control flow graph
-│   │           ├── xrefs.rs            # Cross-references
-│   │           ├── naming.rs           # Heuristic auto-naming
-│   │           ├── flirt.rs            # FLIRT .sig parser + matcher
-│   │           └── bundled_sigs.rs     # Bundled sigdb (auto-loaded per format+arch)
-│   ├── reghidra-ir/
-│   │   └── src/
-│   │       ├── lib.rs                  # public API
-│   │       ├── op.rs                   # IrOp enum (~30 opcodes), VarNode, VarSpace
-│   │       ├── types.rs                # IrInstruction, IrBlock, IrFunction
-│   │       ├── display.rs              # Display impls for pretty-printing
-│   │       ├── optimize.rs             # constant fold, copy prop, DCE
-│   │       └── lifter/
-│   │           ├── mod.rs              # LiftContext, DisasmInput
-│   │           ├── x86_64.rs           # x86_64 lifter
-│   │           └── arm64.rs            # ARM64 lifter
-│   ├── reghidra-decompile/
-│   │   └── src/
-│   │       ├── lib.rs                  # decompile() entry point
-│   │       ├── ast.rs                  # Expr/Stmt/CType AST
-│   │       ├── expr_builder.rs         # IR ops → AST (+ g_dat_ rewrite, stack-arg collapse)
-│   │       ├── stackframe.rs           # Frame detection, local_/arg_ slots, prologue cleanup
-│   │       ├── structuring.rs          # CFG → if/else/while/goto
-│   │       ├── varnames.rs             # Register/temp renaming, canonical_reg_name
-│   │       ├── types.rs                # Varnode → CType inference (stub)
-│   │       ├── type_archive/           # Phase 5c: bundled type archives
-│   │       │   ├── mod.rs              # TypeArchive, FunctionType, TypeRef, load_embedded
-│   │       │   └── archive.rs          # postcard (de)serialization + version gate
-│   │       └── emit.rs                 # AST → C-like text (style + blank-line separators)
-│   ├── reghidra-gui/
-│   │   └── src/
-│   │       ├── main.rs                 # Entry point
-│   │       ├── app.rs                  # App state + eframe::App impl
-│   │       ├── annotations.rs          # Comment/rename popup dialogs
-│   │       ├── context_menu.rs         # Right-click context menu (symbol actions)
-│   │       ├── palette.rs              # Command palette (Cmd+K)
-│   │       ├── syntax.rs               # C lexer for decomp view per-token coloring
-│   │       ├── theme.rs                # Dark/light themes + color palette (Nord/Solarized)
-│   │       ├── undo.rs                 # Undo/redo history (Action enum)
-│   │       ├── help.rs                 # In-app help overlay (quickstart, keys, views, workflow)
-│   │       └── views/
-│   │           ├── disasm.rs           # Disassembly view
-│   │           ├── decompile.rs        # Decompiled C view
-│   │           ├── hex.rs              # Hex view
-│   │           ├── cfg.rs              # CFG view
-│   │           ├── ir.rs               # IR view
-│   │           ├── xrefs.rs            # Cross-references view
-│   │           └── side_panel.rs       # Sidebar (fns, symbols, etc.)
+│   ├── reghidra-core/src/
+│   │   ├── lib.rs                      # public API re-exports
+│   │   ├── arch.rs                     # Architecture enum
+│   │   ├── binary.rs                   # ELF/PE/Mach-O loader (goblin)
+│   │   ├── demangle.rs                 # MSVC C++ + @/_stdcall decoration stripping
+│   │   ├── disasm.rs                   # Disassembler (capstone)
+│   │   ├── error.rs                    # CoreError
+│   │   ├── project.rs                  # Project (ties everything together)
+│   │   └── analysis/                   # mod, functions, cfg, xrefs, naming, flirt, bundled_sigs
+│   ├── reghidra-ir/src/
+│   │   ├── op.rs                       # IrOp enum (~30 opcodes), VarNode, VarSpace
+│   │   ├── types.rs                    # IrInstruction, IrBlock, IrFunction
+│   │   ├── optimize.rs                 # constant fold, copy prop, DCE
+│   │   └── lifter/{mod,x86_64,arm64}.rs
+│   ├── reghidra-decompile/src/
+│   │   ├── lib.rs                      # decompile() entry point
+│   │   ├── ast.rs                      # Expr/Stmt/CType AST
+│   │   ├── expr_builder.rs             # IR ops → AST (+ g_dat_ rewrite, stack-arg collapse)
+│   │   ├── stackframe.rs               # Frame detection, local_/arg_ slots, prologue cleanup
+│   │   ├── structuring.rs              # CFG → if/else/while/goto
+│   │   ├── varnames.rs                 # Register/temp renaming, canonical_reg_name
+│   │   ├── types.rs                    # Varnode → CType inference (stub)
+│   │   ├── type_archive/               # TypeArchive, FunctionType, TypeRef, postcard (de)ser
+│   │   └── emit.rs                     # AST → C-like text (style + blank-line separators)
+│   ├── reghidra-gui/src/
+│   │   ├── main.rs, app.rs             # entry + eframe::App
+│   │   ├── annotations.rs              # Comment/rename popup dialogs
+│   │   ├── context_menu.rs             # Right-click context menu (symbol actions)
+│   │   ├── palette.rs                  # Command palette (Cmd+K)
+│   │   ├── syntax.rs                   # C lexer for decomp view per-token coloring
+│   │   ├── theme.rs                    # Dark/light themes (Nord/Solarized)
+│   │   ├── undo.rs                     # Undo/redo history (Action enum)
+│   │   ├── help.rs                     # In-app help overlay
+│   │   └── views/                      # disasm, decompile, hex, cfg, ir, xrefs, side_panel
 │   └── reghidra-cli/                   # Headless CLI
-├── signatures/                         # Bundled FLIRT .sig files (rizinorg/sigdb + IDA-derived packs, IDA-precedence at load)
-│   ├── elf/{arm,mips,x86}/{32,64}/     # ELF sigs by arch+bitness
-│   └── pe/{arm,mips,sh,x86}/{32,64}/   # PE sigs by arch+bitness
+├── signatures/                         # Bundled FLIRT .sig (rizinorg/sigdb + IDA packs)
+│   └── {elf,pe}/{arm,mips,sh,x86}/{32,64}/
+├── types/                              # Bundled .rtarch type archives (Phase 5c)
 └── tests/fixtures/                     # Test binaries
 ```
 
 ## Key Dependencies
-- `goblin` — ELF/PE/Mach-O binary parsing
-- `capstone` — multi-arch disassembly
-- `egui` + `eframe` — GUI framework
-- `msvc-demangler` — MSVC C++ symbol demangling (wired via `reghidra-core::demangle`)
-- `serde` + `serde_json` — session persistence
-- `flate2`, `include_dir` — bundled signature loading
-
-Planned (not yet pulled in):
-- `pdb` — PDB debug info parser (Phase 5c)
-- `syn` + `quote` — build-time type archive extraction from `windows-sys` / `libc` (Phase 5c `tools/typegen`)
-- `postcard` — on-disk type archive format (Phase 5c)
-- `mlua` — Lua scripting (Phase 6)
+- `goblin` (binary parsing), `capstone` (disasm), `egui`+`eframe` (GUI)
+- `msvc-demangler` (wired via `reghidra-core::demangle`)
+- `serde`+`serde_json` (session persistence), `flate2`, `include_dir` (bundled sigs/archives)
+- `postcard` (type archive on-disk format), `syn`+`quote` (typegen tool only)
+- Planned: `pdb` (deprioritized), `mlua` (Phase 6)
 
 ## Implementation Phases & Status
 
-### Phase 1 — Foundation (Binary Loading + Disassembly)
-- [x] Project scaffolding (Cargo workspace with all crates)
-- [x] Binary loader using goblin (ELF, PE, Mach-O)
-- [x] Disassembler using capstone (x86_64, ARM64)
-- [x] Basic GUI shell (file open, disasm view, hex view, symbols sidebar, function list)
+### Phase 1 — Foundation [DONE]
+Workspace scaffold, ELF/PE/Mach-O loader, x86_64 + ARM64 disassembly, basic GUI shell.
 
-### Phase 2 — Analysis Engine
-- [x] Function detection (symbols + heuristic prologue/epilogue + call targets + gated tail-call jmp targets + MSVC hotpatch prologue)
-- [x] CFG-reachability-based function extents (two-pass: entry discovery → per-entry CFG walk stopping at rets, indirect branches, and other known entries)
-- [x] PE metadata mining: x64 `.pdata` exception table, Debug Directory CodeView RSDS (PDB GUID/age/path), Rich Header (MSVC toolchain fingerprint)
-- [x] Control flow graph (basic blocks, interactive CFG view in GUI)
-- [x] Cross-references (code xrefs + data xrefs, click-to-navigate, xref panel)
-- [x] String detection with xrefs
-- [x] Import/export resolution panel. **Mach-O note**: `from_single_macho` in `binary.rs` populates `import_addr_map` from two sources so that `call` instructions into external functions resolve to import names at decompile time. First, every entry in goblin's `imports()` (which yields `__got` / `__la_symbol_ptr` VAs) is inserted directly — this handles the `call qword ptr [rip + disp]` lift form the lifter already models as `Call { target: slot_addr }`. Second, on x86_64 the `__TEXT,__stubs` section is walked in 6-byte strides parsing `ff 25 disp32` (jmp rip-relative) instructions; each stub's rip-relative target is looked up in the already-populated map and if it resolves, `stub_addr → import_name` is inserted. This is what takes a stripped Mach-O fixture from "1 named function (_start), every external call unresolved" to "every direct `call stub_addr` renders as the right import name, and the auto-namer can then label calling wrappers (`fn_print_*`, `objc_getClass_wrapper`) because it can finally see what the callees are." Known remaining gap: pure indirect-through-register calls (`mov r15, [got_slot]; call r15`) still need to propagate the got slot's import name through the register, which today they don't — the lifter emits `CallInd` and the resolver doesn't follow register dataflow.
-- [x] Xref annotations inline in disassembly view
-- [x] Function headers in disassembly with xref counts
+### Phase 2 — Analysis Engine [DONE]
+- Function detection: symbols + heuristic prologue/epilogue + call targets + gated tail-call jmps + MSVC hotpatch prologue. Two-pass: entry discovery → per-entry CFG walk stopping at rets, indirect branches, and other entries.
+- PE metadata: x64 `.pdata`, Debug Directory CodeView RSDS (PDB GUID/age/path), Rich Header.
+- CFG (interactive view), code+data xrefs (click-to-navigate, panel), string detection.
+- **Mach-O import resolution** (`from_single_macho` in `binary.rs`): populates `import_addr_map` from goblin's `imports()` (`__got`/`__la_symbol_ptr` VAs) AND walks `__TEXT,__stubs` in 6-byte strides parsing `ff 25 disp32` to map stub_addr → import_name. Takes a stripped Mach-O fixture from "1 named fn" to "every direct `call stub_addr` resolves." Gap: register-indirect calls (`mov r15, [got]; call r15`) still emit `CallInd`; the resolver doesn't follow register dataflow.
+- Xref annotations and function headers in disasm view.
 
-### Phase 3 — Intermediate Representation + Lifting
-- [x] Design RIR (register transfer language with varnodes, ~30 opcodes)
-- [x] x86_64 lifter (mov, lea, push/pop, add/sub/mul, and/or/xor, shl/shr, cmp/test, jcc, call, ret, etc.)
-- [x] ARM64 lifter (mov/movz/movn, ldr/str/ldp/stp, add/sub/mul, and/orr/eor, cmp/tst, b/bl/blr/cbz/b.cond, ret, etc.)
-- [x] IR optimization passes (constant folding, copy propagation, dead code elimination, NOP removal)
-- [x] IR view in GUI (color-coded by op type, linked to source addresses)
+### Phase 3 — IR + Lifting [DONE]
+- RIR (~30 opcodes, varnodes), x86_64 + ARM64 lifters, optimization passes (constfold, copyprop, DCE, NOP removal), IR view in GUI.
 
-### Phase 4 — Decompiler
-- [x] Type inference (varnode size → C types: int8..uint64, pointer)
-- [x] Control flow structuring (if/else from CBranch, while from back-edges, goto fallback)
-- [x] Expression builder (IR ops → C-like AST: binary/unary ops, calls, derefs, casts)
-- [x] Variable naming heuristics (arg0-N for param regs, result for rax, var_N for temps)
-- [x] C-like pseudocode renderer with flag/stack cleanup
-- [x] Decompile view in GUI (color-coded by statement type)
+### Phase 4 — Decompiler [DONE]
+- Type inference (varnode size → C types), control flow structuring (if/else, while, goto fallback), expression builder, var naming heuristics, C-like renderer with flag/stack cleanup, decompile view.
 
-### Phase 5 — User Experience
-- [x] Unified click-to-navigate everywhere
-- [x] Inline annotations (comments, renames, bookmarks) with popup dialogs
-- [x] Fuzzy search + command palette (Cmd+K)
-- [x] Dark/light themes, centralized color palette
-- [x] Vim-like keyboard navigation (j/k, n/N, gg/G, ;, r, x, d, 1-6)
-- [x] Split/tabbed synchronized views (split is the default layout; Space to toggle single)
-- [x] Full undo/redo history (Cmd+Z / Cmd+Shift+Z)
-- [x] Right-click context menu on any symbol (navigate, comment, rename, bookmark, xrefs, copy address/string)
-- [x] Rename labels and decompiler variables in addition to functions
-- [x] Session persistence (comments, renames, bookmarks saved/loaded)
+### Phase 5 — UX [DONE]
+- Click-to-navigate everywhere; inline annotations (comments/renames/bookmarks); fuzzy command palette (Cmd+K); dark/light themes; vim-like nav (j/k, n/N, gg/G, ;, r, x, d, 1-6); split/tabbed views (split default, Space toggles); undo/redo (Cmd+Z); right-click context menu; rename labels and decompile vars; session persistence.
 
-### Phase 5a — In-App Documentation
-- [x] Help overlay with tabbed content (Quick Start, Keyboard, Views, Workflow)
-- [x] F1 and ? keyboard shortcuts to toggle help
-- [x] Help menu in menu bar
-- [x] Help accessible from welcome screen (before loading a binary)
-- [x] Help discoverable via command palette (Cmd+K → "Help")
-- [x] Status bar hint for help shortcut
+### Phase 5a — In-App Documentation [DONE]
+Help overlay (tabbed: Quick Start, Keyboard, Views, Workflow); F1/? shortcuts; menu + welcome screen + palette + status bar entry points.
 
-### Phase 5b — Decompiler Quality
-- [x] Merge IDA FLIRT sig packs (86 added) into bundled `signatures/` tree, IDA-precedence ordering at load time
-- [x] Fix FLIRT `IDASIG_FUNCTION_UNRESOLVED_COLLISION` (0x08) so collision-placeholder names don't leak through as `?`
-- [x] Resolve PE IAT call targets (`call [imm]` x86-32 and `call [rip+disp]` x86-64) — emits `Call { target: iat_addr }` and `project::decompile` merges `binary.import_addr_map` into `function_names`
-- [x] Fix double-deref bug: `parse_memory_expression` now returns address-value varnodes (`Constant`/`Register`/temp) for `[imm]`/`[reg]`/`[reg±imm]` instead of `VarSpace::Memory` descriptors that the expression builder was wrapping in a second `Deref`
-- [x] Fix `pop [mem]` and `push [mem]` regression after the above (`read_operand`/`write_operand` helpers in x86_64 lifter)
-- [x] Stack-arg collapsing in `expr_builder::build_statements` — defer `Store { addr=esp/rsp/sp }` ops, attach to following Call as args (reversed for source order), flush as plain stack writes if interrupted
-- [x] Variable rename canonicalization: sized aliases of one register share a single rename via `canonical_reg_name` (rax/eax/ax/al → rax, etc.), and `is_known_register_name` routes ALL recognized GPRs through the renamer instead of leaking through. x86-32 detection pre-pass (`scan_for_x86_32`) suppresses argN mapping when 32-bit register forms are seen.
-- [x] Tier-2 heuristic stack frame analysis (`reghidra-decompile/src/stackframe.rs`). Runs between `structure::structure` and `varnames::rename_variables`. Detects the canonical `push rbp; mov rbp, rsp` frame setup (x86) **and the ARM64 equivalents `mov x29, sp` and `add x29, sp, #N`** via `is_rbp`/`is_rsp` which accept x86 `rbp`/`ebp` + ARM64 `fp` and x86 `rsp`/`esp` + ARM64 `sp` respectively. Classifies `*(rbp)` / `*(rbp ± k)` / `*(fp ± k)` and via-temp (`tN = fp + k; *(tN)`) accesses into a `FrameLayout` keyed on signed offset, rewrites them to `local_<hex>` / `arg_<hex>` slot names (IDA-style — offset-keyed, NOT sequential, so retyping doesn't renumber siblings), drops the prologue bookkeeping (x86 `rsp = rsp - 8; *(rsp) = rbp; rbp = rsp;` and matching epilogue; ARM64 `fp = sp` or `fp = sp + const`), drops dead temp definitions whose only use was a stack-access address, and prepends `VarDecl` statements at the top of the function body for the discovered slots. Offset 0 is filtered out (saved rbp, always noise). When no frame pointer is detected but the function has a known prototype AND calls a `__SEH_prolog4`-style helper, a fallback path synthesizes arg slots directly from the prototype at standard x86-32 cdecl offsets (see Phase 5c PR below). **Remaining scope gaps**: (a) FPO / omit-frame-pointer builds with no SEH-prolog helper still get no rewrites (rsp-delta tracking deferred), (b) ARM64 `stp x29, x30, [sp, #-N]!` pre-index writeback is not modeled by the IR lifter yet — the `sp` update is silently dropped, so rsp-delta tracking would miss it if added, (c) slots default to `CType::Unknown(size)` when no prototype is available.
-- [x] Global data naming: bare `Load`/`Store` of a constant address ≥ `GLOBAL_DATA_MIN_ADDR` (0x1000) is rewritten by `expr_builder::memory_access_expr` into `g_dat_<hex>` instead of `*(0xADDR)`. Addresses in `function_names` (PE IAT slots etc.) emit the resolved function name instead. The GUI decompile tokenizer recognizes `g_dat_<hex>` as a clickable hex-address token. Click-to-navigate works; right-click rename works via the variable-name collector (g_dat names are picked up by `collect_displayed_names`). PDB symbol names are NOT yet wired up — only the `g_dat_` fallback is emitted (PDB parser currently only extracts GUID/age/path).
-- [x] RMW memory destinations in `lift_binop`/`lift_xor`/`lift_inc_dec`/`lift_not`/`lift_neg` — new `rmw_begin`/`rmw_end` helpers load current value into a temp, perform the op on the temp, and store the result back. Register destinations unchanged (no spurious Load/Store).
-- [x] `leave`/`pushfd`/`pushfq`/`popfd`/`popfq` lifter intrinsics (previously `/* unimpl */`)
-- [x] MSVC C++ name demangling for display via `reghidra_core::demangle` (msvc-demangler crate). Mangled names stay canonical in storage/renames/xref keys; GUI views and `project.functions()`/`project.display_function_name` go through the helper. `DecompileContext::current_function_display_name` carries the demangled form into `emit_function` without mutating the IR.
-  - **Two flavors**: `display_name` = full signature (used by decompile body + `function_names` call-target map); `display_name_short` (NAME_ONLY flag) = symbol only (used by sidebar function list, disasm block header, CFG/IR/xref headers, decompile top label). Full form and short form must match in their respective contexts — the reverse `name → addr` lookup map in `views/decompile.rs` uses `display_name` because that's what the decompile body prints in call expressions.
-  - **Calling-convention decoration**: `strip_msvc_decoration` handles `@name@N` (fastcall) and `_name@N` (stdcall) — e.g. `@__security_check_cookie@4` → `__security_check_cookie`. Bare leading underscores without the `@N` suffix are intentionally left alone (legitimate on ELF symbols like `_start`).
-  - **FLIRT `?` placeholder filter**: `is_meaningful_sig_name` in `flirt.rs` gates both `collect_matches` and the final apply step, so sig files that leak a bare `?` through the collision-bit filter no longer clutter the function list — affected functions stay as their canonical `sub_XXXX`.
-- [x] Blocky disassembly function header: four-line block (top rule, `; FUNCTION name`, `;   0xADDR · N insns · M xrefs`, bottom rule). Right-click context menu is attached to the name row; rules and stats are passive. Implemented as separate `DisplayLine::FuncHeaderRule` / `FuncHeaderName` / `FuncHeaderStats` variants so the fixed-row-height `show_rows` scrolling still works.
-- [x] Decompile output C-style compliance (UChicago guide). `void foo(void)` for empty param lists, `*var` / `&var` instead of `*(var)` / `&(var)` for tight operands (`needs_no_deref_parens` in `emit.rs`), unary operators on Binary/Ternary operands get explicit parens for precedence safety, blank-line separators between logical sections via `emit::emit_body_with_separators` + `should_separate` (triggers: VarDecl↔body, before Label, control-flow↔straight-line, after Return/Goto, around Comment; never double blanks; runs recursively into nested bodies; SourceAddr markers skipped when picking "previous visible").
-- [x] Decompile view token-level syntax highlighting. New `reghidra-gui/src/syntax.rs` is a small C lexer that tokenizes each rendered line into `SyntaxKind` spans (Keyword, Type, Return, Goto, Number, String, Operator, Punctuation, Comment, Identifier, Whitespace). Hand-curated sorted `CONTROL_KEYWORDS` and `C_TYPE_KEYWORDS` tables (the type table includes stdint, common Windows API aliases — HANDLE/HWND/DWORD/LPCSTR/etc. — and the `unkN` defaults). `Theme::decomp_color(SyntaxKind)` replaces the old per-line `colorize_decompile_line`. Rendering path in `views/decompile.rs`: `render_interactive_line` → `emit_syntax_spans` walks the lexer output and paints every token with its category color. Existing clickable-token overlay (function calls, labels, hex addresses, variables) still works on top. Dark-mode palette is Nord-inspired (Frost teal for types, Aurora purple for keywords, Aurora orange for numbers, Aurora green for strings, Snow Storm for operators/default, Polar Night slate for comments); light mode is Solarized equivalents.
+### Phase 5b — Decompiler Quality [DONE]
+- IDA FLIRT sig packs merged (86 added) into `signatures/`, IDA-precedence ordering at load time. Fixed `IDASIG_FUNCTION_UNRESOLVED_COLLISION` (0x08) so collision-`?` placeholders don't leak.
+- PE IAT call resolution (`call [imm]` x86-32 + `call [rip+disp]` x86-64) lift to `IrOp::Call { target: iat_addr }`; `project::decompile` merges `binary.import_addr_map` into `function_names`.
+- Double-deref bug fix: `parse_memory_expression` returns address-value varnodes (`Constant`/`Register`/temp), NOT `VarSpace::Memory` descriptors.
+- `pop [mem]`/`push [mem]` regression fix via `read_operand`/`write_operand` helpers in x86_64 lifter.
+- Stack-arg collapsing in `expr_builder::build_statements`: defer `Store{addr=esp/rsp/sp}` ops, attach to following Call as args (reversed for source order), flush as plain stack writes if interrupted.
+- Variable rename canonicalization: sized aliases (rax/eax/ax/al → rax) share one rename via `canonical_reg_name`. `is_known_register_name` routes recognized GPRs through renamer. x86-32 detection pre-pass (`scan_for_x86_32`) suppresses argN mapping when 32-bit reg forms appear.
+- **Tier-2 heuristic stack frame analysis** (`stackframe.rs`): runs between `structure::structure` and `varnames::rename_variables`. Detects `push rbp; mov rbp, rsp` (x86) and ARM64 equivalents (`mov x29, sp`, `add x29, sp, #N`) via `is_rbp`/`is_rsp`. Classifies `*(rbp ± k)` and via-temp accesses into `FrameLayout` keyed on signed offset, rewrites to IDA-style `local_<hex>`/`arg_<hex>` slot names (offset-keyed, NOT sequential, so retypes don't renumber siblings), drops prologue/epilogue bookkeeping and dead address temps, prepends `VarDecl`s. Offset 0 filtered (saved rbp). When no FP found but prototype known AND a `__SEH_prolog4`-style helper is called, fallback synthesizes arg slots from prototype at x86-32 cdecl offsets. Gaps: FPO builds without SEH-prolog get no rewrites (rsp-delta tracking deferred); ARM64 `stp ..., [sp,#-N]!` pre-index writeback unmodeled; slots default `CType::Unknown(size)` without prototype.
+- Global data naming: bare `Load`/`Store` of constant addr ≥ `GLOBAL_DATA_MIN_ADDR` (0x1000) → `g_dat_<hex>` (or resolved name if in `function_names`). GUI tokenizer recognizes `g_dat_<hex>` as clickable + renamable.
+- RMW memory destinations in `lift_binop`/`lift_xor`/`lift_inc_dec`/`lift_not`/`lift_neg` via `rmw_begin`/`rmw_end` helpers.
+- `leave`/`pushf[d|q]`/`popf[d|q]` lifter intrinsics implemented.
+- **MSVC C++ demangling for display** via `reghidra_core::demangle`. Mangled names stay canonical in storage/renames/xref keys; GUI views go through helper. Two flavors: `display_name` (full sig, used by decompile body + `function_names` call-target map) and `display_name_short` (NAME_ONLY, for sidebar/headers). `views/decompile.rs` reverse `name → addr` map uses `display_name`. `strip_msvc_decoration` handles `@name@N` (fastcall) and `_name@N` (stdcall); bare leading underscores left alone (legitimate on ELF). FLIRT `?` placeholder filter: `is_meaningful_sig_name` in `flirt.rs` gates `collect_matches` and apply.
+- Blocky disassembly function header: 4-line block (rule, name, stats, rule) as separate `DisplayLine::FuncHeader{Rule,Name,Stats}` variants for fixed-row scrolling.
+- Decompile output C-style compliance (UChicago guide). See "Decompile output style" below.
+- Token-level syntax highlighting via `reghidra-gui/src/syntax.rs`. See "Decompile syntax highlighting" below.
 
 ### Phase 5c — Typing & debug info (IN PROGRESS)
 
-**Goal.** Stack slots currently default to `CType::Unknown(size)`. Make them typed. Two data sources feed a unified `TypeArchive`: (1) Rust binding crates (build-time extraction, ships pre-built archives), (2) PDB files (runtime load, overrides archive data for binaries that ship symbols). Once typed, wire into arity capping for the stack-arg collapser, typed parameter display in decompile output, return-type propagation, and a right-click "Set Type" retype UI with slot subsumption (retyping a slot to a wider type collapses adjacent slots that fall inside the new extent).
+**Goal.** Stack slots default to `CType::Unknown(size)`. Make them typed using bundled type archives (build-time extracted from Rust binding crates) and optional PDB overlay. Drives arity capping for stack-arg collapser, typed parameter display, return-type propagation, and a right-click "Set Type" UI.
 
-**Naming vs typing precedence — DO NOT flatten these into one pipeline.** A function has two independently-sourced attributes, its *name* (what to call it) and its *type* (its signature). Each has its own chain of sources, and the two chains meet at the name: the typing chain keys off whatever name the naming chain produced.
+**Naming vs typing precedence — DO NOT flatten into one pipeline.** A function has two independently-sourced attributes — its name and its type. Each has its own chain; typing keys off whatever name the naming chain produced.
 
-- **Name source precedence** (highest → lowest):
-  1. User rename (`Project::renamed_functions`)
-  2. PE Import/Export tables (deterministic — `binary.import_addr_map`, export table)
-  3. PDB (authoritative when the sibling `.pdb` is present — Phase 5c PR 5)
-  4. FLIRT (byte-pattern matching for statically-linked third-party code — CRT, libc, libstdc++)
-  5. Heuristic `sub_XXXX`
-- **Type source precedence** (highest → lowest):
-  1. User retype (Phase 5c PR 5 right-click "Set Type", persisted in `slot_types`)
-  2. PDB (when present — overrides archive data for functions in the symbol stream)
-  3. Type archive lookup — `windows-sys` / `libc` / `ucrt` bindings, keyed on the name from the naming chain
-  4. `CType::Unknown(size)` fallback
+- **Name precedence** (high → low): User rename → PE Import/Export → PDB → FLIRT → heuristic `sub_XXXX`.
+- **Type precedence** (high → low): User retype → PDB → Type archive lookup (windows-sys/libc/ucrt/rizin, keyed by name) → `CType::Unknown(size)`.
 
-The crucial thing is that **`windows-sys` is NOT in the naming chain**. It contains `extern "system"` declarations (name + prototype), not byte patterns, so it can't identify unnamed functions. Its value is purely as a type source: once the naming chain has produced `CreateFileA` (from the PE IAT), we look `CreateFileA` up in `windows-x64.rtarch` to get the prototype. Analogously, **FLIRT is NOT in the typing chain**: it produces names only. A FLIRT-matched `memcpy` becomes typed when we look `memcpy` up in `posix.rtarch` (from `libc`). The two sources compose cleanly because they never produce the same kind of information.
+`windows-sys` is NOT in the naming chain (it has prototypes, not byte patterns) and FLIRT is NOT in the typing chain (it produces names only). They compose: FLIRT names `memcpy`, then `posix.rtarch` types it. A practical opt: skip `apply_signatures` for functions whose `FunctionSource` is already `Import` (or `Pdb`).
 
-A practical consequence: FLIRT matching on functions that already have an authoritative name (IAT imports, PDB entries) is wasted work. A small optimization landable any time during Phase 5c is to skip `apply_signatures` for functions whose `FunctionSource` is already `Import` or (later) `Pdb`. Low-risk, pure win, no new data structures.
-
-**Architecture (as landed in PR 1 + PR 2, updated from the original sketch).**
-
+**Architecture (as landed).**
 ```
 reghidra/
-├── tools/
-│   └── typegen/                                # maintainer-only, OUT-OF-WORKSPACE (PR 3)
-│       ├── Cargo.toml                          # own [workspace] table — not a member of root
-│       └── src/main.rs                         # CLI: --source, --features, --arch, --os, --out
-├── types/                                      # bundled .rtarch blobs, include_dir!'d at compile time
-│   ├── README.md                               # maintainer-only policy doc (PR 1)
-│   ├── posix.rtarch                            # libc → Linux/macOS POSIX (PR 3, ~29 KB)
-│   ├── windows-x64.rtarch                      # windows-sys → Win64 LLP64 (PR 3b, ~9 MB)
-│   ├── windows-x86.rtarch                      # windows-sys → Win32 ILP32 (PR 3b, ~9 MB)
-│   ├── windows-arm64.rtarch                    # windows-sys → ARM64 LLP64 (PR 3b, ~9 MB)
-│   ├── ucrt.rtarch                             # libc → Windows MSVC CRT (PR 4f, ~17 KB)
-│   ├── rizin-windows.rtarch                    # rizin SDB → Win32 headers, ~5 350 fns (PR 4i, ~570 KB)
-│   └── rizin-libc.rtarch                       # rizin SDB → libc/linux/macos, ~530 fns (PR 4i, ~18 KB)
-├── .github/workflows/typegen-regen.yml         # auto-regenerates + commits archives back to main on release/tag/dispatch (replaces drift-check)
+├── tools/typegen/                          # maintainer-only, OUT-OF-WORKSPACE
+│   └── src/main.rs                         # CLI: --source, --features, --arch, --os, --filter, --out
+├── types/                                  # bundled .rtarch, include_dir!'d at compile time
+│   ├── posix.rtarch                        # libc → Linux/macOS POSIX (~29 KB)
+│   ├── windows-{x64,x86,arm64}.rtarch      # windows-sys → Win32 (~9 MB each)
+│   ├── ucrt.rtarch                         # libc → Windows MSVC CRT (~17 KB, 226 fns)
+│   ├── rizin-windows.rtarch                # rizin SDB Win32 headers (~570 KB, ~5350 fns)
+│   └── rizin-libc.rtarch                   # rizin SDB libc/linux/macos (~18 KB, ~530 fns)
+├── .github/workflows/typegen-regen.yml     # auto-regenerates archives on release/tag/dispatch
 └── crates/
-    ├── reghidra-decompile/
-    │   └── src/
-    │       ├── type_archive/                   # data model lives HERE, not in reghidra-core (PR 2)
-    │       │   ├── mod.rs                      # TypeArchive, FunctionType, TypeRef, Primitive, load_embedded
-    │       │   └── archive.rs                  # postcard (de)serialization + version gate
-    │       ├── stackframe.rs                   # FrameLayout now returned, not discarded (PR 2)
-    │       └── lib.rs                          # DecompileOutput/DecompileAnnotated expose FrameLayout; DecompileContext.type_archives wired
-    └── reghidra-core/
-        └── src/
-            └── project.rs                      # BinaryInfo → stems dispatch (fn archive_stems_for / fn load_type_archives)
+    ├── reghidra-decompile/src/type_archive/    # data model lives HERE (avoids cycle with -core)
+    └── reghidra-core/src/project.rs            # archive_stems_for / load_type_archives
 ```
 
-The data model lives in `reghidra-decompile::type_archive` (not `reghidra-core::types` as originally sketched) because `reghidra-core` already depends on `reghidra-decompile` — reversing that would be a cycle, and `DecompileContext` needs to carry `Arc<TypeArchive>` directly. `BinaryInfo`-aware stem selection stays in `reghidra-core::project` as a thin wrapper around `type_archive::load_embedded(stem)`.
+The data model lives in `reghidra-decompile::type_archive` (not `reghidra-core::types`) because `reghidra-core` already depends on `reghidra-decompile`. `BinaryInfo`-aware stem selection stays in `reghidra-core::project` as a wrapper around `type_archive::load_embedded(stem)`.
 
-**Data model (start here).**
-
+**Data model (`reghidra-decompile::type_archive`).**
 ```rust
-// crates/reghidra-core/src/types/mod.rs
 pub struct TypeArchive {
-    /// Canonical name → function prototype. Matches what the demangler
-    /// produces for stripped binaries and what an import name resolves
-    /// to. For C++ the key is the mangled name.
-    pub functions: HashMap<String, FunctionType>,
-    /// Named type aliases, structs, unions, enums.
+    pub functions: HashMap<String, FunctionType>, // canonical name → prototype (mangled for C++)
     pub types: HashMap<String, TypeDef>,
 }
-
 pub struct FunctionType {
     pub name: String,
     pub args: Vec<ArgType>,
     pub return_type: TypeRef,
     pub calling_convention: CallingConvention,
-    /// Fixed arg count — this is the key that unblocks the arity-capping
-    /// fix for the stack-arg collapser. Variadic funcs (printf) set the
-    /// `is_variadic` flag; fixed-arity callers get precise collapse.
-    pub is_variadic: bool,
+    pub is_variadic: bool,                        // unblocks arity capping
 }
-
 pub enum TypeRef {
-    Primitive(Primitive),          // int8/uint8/.../int64/float/double/bool/void
+    Primitive(Primitive),                         // int8..int64, float, double, bool, void
     Pointer(Box<TypeRef>),
     Array(Box<TypeRef>, u32),
     FunctionPointer(Box<FunctionType>),
-    Named(String),                  // late-bound, resolved via archive.types
+    Named(String),                                // late-bound via archive.types
 }
 ```
+`reghidra-decompile::ast::CType` is a simpler subset; bridge via `type_ref_to_ctype` when emitting.
 
-The existing `reghidra-decompile::ast::CType` is a simpler subset. The typing layer lives in `reghidra-core::types` because it's shared between analysis (arity capping) and decompile (display). When emitting into the decompiler's AST, convert via a small bridge function.
+**What has landed.**
 
-**Implementation order (concrete tasks).**
+- **PR 1+2 — Scaffolding.** `TypeArchive`, `FunctionType`, `TypeRef`, postcard ser/de, `load_embedded`. `FrameLayout` plumbed back through `DecompileContext` instead of being discarded. `BinaryInfo`-keyed stem dispatch in `project.rs`.
+- **PR 3+3b+4f — Archives.** `posix.rtarch` (libc Linux/macOS), `windows-{x64,x86,arm64}.rtarch` (windows-sys Win32), `ucrt.rtarch` (libc src/windows tree, 226 fns covering public MSVC CRT). Typegen leak fix: rust-ty walker maps `Type::Never` (Rust `!`) to `Primitive::Void` instead of falling through to debug-format catchall.
+- **PR 4+4c+4d — Arity capping + typed casts + cross-block pending propagation.**
+  - `drain_pending_for_call` takes the *last N* pending stack writes when callee has known prototype. "Take last N, leave rest" semantics — caps but never discards. Variadic opts out.
+  - `annotate_call_args` wraps each arg in `Expr::Cast(declared_type, arg)` via `type_ref_to_ctype`. Renders e.g. `TerminateProcess((HANDLE)result, (uint32_t)0xc0000409)`. **This is the dominant source of visible types** for `sub_XXXX` callers with no archive entry of their own.
+  - Pending queue flows across basic-block boundaries when both sides are part of an *extended basic block* (linear single-pred/single-succ chain). Enforced in `inherit_pending`/`successor_will_inherit`. Fixes `push exit_code; call GetCurrentProcess; push eax; call TerminateProcess` (split across 3 blocks because lifter starts a new block on every call). Joins/branches/back-edges reset.
+  - `is_stack_pointer_delta` detects `rsp = rsp ± const` bookkeeping ops and skips them so they don't dump pending state inside a freshly-entered block.
+  - VarDecl-side typing: `stackframe::apply_prototype_arg_types` pairs arg slots (`arg_8`, `arg_c`, ...) with `prototype.args` for archived functions.
+- **PR 4e — Typed signature line + CRT-via-POSIX fallback + MSVC underscore stripping.** `emit_function` takes `Option<&FunctionType>` and renders typed sig (`int32_t _fclose(FILE* file)`, variadic gets `, ...`). PE binaries also load `posix` as fallback (Win32 still wins on collisions). `lookup_prototype` retries with 1-2 leading underscores stripped (safe — Win32 APIs never start with `_`, mangled C++ starts with `?`/`@`). Defensive `Type::` sanitizer in `type_ref_to_ctype` (recognizes leaked syn debug format like `Type::Never { bang_token: Not }` and degrades to `Void`).
+- **PR 4e — MSVC-SEH-aware prologue fallback in `stackframe.rs`.** When no `mov ebp, esp` AND prototype supplied AND body Calls a function matching `is_seh_prolog_name` (`__SEH_prolog4`, `_SEH_prolog4`, `__SEH_prolog4_GS`, `__EH_prolog`, `_EH_prolog`, with up to 2 leading underscores stripped before prefix check), takes fallback: sets `has_frame_pointer = true`, calls `synthesize_arg_slots_from_prototype` at x86-32 cdecl offsets (`arg_8`, `arg_c`, ... — stride is `max(4, type_size_round_up_to_4)`), populates each slot's `ctype` from prototype, prepends typed `VarDecl`s. Body code is NOT rewritten (no stable offset info from SEH4). x86-32 only.
+- **PR 4 — Return-type propagation.** Two-step pass:
+  1. `promote_call_for_return_type` in `expr_builder.rs`: when `IrOp::Call` target has known prototype with non-void return, emits `Stmt::Assign(Var("rax"), Call(..))` instead of bare `ExprStmt`. Renamer canonicalizes `rax`/`eax`/`ax`/`al`/ARM64 `x0` (offset 0 size 8 in shared `register_name`) to `result`.
+  2. `type_call_returns` post-rename pass: walks structured body, on the *first* `Assign(Var(name), Call(Var(callee), ..))` per LHS whose callee resolves with non-void return, replaces with `VarDecl { name, ctype: type_ref_to_ctype(return_type), init: Some(Call) }`. Subsequent assigns to same LHS pass through. Walks recursively into `if`/`while`/`Loop` bodies.
+  Wired in `lib.rs` as Step 5 between `varnames::rename_variables` and `emit::emit_function`. Renders `DWORD result = GetLastError(); ...; ExitProcess((uint32_t)result);`.
+  Limitation: only the first call's return type is captured for `result`. If subsequent calls return a different type, second renders as `result = ...` reusing first's type — wrong but quiet. Right fix is per-call SSA-style local naming (`hFile = CreateFileA(...)`) needing dataflow we lack.
+- **PR 4i — Rizin SDB type archives.** `rizin-windows.rtarch` (every `functions-windows*.sdb.txt`, ~5350 fns across 35 headers, ~570 KB) + `rizin-libc.rtarch` (libc/linux/macos SDBs, ~530 fns). New `--filter` arg to typegen (comma-separated prefix list, exact-match-or-`{prefix}_`/`{prefix}.` boundary). `archive_stems_for` chain: PE = `windows-{arch}` → `ucrt` → `posix` → `rizin-windows` → `rizin-libc`; ELF/Mach-O = ... → `posix` → `rizin-libc`. First-archive-wins, so authoritative binding-crate archives stay in charge. License: PR 4g relicensed Reghidra to GPL-3.0-or-later as the prerequisite for bundling Rizin GPLv3 SDB data.
+- **PR 4i — `typegen-regen.yml` workflow** replaces the old byte-diff drift-check (deleted because host-toolchain differences produced spurious mismatches). Triggers on `release: published`, `push: tags: v*`, `workflow_dispatch`. Clones Rizin at pinned `RIZIN_REF` SHA, regenerates every archive, commits back to main as `github-actions[bot]`. Bumping the Rizin SHA is a one-line edit.
+- **PR 5 — Right-click "Set Type" on local variables (minimum viable).** No slot subsumption (deferred).
+  - Data model: `Project::variable_types: HashMap<(u64, String), String>` mirroring `variable_names`, keyed on `(func_entry, displayed_name)`. Empty string = clear override.
+  - Session: `Session::variable_types: Vec<((u64, String), String)>` with `#[serde(default)]`.
+  - Parser: `ast::parse_user_ctype` strips `const`/`volatile`/`restrict`/`struct`/`union`/`enum` qualifiers, parses trailing `*`s, recognizes primitives (`void`, `int`/`int32_t`, `uint32_t`/`DWORD`, `size_t`/`SIZE_T`, `char`, `short`, ...), falls through to `CType::Named(base)`. Empty → `None` (clear).
+  - Application: `expr_builder::apply_user_variable_types` runs as Step 6 in `lib.rs::decompile` (after `type_call_returns`). Walks body, finds `VarDecl { name }` in `ctx.variable_types`, replaces `ctype`. No-op fast path when empty.
+  - GUI: `ContextAction::SetVariableType`, "Set Type..." button next to "Rename Variable...", `AnnotationKind::SetVariableType` popup.
+  - Undo/redo: `Action::SetVariableType { func_entry, displayed_name, old_type, new_type }`. Counted by `action_affects_decompile`.
+  - Limitations: (a) no slot subsumption (retyping `arg_8` to `uint64_t` doesn't consume `arg_c`); (b) no type picker UI (free-form text); (c) doesn't propagate to call-arg/return uses — only the `VarDecl` displays the new type.
+- **PR 6 — Loaded Data Sources panel.** `View → Loaded Data Sources...` opens a modal `egui::Window` listing every FLIRT db (bundled + user) and every loaded `TypeArchive` for the current binary, with name / kind / function-or-sig count / hits-on-current-binary count, and per-source enable/disable checkboxes. Closes the silent-magic gap that motivated the feedback memory: "wired correctly but no data" used to render identically to "wiring bug."
+  - **Per-db FLIRT attribution.** New `Function::matched_signature_db: Option<String>` (set in `flirt::apply_signatures` to `db.header.name`) — the only way to credit signature matches back to a specific db once analysis has flattened them all into `FunctionSource::Signature`. Counted parallel to `bundled_dbs`/`user_dbs` in `recompute_hit_counts`.
+  - **Type archive attribution.** `type_archive::which_archive_resolves(name, &archives)` mirrors `DecompileContext::lookup_prototype` precedence (including the one/two-underscore strip fallback) and returns the first-match index. Counted against the *enabled* archive list so disabling one source surfaces the precedence chain ("turn off `windows-x64`, watch `rizin-windows` light up").
+  - **Toggle semantics.** FLIRT toggles call `Project::reanalyze_with_current_signatures()` (full re-analysis — renames bake in at analysis time). Type archive toggles only invalidate `decompile_cache` and recompute hit counts; the next decompile-view paint picks up the new effective set via `effective_type_archives()`. Both setters are no-ops when the new value matches the current one.
+  - **State on `Project`.** `bundled_db_enabled`/`user_db_enabled`/`type_archive_enabled` (parallel `Vec<bool>`s) and `bundled_db_hits`/`user_db_hits`/`type_archive_hits` (parallel `Vec<usize>`s). NOT session-persisted in v1 — every project open resets to all-enabled.
+  - **GUI.** `views/data_sources.rs::render_window()` is called once per frame from `app.rs` after the central panel; it no-ops when `data_sources_open` is false. Snapshots names/counts/enabled flags up front to avoid fighting the borrow checker over `&mut project` while iterating.
+  - **Tests.** `crates/reghidra-core/tests/data_sources.rs` covers: nonzero archive hits on PE fixture; FLIRT hit totals match `Signature`-source count; toggling an archive zeros its hits and re-enable restores them; disabling all archives changes a typed signature line.
+  - Stretch (deferred to follow-up): search box answering "which archive provides this function's prototype?".
 
-1. **`reghidra-core::types` scaffolding.** Define the `TypeArchive`, `FunctionType`, `TypeRef`, `CallingConvention` data model. Implement the postcard serialize/deserialize. Add a `load_bundled` function modeled after `bundled_sigs::collect_bundled_sigs` (auto-select archives by `BinaryInfo.format` + `BinaryInfo.arch`). Stub it out so downstream code compiles with empty archives.
-
-2. **`tools/typegen` — Rust crate → archive extractor.** New workspace crate. Takes a crate name (`windows-sys`), a feature list (`Win32_Storage_FileSystem,Win32_System_Memory,...`), and an output path. Uses `syn::parse_file` to walk the expanded source of the target crate, visits `ItemForeignMod` / `ItemStruct` / `ItemType`, builds a `TypeArchive`, postcard-serializes to the output path. Run via `cargo xtask typegen` (add a simple xtask dispatcher) or directly with `cargo run -p reghidra-typegen --release`. Do NOT run at user-build time — this is a maintainer-run tool; the resulting archives are checked into `types/` just like FLIRT sigs are checked into `signatures/`.
-
-3. **First archive: `windows-x64.rtarch`.** Pick a conservative feature set that covers the top ~200 Win32 APIs most commonly seen in malware/research targets: `Win32_Foundation`, `Win32_Storage_FileSystem`, `Win32_System_Memory`, `Win32_System_Threading`, `Win32_System_ProcessStatus`, `Win32_System_LibraryLoader`, `Win32_System_Registry`, `Win32_System_Diagnostics_Debug`, `Win32_Security`, `Win32_NetworkManagement_WindowsFirewall`, `Win32_Networking_WinSock`. Check in the resulting `.rtarch` file. Do NOT check in any of `windows-sys` source itself — typegen references it as a build dep.
-
-4. **Auto-load at project init.** In `project.rs`, after binary load, call `types::load_bundled(&binary.info)` and store the resulting `Option<TypeArchive>` on the `Project`. Wire it into `DecompileContext` (new field `type_archive: Option<Arc<TypeArchive>>`).
-
-5. **[LANDED PR 4 / PR 4c / PR 4d] Arity capping + typed casts at call sites, with cross-block pending propagation.**
-   - **PR 4**: arity capping in `drain_pending_for_call` — when the callee has a known prototype, take the *last N* pending stack writes as args (where N = `prototype.args.len()`), leaving any earlier pushes in the pending queue so they survive for a later call. "Take last N, leave rest" — the cap limits but never discards. Variadic functions opt out.
-   - **PR 4c**: typed casts at call sites via `annotate_call_args` — each arg gets wrapped in `Expr::Cast(declared_type, arg)` using `type_archive::type_ref_to_ctype` to bridge `TypeRef` → `CType`. This is the only place in PR 4c where types from the bundled archives become *visible* for the common case of a user `sub_XXXX` caller with no archive entry of its own. Renders e.g. `TerminateProcess((HANDLE)result, (uint32_t)0xc0000409)`, `SetUnhandledExceptionFilter((LPTOP_LEVEL_EXCEPTION_FILTER)0)`, `UnhandledExceptionFilter((EXCEPTION_POINTERS*)0x40a160)`.
-   - **PR 4d**: cross-block pending propagation — the pending queue now flows across basic-block boundaries when the boundary is part of an *extended basic block* (linear chain where every consecutive pair is single-pred-single-succ). The chain rule is enforced in `inherit_pending` / `successor_will_inherit`. This fixes the canonical Win32 termination idiom where `push exit_code; call GetCurrentProcess; push eax; call TerminateProcess` is split across three basic blocks (the lifter starts a new block on every call) — the two pushes belong to different calls in different blocks, but cross-block tracking recovers the full arg list.
-   - **PR 4d**: stack-pointer delta skip — `is_stack_pointer_delta` detects `rsp = rsp ± const` bookkeeping ops emitted by the lifter as part of every push/pop, and skips them before the pending-flush check. Without this the `IntSub` at the start of a `push` in a freshly-entered block would dump the inherited pending state immediately.
-   - **Arg display also typed on VarDecl side**: `stackframe::apply_prototype_arg_types` pairs arg slots (`arg_8`, `arg_c`, ...) positionally with `prototype.args` when the function being decompiled has an archive entry, so the emitted `VarDecl`s carry the real type instead of `CType::Unknown(size)`. This only fires for archived functions (narrow set — functions that match by name). The PR 4c typed-cast-at-call-site path is the dominant source of visible types in practice.
-   - **Retype-removes-cast invariant (DEFERRED to PR 5)**: the casts wrapped at call sites by `annotate_call_args` are *derived*, not authoritative — they exist only because the source expression's type is currently too weak to match the declared parameter type. When the PR 5 right-click "Set Type" UI lands, if a user retypes the source to be assignment-compatible with the declared parameter type, the cast should disappear. See the long-form doc comment on `annotate_call_args` in `expr_builder.rs` for the implementation sketch (thread a "source type context" through, use width + signedness + named-alias-via-archive resolution for the compatibility predicate — strict equality is too narrow because e.g. `uint32_t → DWORD` is already a no-op cast).
-
-6. **[LANDED PR 4e] Typed signature line + CRT-via-POSIX fallback + MSVC underscore stripping.** Post-PR 4d audit on the PE fixture showed 0/102 FLIRT-named functions were hitting the archive. Two root causes:
-   - **PE binaries only loaded `windows-*.rtarch`**, which is Win32 API surface only — MSVC CRT functions aren't in `windows-sys`. Added `"posix"` as a lower-precedence fallback stem for all PE arches in `archive_stems_for` (first-archive-wins ordering still has Win32 take precedence on collisions like `strlen`/`exit`).
-   - **FLIRT sigs preserve MSVC leading-underscore decoration** (`_fclose`, `_printf`, `__exit`), while libc-sourced `posix.rtarch` stores bare names (`fclose`, `printf`, `exit`). Added a fallback in `DecompileContext::lookup_prototype` that retries the lookup after stripping one and then two leading underscores. Safe: Win32 APIs never start with `_`, mangled C++ starts with `?` or `@`.
-   - **Signature line now uses the prototype.** `emit::emit_function` / `emit_function_annotated` now take an `Option<&FunctionType>` and call a new `format_signature` helper that renders `int32_t _fclose(FILE* file)`, `int32_t _printf(char* format, ...)`, etc. Variadic functions render with a trailing `, ...`. Archive-sourced arg names are used when present; otherwise positional `arg0`, `arg1`, ...
-   - **Defensive `Type::` sanitizer in `type_ref_to_ctype`.** Early PR 3 typegen runs leaked Rust's `syn::Debug` format of `syn::Type::Never` (`Type::Never { bang_token: Not }`) into the `libc`-sourced archive as a `TypeRef::Named(...)` for functions declared `-> !` in Rust (e.g. `_exit`). Until those archives are regenerated (maintainer task, drift-check will catch it), the bridge recognizes names containing `Type::` or `{` and degrades to `CType::Void`. Without this the signature line rendered gibberish like `Type::Never { bang_token: Not } _exit(int32_t status)`.
-   - **Result.** Hit rate went from 0/102 to 8/102 on FLIRT-named CRT functions in the PE fixture (`_fclose`, `_printf`, `_exit`, `__exit`, `__close`, plus a few others). The remaining 94 misses are Microsoft-internal CRT functions (`__SEH_prolog4`, `__EH4_CallFilterFunc`, `__ftbuf`, `__invoke_watson`, `__lockexit`, `__mtinit`, `__commit`, `__flushall`, etc.) that simply aren't in any open-source POSIX/libc archive — these are MSVC CRT implementation details with no public header declaration. Closing that gap needs either a dedicated CRT archive generated from Microsoft UCRT headers (licensing unclear), a hand-curated CRT sdb in the Rizin reference tree (GPLv3 — not bundleable), or PDB-overlay in PR 5 when the sibling `.pdb` is present.
-   - **[LANDED] MSVC-SEH-aware prologue fallback in `stackframe.rs`.** When `has_frame_pointer_setup` finds no `mov ebp, esp` AND a prototype is supplied AND the body contains a Call to a function whose name matches `is_seh_prolog_name` (`__SEH_prolog4`, `_SEH_prolog4`, `__SEH_prolog4_GS`, `__EH_prolog`, `_EH_prolog`, with up to two leading underscores stripped before the prefix check), the pass takes a fallback path: it sets `layout.has_frame_pointer = true`, calls `synthesize_arg_slots_from_prototype` to lay down positive-offset arg slots at standard x86-32 cdecl/stdcall offsets (`arg_8`, `arg_c`, `arg_10`, ... — each slot's stride is `max(4, type_size_round_up_to_4)` so 8-byte args consume two stack slots' worth of offset), populates each slot's `ctype` from the corresponding prototype arg's `TypeRef`, and prepends typed `VarDecl`s to the body via the existing `prepend_var_decls` path. The body code is NOT rewritten — we don't have stable offset info from the SEH4 path, so the original opaque accesses survive — but the function now has a visible typed signature in its body. SEH4 is x86-32-only (x86-64 SEH is table-based), so the cdecl-style offset assumption is safe. This lets the 9 currently-named CRT functions in the PE fixture surface their arg types in the body even though their access sites are inside the SEH4 helper.
-
-6a. **[LANDED PR 4f] `ucrt.rtarch` — MSVC CRT archive sourced from libc's Windows tree.** Extends the libc walker to support Windows targets (`--target windows-x64` etc.): pivots `TypeCtx` to `LLP64` / `ILP32`, flips the `unix`/`windows` umbrella cfg to take the `windows` branch, and walks `src/windows/mod.rs` instead of `src/unix/`. Produces a 17 KB archive of 226 functions covering the public MSVC CRT surface (`commit`, `close`, `open`, `creat`, `dup`, `fclose`, `fopen`, `chdir`, `chmod`, `execve` and friends, `aligned_realloc`, `calloc`, etc.). Wired into PE stems as a middle-precedence layer (`windows-{arch}` → `ucrt` → `posix`). Also fixes a typegen leak at the source: the rust-ty walker now maps `Type::Never` (Rust's `!`, used by `extern fn _exit(...) -> !`) to `Primitive::Void` instead of falling through to the `print_type` debug-format catchall that was producing `Type::Never { bang_token: Not }` named-type entries in the libc archive. Drift-check workflow extended to regenerate and diff `ucrt.rtarch`. Hit rate on the PE fixture went from 8/102 → 9/102; the additional hit is `__commit` → `commit` via underscore stripping. **The remaining 93 misses are MSVC CRT implementation internals (`__SEH_prolog4`, `__EH4_*`, `__lockexit`, `__mtinit`, `__getptd`, ...) that aren't in libc's Windows tree at all** — Microsoft does not document or expose them through any public header that a binding crate can wrap. Closing that gap fundamentally requires either MS UCRT headers (licensing TBD), a hand-curated reference (Rizin's GPLv3 SDB is the most complete but not bundleable), or PDB-overlay (Phase 5c PR 5).
-
-7. **[LANDED] Return-type propagation.** Two-step pass that closes the return-type half of typing visibility:
-   - **Step 1 — `promote_call_for_return_type` in `expr_builder.rs`**: when an `IrOp::Call` target has a known prototype with a non-void return, the call statement is emitted as `Stmt::Assign(Expr::Var("rax"), Expr::Call(...))` instead of `Stmt::ExprStmt(Expr::Call(...))`. The variable renamer canonicalizes `rax` (and `eax`/`ax`/`al` plus ARM64 `x0` since the shared `register_name` table lists offset 0 size 8 as `rax`) to `result`. Without this step, downstream `result` references in the rendered output had no visible *definition* — they referred to whatever rax happened to be.
-   - **Step 2 — `type_call_returns` post-rename pass in `expr_builder.rs`**: walks the structured body and on the *first* `Assign(Var(name), Call(Var(callee), ..))` per LHS name whose callee resolves through `lookup_prototype` with non-void return, replaces with `VarDecl { name, ctype: type_ref_to_ctype(return_type), init: Some(Call) }`. Subsequent assigns to the same LHS pass through unchanged (so the `result = SomeApi(...)` reuse pattern stays untouched). Skips when the LHS is already declared upstream (defensive — currently never the case in practice). Walks recursively into `if`/`while`/`Loop` bodies via `type_call_returns_inner`.
-   - **Wired in `lib.rs`** as Step 5 between `varnames::rename_variables` and `emit::emit_function`, both for `decompile()` and `decompile_annotated()`. The pass runs *after* rename so it sees stable post-canonicalization names (`result`, not `rax`), which means user renames also flow through correctly.
-   - **Net visible change**: a `sub_XXXX` calling Win32/CRT now renders as `DWORD result = GetLastError(); ...; ExitProcess((uint32_t)result);` instead of bare `GetLastError(); ...; ExitProcess((uint32_t)result);` where the second `result` was unconnected to anything. The first call is the declaration site; subsequent reuses of `result` are visible assigns.
-   - **Limitations (carry into PR 5 — Set Type)**: only the first call's return type is captured for `result`. If subsequent calls return a *different* declared type (e.g. `HANDLE` then `DWORD`), the second one renders as `result = ...` reusing the first declaration's type — wrong but visually quiet, and a known compromise. The right fix is per-call SSA-style local naming (`hFile = CreateFileA(...)`, `count = ReadFile(...)`) which needs dataflow analysis we don't yet have. For now the call-site arg-cast wrappers from PR 4c still surface the *correct* type at every use, so the user has the information even when the LHS-typed declaration is wrong.
-
-8. **PDB overlay (optional layer).** Add the `pdb` crate as a `reghidra-core` dep behind a feature flag (so macOS builds without Windows targets don't pay for it unnecessarily). When a project loads a PE binary whose `BinaryInfo.pdb_info` points to an existing `.pdb` sibling, parse it with `pdb::PDB::open`, walk each `S_GPROC32` record for the current function, consume its child `S_REGREL32`/`S_BPREL32`/`S_LOCAL` scope records, and populate `FrameLayout` slots directly. Override the tier-2 heuristic output with authoritative data. Type records come from the TPI stream — map `TypeIndex` via `pdb::TypeFinder` and convert to `TypeRef`.
-
-9. **[LANDED minimum viable] Right-click "Set Type" on local variables.** Phase 5c PR 5 first cut. **Slot subsumption is NOT implemented** — the user chooses one type per slot, no widening-merges-siblings logic yet. That's deferred to a follow-up when the need arises.
-   - **Data model**: `Project::variable_types: HashMap<(u64, String), String>` mirrors `variable_names` exactly — keyed on `(func_entry, displayed_name)` where the displayed name is whatever the user sees in the decompile view (post auto-rename and post user rename). Value is a free-form type string (`"HANDLE"`, `"uint32_t"`, `"char*"`). Empty string = no override.
-   - **Session persistence**: `Session::variable_types: Vec<((u64, String), String)>` added with `#[serde(default)]` so older session files load without error.
-   - **Parser**: `reghidra_decompile::ast::parse_user_ctype` converts the free-form string to a `CType`. Strips `const`/`volatile`/`restrict` qualifiers and `struct`/`union`/`enum` tag prefixes, parses trailing `*`s as pointer depth, recognizes common primitive names (`void`, `int`/`int32_t`, `uint32_t`/`DWORD`, `size_t`/`SIZE_T`, `char`, `short`, etc.), and falls through to `CType::Named(base)` for anything else. Empty or whitespace-only input returns `None` (treated as "clear override").
-   - **Application**: `expr_builder::apply_user_variable_types` is a post-pass that runs as the final body transformation (Step 6 in `lib.rs::decompile`, after `type_call_returns`). It walks the body (recursing into `if`/`while`/`Loop`), finds `VarDecl { name, .. }` statements whose name is in `ctx.variable_types`, and replaces `ctype` with the parsed override. No-op fast path when `variable_types` is empty. Overrides everything earlier (archive prototype arg types, call-return auto-typing) because the user's explicit choice is authoritative in the typing precedence.
-   - **DecompileContext wiring**: new `variable_types: HashMap<String, String>` field populated by `project.rs::decompile`/`decompile_annotated` with the per-function slice of `Project::variable_types`.
-   - **GUI**: new `ContextAction::SetVariableType { func_entry, displayed_name }` variant, new "Set Type..." button in the right-click context menu (next to "Rename Variable..." when `RenameKind::Variable`), new `AnnotationKind::SetVariableType` + `open_set_variable_type` popup path that reuses the existing text-entry popup with a hint `"Enter type (e.g. HANDLE, uint32_t, char*; empty to reset)..."`.
-   - **Undo/redo**: new `Action::SetVariableType { func_entry, displayed_name, old_type, new_type }` variant in `undo.rs`. Reversed by swapping old/new. Counted by `action_affects_decompile` so the GUI invalidates the decompile cache on apply.
-   - **Known limitations**: (a) no slot subsumption — retyping `arg_8` to `uint64_t` does NOT consume `arg_c`; they remain as separate slots and the wider type just renders with the narrower slot still below it. (b) No type picker UI — the popup is a text field and the user types the name verbatim. (c) The override doesn't propagate to uses of the variable through call arguments or return expressions; only the `VarDecl` statement displays the new type. The call-site `Cast` wrappers from PR 4c still show the call's declared parameter type, not the user's retype. Closing these gaps is follow-up work.
+**Hit-rate state.** Post-4f on PE fixture: 9/102 FLIRT-named CRT functions match an archive (`_fclose`, `_printf`, `_exit`, `__exit`, `__close`, `__commit`, ...). The 93 misses are MSVC CRT internals (`__SEH_prolog4`, `__EH4_*`, `__lockexit`, `__mtinit`, `__getptd`, `__fclose_nolock`, ...) absent from windows-sys, libc src/windows, libc src/unix, AND Rizin SDB. Fundamentally needs licensable MS UCRT headers or PDB overlay.
 
 **Gotchas to watch for.**
-- `windows-sys` gates everything behind Cargo features. The typegen tool needs to enable the right feature set when invoking `cargo expand` (or walking the source) — otherwise most of the API surface is conditionally compiled out and `syn` won't see it.
-- PDB loading is not cheap for large binaries. Cache parsed layouts on the `Project`, don't reparse per-function.
-- The existing `FrameLayout` in `stackframe.rs` is currently returned and immediately discarded by `lib.rs::decompile` (the `_frame_layout` binding). Phase 5c needs to plumb this back into `DecompileContext` so typed decls can consume it. Consider moving `FrameLayout` to `reghidra-core` or making a stable public API on it.
-- The `CType` enum in `reghidra-decompile::ast` is simpler than `reghidra-core::types::TypeRef`. When emitting typed var decls you'll need a bridge function that downgrades `TypeRef` → `CType` for display, or upgrade `CType` to carry a named-type reference.
+- `windows-sys` gates everything behind Cargo features. Typegen must enable the right feature set or `syn` won't see most APIs.
+- `FrameLayout` is now plumbed back through `DecompileContext`; don't regress to discarding it.
+- `CType` (decompile AST) is a simpler subset of `TypeRef`. Use `type_ref_to_ctype` to bridge.
 
-**Where to verify things are working.**
-- Test binary: `tests/fixtures/` — if a Windows PE with imports exists, use it. `CreateFileA`/`GetModuleHandleW`/etc. are the best canaries. If not, first task is to add a small Win32 PE fixture.
-- Unit test the archive loader with a tiny hand-written archive.
-- Integration test via `cargo test --workspace`: load a fixture, decompile a function that calls a known Win32 API, assert the rendered output contains the typed arg names.
+**Where to verify.** `tests/fixtures/` PE with imports; `CreateFileA`/`GetModuleHandleW`/etc. as canaries. Unit tests in `reghidra-decompile::type_archive::tests`. End-to-end in `crates/reghidra-core/tests/rizin_visibility.rs` (asserts archives loaded, `EnumChildWindows` resolves, `__fclose_nolock` is intentionally unresolvable as a negative canary pinning the documented gap — invert it the day a UCRT-internals source lands).
 
-**Remaining Phase 5c work — priorities set by the user.** Target workload is PE-heavy with some ELF and Mach-O; ARM binaries are out of scope. Anything that improves PE and Unix-family decompile quality is high-value; anything ARM-specific is deprioritized.
+**Remaining Phase 5c work — priorities.** Target workload is PE-heavy with some ELF/Mach-O; ARM is out of scope.
 
-1. **[LANDED PR 4i] Rizin type archive generation + wiring.** Two consolidated archives generated by the SDB walker landed in PR 4h:
-   - `types/rizin-windows.rtarch` — every `functions-windows*.sdb.txt` from `librz/arch/types/` collapsed into one archive (~5 350 functions across 35 headers, ~570 KB postcard).
-   - `types/rizin-libc.rtarch` — `functions-libc.sdb.txt` + `functions-linux.sdb.txt` + `functions-macos.sdb.txt` (~530 functions, ~18 KB).
-   - **CLI**: new `--filter` arg to `tools/typegen` (comma-separated prefix list) restricts directory-mode SDB walks to `functions-{prefix}*.sdb.txt`. Used as `--filter windows` and `--filter libc,linux,macos` for the two archives. Single-file inputs ignore the filter. The filter does an exact-match-or-`{prefix}_`/`{prefix}.` boundary check so `linux` won't match a hypothetical `linux64` file.
-   - **Wiring**: `archive_stems_for` in `crates/reghidra-core/src/project.rs` appends `rizin-windows`, `rizin-libc` after the existing PE chain (`windows-{arch}` → `ucrt` → `posix` → `rizin-windows` → `rizin-libc`) and appends `rizin-libc` after `posix` for ELF and Mach-O. First-archive-wins ordering keeps the existing authoritative binding-crate-derived archives in charge of any name they share — Rizin only fills gaps.
-   - **Regeneration workflow** (post-PR-4i, replaced the original drift-check): `.github/workflows/typegen-regen.yml` triggers on `release: published`, `push: tags: v*`, and `workflow_dispatch`. It clones Rizin at a pinned SHA (`RIZIN_REF` env, currently `183a0376c72b08a52863a6f98c832806b9d33b1e`), regenerates *every* archive in `types/` (posix, ucrt, windows-{x64,x86,arm64}, rizin-windows, rizin-libc), and commits the result back to main as `github-actions[bot]` with a self-explanatory message listing which files changed. The earlier byte-diff drift-check workflow (`typegen-drift-check.yml`) was deleted because host-toolchain differences between CI runners and maintainer machines could produce spurious mismatches even when the underlying source data was identical — the regen approach side-steps that entirely by making CI itself the canonical producer. Bumping the pinned Rizin SHA is now a single-line edit to the workflow file; the next release (or manual `workflow_dispatch`) commits the refreshed bytes automatically.
-   - **License attribution**: README's "Bundled third-party data" section calls out the Rizin SDB derivation explicitly; `types/README.md` documents the new stems and the precedence reasoning. The Phase 5c PR 4g GPL-3.0-or-later relicense was the prerequisite; nothing further needed at LICENSE level.
-   - **Tests**: two layers. (a) `rizin_windows_archive_loads_with_createfilea` and `rizin_libc_archive_loads_with_malloc` in `reghidra-decompile::type_archive::tests` exercise the embedded loader against the new blobs and guardrail against postcard-format drift between the SDB walker's output and the runtime loader. (b) `crates/reghidra-core/tests/rizin_visibility.rs` is the end-to-end visibility test suite added in response to the user's "no way to know it's actually applied" report — it asserts the rizin archives are present in `project.type_archives` after `Project::open` on the PE fixture, that a known rizin-only Win32 function (`EnumChildWindows` from `functions-windows_winuser.sdb.txt`) resolves through the chain, and that `__fclose_nolock` remains *unresolvable* across every archive variant (`__fclose_nolock` / `_fclose_nolock` / `fclose_nolock`) as a negative canary that pins the documented MSVC-CRT-internals gap. The negative test is *intended* to fail and be inverted the day a UCRT-internals source lands. The fourth test in that file is a noop-tolerant smoke check that decompiles every fixture function whose name matches a rizin-only key and reports how many came out non-void; on the wildfire fixture this is currently 0 because the binary is CRT-heavy and doesn't call any rizin-only Win32 surface — that's expected, not a bug.
-   - **Known gap that this PR does NOT close**: Rizin's SDB does not contain the MSVC CRT implementation internals (`__SEH_prolog4`, `__EH4_*`, `__lockexit`, `__mtinit`, `__getptd`, `__fclose_nolock`, ...) that show up in statically linked MSVC binaries. Confirmed empirically against all four open-source data sources (windows-sys, libc src/windows, libc src/unix, rizin SDB). Closing that gap fundamentally requires PDB overlay (deprioritized) or licensable Microsoft UCRT headers.
-
-2. **Loaded Data Sources panel — separate PR, user-requested visibility feature.** Today there is no GUI surface that tells the user which FLIRT databases and which type archives are loaded for the current binary, how many functions each contributed, and which are actively winning lookups. The user filed this as a follow-up after PR 4i ("no way to know it's actually applied") when an MSVC CRT internal that no archive can type rendered with a void signature and looked indistinguishable from a wiring bug. Sketch:
-   - New `View → Loaded Data Sources` panel listing every `FlirtDatabase` from `project.bundled_dbs + user_dbs` and every `TypeArchive` from `project.type_archives`. Per row: name, source kind (bundled vs user), function count, and a hits-on-current-binary count. The hits column needs an instrumentation hook in `lookup_prototype` / FLIRT apply; cache it on `Project` after analysis so the panel doesn't recompute on every redraw.
-   - Per-source enable/disable checkboxes that defer to a runtime filter on `archive_stems_for` and a sibling filter for FLIRT. Toggling forces a re-decompile (and for FLIRT, a re-run of `analyze_with_signatures`). State lives on `Project` so it survives view switches but is *not* session-persisted in the first cut — explicitly out-of-scope for the minimum viable.
-   - Stretch: a search box that, given a function name, tells the user which archive (if any) is currently providing its prototype, which is the most direct answer to the bug that motivated the request.
-
-4. **Type system follow-ups — one PR**. Three closely related gaps from PR 5's minimum-viable cut:
-   - **Slot subsumption.** Retyping `arg_8` to `uint64_t` should consume `arg_c` on x86-32 (and analogously on x86-64 when the slot was previously narrow). Requires a widening pass in `FrameLayout::retype_slot` that walks sibling slots within `[offset, offset + new_size)` and marks them as subsumed (with a shadow table for undo/redo), plus rewriting references to subsumed slots. Scoped to `stackframe.rs` + the retype application path.
-   - **User retype flow-through to call-site types.** PR 4c's `annotate_call_args` wraps every arg in `Cast(declared_type, ..)` unconditionally; PR 5's user retype doesn't reach that path, so the cast fires even when the source expression's type now matches the declared parameter type. Implementation sketch lives in a doc comment on `annotate_call_args` in `expr_builder.rs` — thread a "source type context" through and skip the cast when assignment-compatible (width + signedness + named-alias resolution via archive `types` map).
-   - **Type picker UI instead of free-form text.** The Set Type popup currently takes any string; a follow-up can present a dropdown populated from the loaded archives' known `TypeRef::Named` set plus the primitive list. Improves discoverability for Windows API type names (`LPDWORD`, `LARGE_INTEGER`, etc.).
-
-5. **Mach-O symbol coverage improvements — nice-to-have, separate PR when you hit a real Mach-O target.** The stub resolution landed in the Mach-O naming fix already takes the common rip-relative and direct `call stub` forms. Next gaps:
-   - **ObjC metadata extraction.** `__objc_classlist` / `__objc_protolist` / `__objc_selrefs` carry class and selector names that could feed the auto-namer. Today a Mach-O ObjC binary gets `sub_XXXX` for every method because the decompiler never sees the `@selector` names.
-   - **Mach-O FLIRT signature coverage.** Current fallback maps `(MachO, x86_64) → elf/x86/64` sigs which cover glibc, not Apple's libsystem. A macOS-specific sig pack (sourced from whichever public SDK ships the dylibs) would catch the common runtime helpers (`objc_retain`, `objc_release`, `_dispatch_*`, etc.).
-   - **LC_FUNCTION_STARTS consumption.** Mach-O binaries often carry an authoritative list of function entry addresses in the `LC_FUNCTION_STARTS` load command even when the symbol table is stripped. Feeding that into `functions::detect_functions` as an additional entry source would raise the function count and quality.
-
-6. **ARM64 lifter / decompile polish — deprioritized.** The frame pointer detection landed in PR #17 handles the common setup, but:
-   - ARM64 `stp`/`ldp` pre-index writeback (`[sp, #-N]!`) isn't modeled by the lifter — the sp adjustment is silently dropped. Matters for FPO-style builds and for accurately tracking stack layout when rsp-delta tracking eventually lands.
-   - No ARM64 FLIRT sig coverage beyond the fallback ELF-arm-64 pack.
-   - Not a priority for the current workload. Park until an ARM target needs it.
-
-7. **PDB overlay — deprioritized per user decision.** Retained in item 8 below for reference. Revisit when a target binary actually ships a PDB and the naming/typing gap becomes the bottleneck.
+1. **Type system follow-ups (one PR).**
+   - **Slot subsumption.** Retyping `arg_8` to `uint64_t` should consume `arg_c` on x86-32. Widening pass in `FrameLayout::retype_slot` walks siblings within `[offset, offset+new_size)`, marks subsumed (shadow table for undo), rewrites references.
+   - **User-retype flow-through to call-site casts.** PR 4c's `annotate_call_args` wraps unconditionally; user retype doesn't reach it. Thread a "source type context" through and skip cast when assignment-compatible (width + signedness + named-alias resolution via archive `types`). Implementation sketch lives in a doc comment on `annotate_call_args`.
+   - **Type picker UI.** Replace free-form text with dropdown from loaded archives' `TypeRef::Named` set + primitives.
+2. **Mach-O symbol coverage** (when a real Mach-O target appears):
+   - ObjC metadata (`__objc_classlist`/`__objc_protolist`/`__objc_selrefs`) for selector names.
+   - macOS-specific FLIRT pack (libsystem, not glibc — current fallback maps Mach-O x86_64 → elf/x86/64).
+   - `LC_FUNCTION_STARTS` consumption as additional entry source.
+3. **Loaded Data Sources panel — search box stretch.** PR 6 shipped the panel without the search box from the original spec. Add a text input that takes a function name and answers "which db/archive in the chain owns this?" using `which_archive_resolves` (already exists) plus an analogous helper for FLIRT hit attribution. Useful when staring at a wall of `__SEH_prolog4`-style misses to know which data source *would* have answered if it carried the symbol.
+4. **ARM64 polish — deprioritized.** `stp`/`ldp` pre-index writeback unmodeled; no ARM64-specific FLIRT. Park until needed.
+5. **PDB overlay — deprioritized.** Add `pdb` crate as `reghidra-core` dep behind feature flag; on PE load with sibling `.pdb`, parse `S_GPROC32`/`S_REGREL32`/`S_BPREL32`/`S_LOCAL` and populate `FrameLayout` directly, override tier-2 heuristic. TPI stream for type records via `pdb::TypeFinder`. Cache parsed layouts on `Project`. Revisit when a target actually ships a PDB.
 
 ### Phase 6 — Extensibility + Scripting
 - [ ] Lua scripting API
@@ -351,50 +214,48 @@ The existing `reghidra-decompile::ast::CType` is a simpler subset. The typing la
 - [ ] Headless CLI mode for batch analysis
 
 ## Build & Packaging
-- Workspace version lives in `Cargo.toml` under `[workspace.package]` — bump once, all crates inherit it.
-- macOS .app bundle: `./scripts/bundle-macos.sh` (add `--debug` for debug builds); outputs `target/Reghidra.app`.
-- Release builds hide the Windows console window via `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` in `reghidra-gui/src/main.rs` — debug builds keep the console for dev output.
+- Workspace version lives in `Cargo.toml` under `[workspace.package]` — bump once, all crates inherit.
+- macOS .app bundle: `./scripts/bundle-macos.sh` (`--debug` for debug); outputs `target/Reghidra.app`.
+- Release builds hide the Windows console via `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` in `reghidra-gui/src/main.rs`; debug builds keep it.
 
 ## Conventions
-- Workspace crates communicate via public APIs defined in each crate's `lib.rs`
-- Error handling: use `thiserror` for library errors, `anyhow` in CLI/GUI
-- All public APIs should have doc comments
-- Test with real binaries in `tests/fixtures/`
-- Never mention AI tools in commit messages or code comments
+- Workspace crates communicate via public APIs in each crate's `lib.rs`.
+- `thiserror` for library errors, `anyhow` in CLI/GUI.
+- Public APIs have doc comments. Test with real binaries in `tests/fixtures/`.
+- Never mention AI tools in commit messages or code comments.
 
 ## Decompile output style
-We follow the UChicago C style guide (https://uchicago-cs.github.io/student-resource-guide/style-guide/c.html) as the reference for generated pseudocode:
-- 4-space indentation (no tabs). `reghidra-decompile/src/emit.rs` hard-codes this.
-- K&R brace style (`void foo(void) {` on same line, closing `}` on its own).
-- Empty parameter lists are `(void)`, not `()` — K&R `()` means "unspecified prototype" in strict C.
-- Space after control keywords (`if (cond)`, `while (cond)`), space around binary operators, no space around `*`/`&`/`.`/`->` in their unary/postfix forms (we strip parens around simple deref/addrof operands via `needs_no_deref_parens` in emit.rs).
-- Unary operators on Binary/Ternary operands always get explicit parens so precedence stays correct (`-(x + y)`, never `-x + y`).
-- No compound one-line statements — every body is a brace block.
-- Block comments use `/* ... */`; line comments (`//`) only for annotations we explicitly emit.
-- **Logical section separation via blank lines**, per the guide's "the body of the function should include blank lines to indicate logical sections (with at most one blank line separating each logical section)" rule. Implemented in `emit::emit_body_with_separators` which inserts a blank line between adjacent visible statements when `should_separate(prev, curr)` returns true. The transitions that trigger a separator are: VarDecl ↔ non-VarDecl boundary, before any `Label`, control-flow block (`if`/`while`/`Loop`) ↔ straight-line code boundary, after `Return` or `Goto`, and around `Comment` annotations. Two adjacent control-flow blocks are NOT separated. The pass runs recursively inside `then_body`/`else_body`/`while body`/`loop body` so nested separators work, and never produces leading/trailing blanks inside a brace block or two consecutive blanks anywhere. `SourceAddr` markers are skipped when picking the "previous visible" statement so they don't anchor a wrong decision.
+Follows the UChicago C style guide (https://uchicago-cs.github.io/student-resource-guide/style-guide/c.html):
+- 4-space indentation (no tabs); K&R brace style; empty params are `(void)`, not `()`.
+- Space after control keywords, around binary operators; no space around unary `*`/`&`/`.`/`->` (parens stripped around simple deref/addrof operands via `needs_no_deref_parens` in `emit.rs`).
+- Unary on Binary/Ternary operands always gets explicit parens (`-(x + y)`, never `-x + y`).
+- No compound one-line statements; every body is a brace block.
+- Block comments `/* ... */`; line comments `//` only for explicit annotations.
+- **Logical section blank lines** via `emit::emit_body_with_separators` + `should_separate`. Triggers: VarDecl↔body, before `Label`, control-flow↔straight-line, after `Return`/`Goto`, around `Comment`. Two adjacent control-flow blocks NOT separated. Recursive into nested bodies. Never leading/trailing blanks inside a brace block; never two consecutive blanks. `SourceAddr` markers skipped when picking "previous visible".
 
 ## Decompile syntax highlighting
-- Token-level coloring, not per-line. `reghidra-gui/src/syntax.rs` is the C lexer — every rendered decomp line is split into `SyntaxKind` spans (Keyword, Type, Number, String, Operator, Punctuation, Comment, Return, Goto, Identifier, Whitespace) and each span is painted with the theme's matching color. Do not regress this to per-line colorizing — it was literally a wall of code before.
-- The rendering path is `render_interactive_line` → `emit_syntax_spans` in `views/decompile.rs`. The clickable-token pass (`tokenize_line`) still overlays on top so function calls / labels / hex addresses / variable references stay interactive with their own colors.
-- Theme palette for dark mode is Nord-inspired (Nord Frost for types, Nord Aurora purple for keywords, Aurora orange for numbers, Aurora green for strings, Snow Storm for operators/default, Polar Night gray for comments). Light mode uses Solarized equivalents. When adding a new `SyntaxKind` remember to update both `Theme::dark` and `Theme::light` plus the `decomp_color` match, and extend the hand-curated keyword/type lists in `syntax::CONTROL_KEYWORDS` and `syntax::C_TYPE_KEYWORDS` (kept in sorted order for `binary_search`).
+- **Token-level**, not per-line. `reghidra-gui/src/syntax.rs` is the C lexer; every rendered line is split into `SyntaxKind` spans (Keyword, Type, Number, String, Operator, Punctuation, Comment, Return, Goto, Identifier, Whitespace) and each span is painted with the theme's matching color. Do not regress to per-line colorizing.
+- Render path: `render_interactive_line` → `emit_syntax_spans` in `views/decompile.rs`. The clickable-token pass (`tokenize_line`) overlays on top so calls/labels/hex/var refs stay interactive with their own colors.
+- Dark mode is Nord-inspired (Frost teal types, Aurora purple keywords, Aurora orange numbers, Aurora green strings, Snow Storm operators/default, Polar Night gray comments). Light mode is Solarized equivalents. When adding a `SyntaxKind`, update both `Theme::dark`/`Theme::light` + `decomp_color`, and extend the sorted `syntax::CONTROL_KEYWORDS` / `syntax::C_TYPE_KEYWORDS` (the type table includes stdint, common Win32 aliases — HANDLE/HWND/DWORD/LPCSTR — and `unkN` defaults).
 
 ## Analysis pipeline notes
-- `functions::detect_functions` is a two-pass design: (1) entry discovery from all sources (binary entry, symbols, call targets, gated tail-call jmps, prologues, PE `.pdata`, Guard CF), (2) per-entry CFG reachability walk via `cfg::build_cfg_from_entry` that stops at rets, indirect branches, and other known entries. Function size/instruction count come from `ControlFlowGraph::extent()` — do not fall back to linear walks. CFGs are built once during detection and reused by xrefs/IR lifting.
-- Adding a new entry source? Feed it into `collect_extra_entries` in `analysis.rs` with a `FunctionSource` variant, not into `detect_functions` directly.
-- PE-specific metadata lives on `LoadedBinary` (`pdata_function_starts`, `guard_cf_function_starts`) and `BinaryInfo` (`pdb_info`, `rich_header`). Guard CF parser is stubbed; the Load Config Directory decoder is a follow-up.
+- `functions::detect_functions` is two-pass: (1) entry discovery from all sources (binary entry, symbols, call targets, gated tail-call jmps, prologues, PE `.pdata`, Guard CF), (2) per-entry CFG reachability via `cfg::build_cfg_from_entry` stopping at rets, indirect branches, other entries. Function size/instruction count come from `ControlFlowGraph::extent()` — do NOT fall back to linear walks. CFGs built once and reused by xrefs/IR lifting.
+- New entry source? Feed it into `collect_extra_entries` in `analysis.rs` with a `FunctionSource` variant, NOT into `detect_functions` directly.
+- PE-specific metadata lives on `LoadedBinary` (`pdata_function_starts`, `guard_cf_function_starts`) and `BinaryInfo` (`pdb_info`, `rich_header`). Guard CF parser stubbed; Load Config Directory decoder is a follow-up.
 
 ## Lifter / decompiler notes
-- **VarNode address vs value distinction**: `parse_memory_expression` returns a varnode whose *value is the effective address*, not a `VarSpace::Memory` descriptor. Callers pass it as `Store.addr` / `Load.addr`, and the expression builder's single `Expr::Deref` wrap produces correct C. Do NOT reintroduce `VarSpace::Memory` flowing out of operand parsing — it caused a double-deref bug (`*(*(0x40dfd8))`).
-- **Memory-destination ops**: x86 has read-modify-write forms (`mov [m], r`, `add [m], r`, `inc [m]`, `pop [m]`). Use the `read_operand`/`write_operand` helpers in `x86_64.rs` — `parse_operand` is fine for non-memory operands and for cases where you want the address itself (jmp/call targets). Currently only `lift_mov`, `lift_push`, `lift_pop` use the helpers; binops/inc/dec are still on the old path and have a latent bug for memory destinations.
-- **IAT call resolution**: x86-32 `call [imm]` and x86-64 `call [rip+disp]` lift to `IrOp::Call { target: iat_slot_addr }` rather than `CallInd`. `project::decompile` merges `binary.import_addr_map` into `DecompileContext.function_names` keyed by IAT slot address, so the existing target-lookup path resolves them. Register-indirect calls (`call rax`, `call [rbx+8]`) still lift to `CallInd`.
-- **Stack-arg collapsing** lives in `expr_builder::build_statements`, NOT in the lifter. It's a per-block walk that defers `Store { addr=stack_pointer }` into a `pending_stack_writes` queue and consumes it on the next `Call`/`CallInd` (in reverse order — first arg = last pushed). Any non-call instruction flushes the queue as plain `*(rsp) = x` assignments, EXCEPT stack-pointer delta bookkeeping (`rsp = rsp ± const`) emitted by the lifter as part of every push/pop — `is_stack_pointer_delta` detects these and skips them, otherwise the `IntSub` that opens a `push` would dump the pending queue before the `Store` half arrives. Arity capping (Phase 5c PR 4) caps via "take last N, leave rest" semantics so pre-positioned args for a later call survive an intervening 0-arg call. Cross-block propagation (Phase 5c PR 4d) extends the queue across extended-basic-block boundaries (single-pred/single-succ chain rule) so `push; call` sequences that straddle a block boundary still form a call arg list — see `inherit_pending` / `successor_will_inherit` in `expr_builder.rs`. Joins, branches, and back-edges all reset to an empty pending queue.
-- **Variable renamer** (`varnames.rs`):
-  - All sized aliases of an x86 GPR canonicalize via `canonical_reg_name` (eax/ax/al → rax). The `renames` map is keyed on canonical names so mixed-width accesses share one rename.
-  - `is_known_register_name` is the gate that decides whether an unrecognized var should become a fresh `var_N` (it's a register) or be left alone (probably a function name, global, or already-renamed).
-  - x86-32 mode is detected by a pre-pass (`scan_for_x86_32`) before `collect_vars` runs. When set, the SysV `argN` mapping for `rdi/rsi/rdx/rcx/r8/r9` is suppressed because x86-32 cdecl/stdcall pass everything on the stack.
-  - `rsp/rbp/result/flags` are intentionally left visible; eliminating them needs stack-frame analysis.
+- **VarNode address vs value distinction.** `parse_memory_expression` returns a varnode whose *value is the effective address*, not a `VarSpace::Memory` descriptor. Callers pass it as `Store.addr`/`Load.addr`, and the expression builder's single `Expr::Deref` wrap produces correct C. Do NOT reintroduce `VarSpace::Memory` flowing out of operand parsing — it caused a double-deref bug (`*(*(0x40dfd8))`).
+- **Memory-destination ops.** x86 has RMW forms (`mov [m], r`, `add [m], r`, `inc [m]`, `pop [m]`). Use `read_operand`/`write_operand` helpers in `x86_64.rs`; `parse_operand` is fine for non-memory operands and address-itself cases (jmp/call targets). Only `lift_mov`/`lift_push`/`lift_pop` use the helpers; binops/inc/dec are still on the old path with a latent bug for memory destinations.
+- **IAT call resolution.** x86-32 `call [imm]` and x86-64 `call [rip+disp]` lift to `IrOp::Call { target: iat_slot_addr }`, not `CallInd`. `project::decompile` merges `binary.import_addr_map` into `DecompileContext.function_names` keyed by IAT slot. Register-indirect (`call rax`, `call [rbx+8]`) still emits `CallInd`.
+- **Stack-arg collapsing** lives in `expr_builder::build_statements`, NOT the lifter. Per-block walk defers `Store{addr=stack_pointer}` into `pending_stack_writes`, consumes on next `Call`/`CallInd` (reversed). Non-call instructions flush as plain `*(rsp) = x`, EXCEPT `is_stack_pointer_delta` (`rsp = rsp ± const` bookkeeping from push/pop), otherwise the `IntSub` opening a `push` would dump pending before the `Store` half arrives. Arity capping (PR 4) caps via "take last N, leave rest". Cross-block propagation (PR 4d) extends across extended-basic-block boundaries (single-pred/single-succ chain; see `inherit_pending`/`successor_will_inherit`). Joins/branches/back-edges reset.
+- **Variable renamer (`varnames.rs`).**
+  - All sized x86 GPR aliases canonicalize via `canonical_reg_name` (eax/ax/al → rax). `renames` keyed on canonical names.
+  - `is_known_register_name` gates whether an unrecognized var becomes `var_N` (it's a register) or is left alone (function name, global, already-renamed).
+  - x86-32 detected by `scan_for_x86_32` pre-pass before `collect_vars`; suppresses SysV `argN` mapping for `rdi/rsi/rdx/rcx/r8/r9` (cdecl/stdcall pass on stack).
+  - `rsp/rbp/result/flags` intentionally visible; eliminating them needs stack-frame analysis.
 
 ## FLIRT notes
-- Bundled `signatures/` tree contains both rizinorg/sigdb sigs (named like `VisualStudio2015.sig`, `ubuntu-libc6.sig`) and IDA-derived sigs (named like `vc32_14.sig`, `pe.sig`). `bundled_sigs::collect_bundled_sigs` orders IDA sigs first so they take precedence at apply time (first DB to match wins).
-- IDA `.sig` files use bit `0x08` (`IDASIG_FUNCTION_UNRESOLVED_COLLISION`) in the optional pre-name attribute byte to mark collision placeholders that `sigmake` couldn't resolve. The placeholder name is typically `?`. `parse_module` tracks `is_collision` per public-name candidate and clears the module name if every candidate is a collision; `apply_signatures` already skips empty-name modules. Don't reintroduce naive name parsing that ignores the attribute byte.
-- The 16-bit/DOS/OS-2/NetWare/NE/LE/Mach-O-startup sigs from the IDA pack are intentionally NOT bundled (we don't target those formats); see the classification logic that was used to add the 86 files for which file_types/app_types we accepted.
+- `signatures/` contains both rizinorg/sigdb sigs (`VisualStudio2015.sig`, `ubuntu-libc6.sig`) and IDA-derived sigs (`vc32_14.sig`, `pe.sig`). `bundled_sigs::collect_bundled_sigs` orders IDA first so they win at apply time.
+- IDA `.sig` files use bit `0x08` (`IDASIG_FUNCTION_UNRESOLVED_COLLISION`) in the optional pre-name attribute byte for collision placeholders `sigmake` couldn't resolve (typically `?`). `parse_module` tracks `is_collision` per public-name candidate and clears the module name if every candidate is a collision; `apply_signatures` skips empty-name modules. Don't reintroduce naive name parsing that ignores the attribute byte.
+- 16-bit/DOS/OS-2/NetWare/NE/LE/Mach-O-startup sigs from the IDA pack are intentionally NOT bundled (we don't target those formats).
+- **Per-db hit attribution.** `apply_signatures` stamps `Function::matched_signature_db = Some(db.header.name)` on every match so the Loaded Data Sources panel can credit hits back to a specific db. The `Signature` `FunctionSource` flattens which db won; the new field is the only path back. Don't drop the field on a future cleanup pass — `Project::recompute_hit_counts` walks it.

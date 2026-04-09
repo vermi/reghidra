@@ -273,6 +273,49 @@ pub fn is_embedded(stem: &str) -> bool {
     TYPES_DIR.get_file(format!("{stem}.rtarch")).is_some()
 }
 
+/// Find the index of the first archive in `archives` that defines a
+/// prototype for `name`, mirroring the same precedence and underscore-
+/// strip fallback as
+/// [`crate::DecompileContext::lookup_prototype`]. Returns `None` when
+/// no archive resolves the name.
+///
+/// Used by the Loaded Data Sources panel to attribute hits to the
+/// archive that actually owns each function — a plain "lookup hits in
+/// archive N" count would over-credit lower-precedence archives that
+/// happen to also carry the same name (e.g. `posix.rtarch` and
+/// `rizin-libc.rtarch` both define `malloc`, but on a PE binary
+/// `windows-x64` is consulted first and any miss falls through in
+/// the listed order).
+pub fn which_archive_resolves(name: &str, archives: &[Arc<TypeArchive>]) -> Option<usize> {
+    for (i, archive) in archives.iter().enumerate() {
+        if archive.functions.contains_key(name) {
+            return Some(i);
+        }
+    }
+    // Fallback: strip MSVC-style leading underscore decoration. Mirrors
+    // `DecompileContext::lookup_prototype` so the panel's hit counts
+    // match what the decompiler actually resolves.
+    if let Some(s) = name.strip_prefix('_') {
+        if !s.is_empty() && !s.starts_with('_') {
+            for (i, archive) in archives.iter().enumerate() {
+                if archive.functions.contains_key(s) {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    if let Some(s) = name.strip_prefix("__") {
+        if !s.is_empty() && !s.starts_with('_') {
+            for (i, archive) in archives.iter().enumerate() {
+                if archive.functions.contains_key(s) {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Bridge into the decompile-layer AST
 // ---------------------------------------------------------------------------
@@ -558,6 +601,34 @@ mod tests {
             archive.functions.contains_key("malloc"),
             "malloc missing from rizin-libc.rtarch"
         );
+    }
+
+    #[test]
+    fn which_archive_resolves_respects_precedence() {
+        let primary = Arc::new(sample_archive());
+        let mut second = sample_archive();
+        second.name = "fallback".into();
+        // Add an entry only the fallback carries.
+        second.functions.insert(
+            "fallback_only".to_string(),
+            FunctionType {
+                name: "fallback_only".to_string(),
+                args: vec![],
+                return_type: TypeRef::Primitive(Primitive::Void),
+                calling_convention: CallingConvention::Default,
+                is_variadic: false,
+            },
+        );
+        let archives = vec![primary, Arc::new(second)];
+        // Both archives carry CreateFileA — primary wins.
+        assert_eq!(which_archive_resolves("CreateFileA", &archives), Some(0));
+        // Only the fallback carries this — index 1.
+        assert_eq!(which_archive_resolves("fallback_only", &archives), Some(1));
+        // Underscore strip: lookup `_CreateFileA` should resolve via the
+        // fallback path to the bare name in the primary archive.
+        assert_eq!(which_archive_resolves("_CreateFileA", &archives), Some(0));
+        // Truly missing → None.
+        assert_eq!(which_archive_resolves("definitely_not_here", &archives), None);
     }
 
     #[test]
