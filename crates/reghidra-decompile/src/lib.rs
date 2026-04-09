@@ -177,7 +177,7 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> DecompileOutput {
     // prototype (if known to the bundled type archives) is passed in so
     // arg slots can be typed from the prototype's parameter list.
     let prototype = current_function_prototype(ir, ctx);
-    let (body, frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
+    let (body, mut frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
 
     // Step 4: Assign variable names (with user overrides applied as a final pass)
     let body = varnames::rename_variables(body, &ctx.variable_names);
@@ -195,7 +195,16 @@ pub fn decompile(ir: &IrFunction, ctx: &DecompileContext) -> DecompileOutput {
     // Final typing pass — overrides everything earlier (archive
     // prototype arg types, call-return auto-typing) because the
     // user's explicit "Set Type" choice is authoritative.
-    let body = expr_builder::apply_user_variable_types(body, ctx);
+    let body = expr_builder::apply_user_variable_types(body, ctx, &mut frame_layout);
+
+    // Step 6.5: Strip Cast wrappers around call args whose source
+    // expression already has an assignment-compatible type. The
+    // casts in question are inserted by `annotate_call_args` in
+    // Step 1 as visual compensation for a typing gap; once the gap
+    // is closed by the stack-frame pass, return-type propagation,
+    // or a user retype, the cast becomes noise. Runs after every
+    // earlier typing pass so the local-type map is settled.
+    let body = expr_builder::strip_compatible_call_casts(body, ctx);
 
     // Step 7: Emit C-like code. Pass the prototype through so the
     // signature line shows real types (`int _fclose(FILE* arg0)`) for
@@ -216,10 +225,11 @@ pub fn decompile_annotated(
     let block_stmts = expr_builder::build_statements(ir, ctx);
     let body = structuring::structure(ir, &block_stmts, ctx);
     let prototype = current_function_prototype(ir, ctx);
-    let (body, frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
+    let (body, mut frame_layout) = stackframe::analyze_and_rewrite(body, prototype);
     let body = varnames::rename_variables(body, &ctx.variable_names);
     let body = expr_builder::type_call_returns(body, ctx);
-    let body = expr_builder::apply_user_variable_types(body, ctx);
+    let body = expr_builder::apply_user_variable_types(body, ctx, &mut frame_layout);
+    let body = expr_builder::strip_compatible_call_casts(body, ctx);
     let variable_names = varnames::collect_displayed_names(&body);
     let display_name = ctx.current_function_display_name.as_deref().unwrap_or(&ir.name);
     let lines = emit::emit_function_annotated(display_name, &body, &ctx.label_names, prototype);

@@ -177,6 +177,43 @@ impl AnnotationPopup {
                             _ => "Enter new name (empty to reset)...",
                         };
 
+                        // For the Set-Type kind, render a dropdown
+                        // populated from the project's loaded type
+                        // archives + primitives + common Win32
+                        // aliases above the free-form text edit.
+                        // Selecting an entry rewrites `self.text`;
+                        // the user can then commit (Enter / OK) or
+                        // edit further (e.g. add a `*` for pointer).
+                        // The TextEdit stays as the canonical
+                        // commit surface — users typing custom
+                        // struct names that aren't in any archive
+                        // still get a free-form fallback.
+                        if matches!(self.kind, AnnotationKind::SetVariableType { .. }) {
+                            let names = project.known_type_names();
+                            // Show the current selection (or
+                            // "Pick a type..." when text is empty
+                            // or doesn't match a known entry).
+                            let current_label = if self.text.trim().is_empty() {
+                                "Pick a type...".to_string()
+                            } else {
+                                self.text.clone()
+                            };
+                            egui::ComboBox::from_id_salt("set_type_picker")
+                                .selected_text(current_label)
+                                .width(330.0)
+                                .show_ui(ui, |ui| {
+                                    for name in &names {
+                                        if ui
+                                            .selectable_label(self.text == *name, name)
+                                            .clicked()
+                                        {
+                                            self.text = name.clone();
+                                        }
+                                    }
+                                });
+                            ui.add_space(4.0);
+                        }
+
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut self.text)
                                 .hint_text(hint)
@@ -186,6 +223,31 @@ impl AnnotationPopup {
                         if self.needs_focus {
                             response.request_focus();
                             self.needs_focus = false;
+                        }
+                        // Live parse feedback for the Set-Type
+                        // kind: a quick check tells the user
+                        // whether their input will round-trip
+                        // through `parse_user_ctype` to a
+                        // recognized variant or fall through to
+                        // `Named(...)`. Either is valid — the
+                        // hint just makes the difference visible.
+                        if matches!(self.kind, AnnotationKind::SetVariableType { .. })
+                            && !self.text.trim().is_empty()
+                        {
+                            use reghidra_core::ast::{parse_user_ctype, CType};
+                            let parsed = parse_user_ctype(&self.text);
+                            let (msg, color) = match parsed {
+                                Some(CType::Named(_)) => (
+                                    format!("→ Named (custom: {})", self.text.trim()),
+                                    theme.text_dim,
+                                ),
+                                Some(t) => (format!("→ {t}"), theme.text_dim),
+                                None => (
+                                    "(parses as empty — will clear the override)".to_string(),
+                                    theme.text_dim,
+                                ),
+                            };
+                            ui.label(RichText::new(msg).color(color).small());
                         }
 
                         // Enter to confirm

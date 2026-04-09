@@ -70,6 +70,73 @@ pub struct FrameLayout {
     /// All slots discovered, keyed by signed offset from the frame pointer.
     /// `BTreeMap` gives us a sorted iteration order for declaration emit.
     pub slots: BTreeMap<i64, StackSlot>,
+    /// Slots that have been subsumed into a wider parent slot via
+    /// [`Self::retype_slot`]. The key is the child's offset; the
+    /// value is the parent's offset (which still lives in
+    /// [`Self::slots`]). Subsumed children also stay in `slots` so
+    /// the entry is undoable — the user retype-flow is the only
+    /// caller and re-running it after a clear must restore the
+    /// pre-merge layout. Consumers that walk `slots` for emit (such
+    /// as the prepended `VarDecl` block or the body rewriter) skip
+    /// any offset that appears as a key here.
+    pub subsumed_by: BTreeMap<i64, i64>,
+}
+
+impl FrameLayout {
+    /// Retype the slot at `offset` to `new_ctype`. When `new_size`
+    /// (the byte width of the new type, resolved by the caller) is
+    /// strictly greater than the slot's current size, walk forward
+    /// in offset order and mark every slot whose offset falls in
+    /// `[offset + old_size, offset + new_size)` as subsumed by
+    /// `offset`. The widened slot's `size` is updated to `new_size`
+    /// and its `ctype` to the new type.
+    ///
+    /// Returns the list of subsumed child offsets in offset order
+    /// (caller uses these to rewrite body references and drop the
+    /// child VarDecls).
+    ///
+    /// When `new_size` is `None` (because the caller couldn't
+    /// resolve the new type's width — e.g. unrecognized
+    /// `Named("FOO")`), the type is updated in place but no
+    /// subsumption occurs. This keeps the "type-only" retype path
+    /// working for opaque struct names.
+    ///
+    /// Idempotent: a second call at the same offset with the same
+    /// type yields the same `subsumed_by` set (children already
+    /// marked stay marked, no-op).
+    pub fn retype_slot(
+        &mut self,
+        offset: i64,
+        new_ctype: CType,
+        new_size: Option<u8>,
+    ) -> Vec<i64> {
+        let Some(parent) = self.slots.get_mut(&offset) else {
+            return Vec::new();
+        };
+        let old_size = parent.size;
+        parent.ctype = Some(new_ctype);
+        let Some(new_size) = new_size else {
+            return Vec::new();
+        };
+        if new_size <= old_size {
+            return Vec::new();
+        }
+        parent.size = new_size;
+        let widen_end = offset.saturating_add(new_size as i64);
+        let widen_start = offset.saturating_add(old_size as i64);
+        // Collect children in `[widen_start, widen_end)` from the BTreeMap.
+        // We iterate then mutate, so collect first.
+        let children: Vec<i64> = self
+            .slots
+            .range(widen_start..widen_end)
+            .map(|(k, _)| *k)
+            .filter(|k| *k != offset)
+            .collect();
+        for child in &children {
+            self.subsumed_by.insert(*child, offset);
+        }
+        children
+    }
 }
 
 /// Analyze the function body, rewrite recognized stack accesses, drop the
@@ -714,6 +781,13 @@ fn prepend_var_decls(body: Vec<Stmt>, layout: &FrameLayout) -> Vec<Stmt> {
     // for free.
     let mut decls: Vec<Stmt> = Vec::new();
     for slot in layout.slots.values() {
+        // Skip slots that have been folded into a wider parent via
+        // `retype_slot` — the parent already covers them in the
+        // emitted decl block, and emitting both would render two
+        // declarations for the same byte range.
+        if layout.subsumed_by.contains_key(&slot.offset) {
+            continue;
+        }
         decls.push(Stmt::VarDecl {
             name: slot.name.clone(),
             ctype: slot
@@ -1129,6 +1203,111 @@ mod tests {
         let (_out, layout) = analyze_and_rewrite(body, None);
         let slot = layout.slots.get(&0x20).expect("slot at +0x20");
         assert_eq!(slot.name, "arg_20");
+    }
+
+    fn slot(offset: i64, size: u8, name: &str) -> StackSlot {
+        StackSlot {
+            offset,
+            size,
+            ref_count: 1,
+            name: name.to_string(),
+            ctype: Some(CType::Unknown(size)),
+        }
+    }
+
+    /// Widening retype on x86-32: `arg_8` (4 bytes, unk32) becomes
+    /// `int64_t`. The 8-byte width consumes `arg_c` (the next slot at
+    /// +4), so it should land in `subsumed_by` and `retype_slot` should
+    /// return `[0xc]`. The parent's size and ctype both update.
+    #[test]
+    fn retype_slot_widens_consumes_siblings() {
+        let mut layout = FrameLayout {
+            has_frame_pointer: true,
+            slots: BTreeMap::new(),
+            subsumed_by: BTreeMap::new(),
+        };
+        layout.slots.insert(8, slot(8, 4, "arg_8"));
+        layout.slots.insert(0xc, slot(0xc, 4, "arg_c"));
+
+        let subsumed = layout.retype_slot(8, CType::Int64, Some(8));
+        assert_eq!(subsumed, vec![0xc]);
+        assert_eq!(layout.subsumed_by.get(&0xc), Some(&8));
+        let parent = layout.slots.get(&8).expect("parent slot");
+        assert_eq!(parent.size, 8);
+        assert!(matches!(parent.ctype, Some(CType::Int64)));
+        // Children stay in `slots` for undoability.
+        assert!(layout.slots.contains_key(&0xc));
+    }
+
+    /// Same-width retype: `arg_8` from `unk32` to `uint32_t`. No
+    /// widening means no subsumption — the type changes in place
+    /// and the returned subsumed list is empty.
+    #[test]
+    fn retype_slot_no_widen_when_size_matches() {
+        let mut layout = FrameLayout {
+            has_frame_pointer: true,
+            slots: BTreeMap::new(),
+            subsumed_by: BTreeMap::new(),
+        };
+        layout.slots.insert(8, slot(8, 4, "arg_8"));
+        layout.slots.insert(0xc, slot(0xc, 4, "arg_c"));
+
+        let subsumed = layout.retype_slot(8, CType::UInt32, Some(4));
+        assert!(subsumed.is_empty());
+        assert!(layout.subsumed_by.is_empty());
+        let parent = layout.slots.get(&8).expect("parent slot");
+        assert!(matches!(parent.ctype, Some(CType::UInt32)));
+        assert_eq!(parent.size, 4);
+    }
+
+    /// Unknown new-size (e.g. opaque `Named("FOO")` not in any
+    /// archive): the retype is type-only — no widening, no
+    /// subsumption, no sibling consumption. Guards against an
+    /// unrecognized struct name accidentally eating its neighbors.
+    #[test]
+    fn retype_slot_unknown_size_skips_subsumption() {
+        let mut layout = FrameLayout {
+            has_frame_pointer: true,
+            slots: BTreeMap::new(),
+            subsumed_by: BTreeMap::new(),
+        };
+        layout.slots.insert(8, slot(8, 4, "arg_8"));
+        layout.slots.insert(0xc, slot(0xc, 4, "arg_c"));
+
+        let subsumed =
+            layout.retype_slot(8, CType::Named("FOO".to_string()), None);
+        assert!(subsumed.is_empty());
+        assert!(layout.subsumed_by.is_empty());
+        let parent = layout.slots.get(&8).expect("parent slot");
+        assert!(matches!(parent.ctype, Some(CType::Named(ref n)) if n == "FOO"));
+        // Width unchanged.
+        assert_eq!(parent.size, 4);
+    }
+
+    /// `prepend_var_decls` skips slots whose offset is in
+    /// `subsumed_by`. Pin this so the GUI never renders both halves
+    /// of a merged slot.
+    #[test]
+    fn prepend_var_decls_skips_subsumed_children() {
+        let mut layout = FrameLayout {
+            has_frame_pointer: true,
+            slots: BTreeMap::new(),
+            subsumed_by: BTreeMap::new(),
+        };
+        layout.slots.insert(8, slot(8, 8, "arg_8"));
+        layout.slots.insert(0xc, slot(0xc, 4, "arg_c"));
+        layout.subsumed_by.insert(0xc, 8);
+
+        let body = prepend_var_decls(vec![], &layout);
+        let decls: Vec<&Stmt> = body
+            .iter()
+            .filter(|s| matches!(s, Stmt::VarDecl { .. }))
+            .collect();
+        assert_eq!(decls.len(), 1);
+        match decls[0] {
+            Stmt::VarDecl { name, .. } => assert_eq!(name, "arg_8"),
+            _ => unreachable!(),
+        }
     }
 
     /// Underscore-decoration variants of the SEH/EH prolog name should
