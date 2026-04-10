@@ -2908,7 +2908,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "reghidra-cli"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "reghidra-core"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "capstone",
  "flate2",
@@ -2939,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "reghidra-decompile"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "include_dir",
  "log",
@@ -2951,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "reghidra-gui"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "reghidra-ir"
-version = "1.4.5"
+version = "1.4.6"
 dependencies = [
  "log",
  "serde",
