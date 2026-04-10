@@ -14,4 +14,4 @@ serde_json = { workspace = true }
 log = { workspace = true }
 flate2 = { workspace = true }
 include_dir = { workspace = true }
-msvc-demangler = { workspace = true }
+undname = { workspace = true }
