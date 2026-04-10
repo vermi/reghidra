@@ -8,7 +8,9 @@
 //! lists, and disasm block headers).
 //!
 //! Recognized forms:
-//! - MSVC C++ mangled names (`?foo@@YAHH@Z`) via `msvc-demangler`.
+//! - MSVC C++ mangled names (`?foo@@YAHH@Z`) via the `undname` crate
+//!   (a Rust port of LLVM's `MicrosoftDemangle.cpp`, closer to MSVC's
+//!   own `undname.dll` output than the older `msvc-demangler` crate).
 //! - MSVC `__fastcall` decoration `@name@bytes` → `name`.
 //! - MSVC `__stdcall` decoration `_name@bytes` → `name`.
 //!
@@ -18,13 +20,20 @@
 
 use std::borrow::Cow;
 
-use msvc_demangler::DemangleFlags;
+use undname::Flags;
 
-const BASE_FLAGS: DemangleFlags = DemangleFlags::from_bits_truncate(
-    DemangleFlags::NO_ACCESS_SPECIFIERS.bits()
-        | DemangleFlags::NO_MEMBER_TYPE.bits()
-        | DemangleFlags::NO_MS_KEYWORDS.bits()
-        | DemangleFlags::SPACE_AFTER_COMMA.bits(),
+/// Shared flag set for both the full and short display forms. Suppresses
+/// access specifiers (`public:`), member types (`virtual`), calling
+/// convention decorations (`__cdecl`), MS-specific keywords
+/// (`__unaligned`/`__restrict`), and `this`-qualifiers (`const volatile`
+/// on trailing methods) so the output stays readable in a decompiler
+/// view.
+const BASE_FLAGS: Flags = Flags::from_bits_truncate(
+    Flags::NO_ACCESS_SPECIFIER.bits()
+        | Flags::NO_MEMBER_TYPE.bits()
+        | Flags::NO_CALLING_CONVENTION.bits()
+        | Flags::NO_MS_KEYWORDS.bits()
+        | Flags::NO_THISTYPE.bits(),
 );
 
 /// Full-signature display form. For MSVC C++ mangled names this includes
@@ -32,8 +41,8 @@ const BASE_FLAGS: DemangleFlags = DemangleFlags::from_bits_truncate(
 /// the decoration, and for everything else it's an identity pass-through.
 pub fn display_name(name: &str) -> Cow<'_, str> {
     if name.starts_with('?') {
-        let flags = BASE_FLAGS | DemangleFlags::NO_FUNCTION_RETURNS;
-        if let Ok(demangled) = msvc_demangler::demangle(name, flags) {
+        let flags = BASE_FLAGS | Flags::NO_RETURN_TYPE;
+        if let Ok(demangled) = undname::demangle(name, flags) {
             if !demangled.is_empty() && demangled != name {
                 return Cow::Owned(demangled);
             }
@@ -52,8 +61,8 @@ pub fn display_name(name: &str) -> Cow<'_, str> {
 /// the layout.
 pub fn display_name_short(name: &str) -> Cow<'_, str> {
     if name.starts_with('?') {
-        let flags = BASE_FLAGS | DemangleFlags::NAME_ONLY;
-        if let Ok(demangled) = msvc_demangler::demangle(name, flags) {
+        let flags = BASE_FLAGS | Flags::NAME_ONLY;
+        if let Ok(demangled) = undname::demangle(name, flags) {
             if !demangled.is_empty() && demangled != name {
                 return Cow::Owned(demangled);
             }

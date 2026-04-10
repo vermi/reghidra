@@ -17,7 +17,7 @@ exclude = ["tools/typegen"]
 resolver = "2"
 
 [workspace.package]
-version = "1.4.5"
+version = "1.4.6"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/reghidra/reghidra"
@@ -38,6 +38,6 @@ log = "0.4"
 env_logger = "0.11"
 flate2 = "1"
 include_dir = "0.7"
-msvc-demangler = "0.11"
+undname = "2.1"
 postcard = { version = "1", features = ["alloc"], default-features = false }
 clap = { version = "4", features = ["derive"] }

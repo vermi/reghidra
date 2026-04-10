@@ -54,7 +54,7 @@ reghidra/
 
 ## Key Dependencies
 - `goblin` (binary parsing), `capstone` (disasm), `egui`+`eframe` (GUI)
-- `msvc-demangler` (wired via `reghidra-core::demangle`)
+- `undname` (MSVC C++ demangling via `reghidra-core::demangle`; Rust port of LLVM's MicrosoftDemangle, closer to real `undname.dll` output)
 - `serde`+`serde_json` (session persistence), `flate2`, `include_dir` (bundled sigs/archives)
 - `postcard` (type archive on-disk format), `syn`+`quote` (typegen tool only)
 - Planned: `pdb` (deprioritized), `mlua` (Phase 6)
