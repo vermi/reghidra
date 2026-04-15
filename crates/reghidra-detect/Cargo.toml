@@ -1,0 +1,12 @@
+[package]
+name = "reghidra-detect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = "0.9"
+regex = "1"
+include_dir = { workspace = true }
+thiserror = { workspace = true }

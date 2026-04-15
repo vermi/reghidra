@@ -1,0 +1,16 @@
+rule:
+  name: injection.createremotethread
+  severity: suspicious
+  scope: function
+  description: |
+    Calls CreateRemoteThread or CreateRemoteThreadEx to create a thread in another process.
+    This is the most common method for classic DLL injection and shellcode injection into
+    a remote process. Legitimate use is rare outside of debugging tools.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createremotethread
+    - https://attack.mitre.org/techniques/T1055/001/
+  attack:
+    - T1055.001
+  features:
+    api: /CreateRemoteThread(Ex)?/

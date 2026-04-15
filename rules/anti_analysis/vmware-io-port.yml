@@ -1,0 +1,19 @@
+rule:
+  name: anti-analysis.vmware-io-port
+  severity: malicious
+  scope: function
+  description: |
+    Uses the VMware backdoor I/O port (0x5658 / "VMXh") to detect whether the process
+    is running inside a VMware virtual machine. This technique reads from the magic port
+    using the IN instruction and checks for the VMXh signature in the response.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/vmware-detection/
+    - https://kb.vmware.com/s/article/1009186
+    - https://attack.mitre.org/techniques/T1497/001/
+  attack:
+    - T1497.001
+  features:
+    and:
+      - mnemonic: in
+      - string: VMXh

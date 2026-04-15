@@ -1,0 +1,18 @@
+rule:
+  name: anti-analysis.hypervisor-bit
+  severity: suspicious
+  scope: function
+  description: |
+    Checks the hypervisor present bit (CPUID leaf 1, ECX bit 31) to detect virtual
+    machine environments. The sequence CPUID followed by BT (bit test) is characteristic
+    of this check; a set bit indicates a hypervisor is present.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/cpuid-hypervisor-bit/
+    - https://attack.mitre.org/techniques/T1497/001/
+  attack:
+    - T1497.001
+  features:
+    mnemonic_sequence:
+      - cpuid
+      - bt

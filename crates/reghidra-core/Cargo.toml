@@ -8,6 +8,7 @@ goblin = { workspace = true }
 capstone = { workspace = true }
 reghidra-ir = { workspace = true }
 reghidra-decompile = { workspace = true }
+reghidra-detect = { path = "../reghidra-detect" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,3 +16,8 @@ log = { workspace = true }
 flate2 = { workspace = true }
 include_dir = { workspace = true }
 undname = { workspace = true }
+md-5 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

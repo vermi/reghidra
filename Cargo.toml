@@ -3,6 +3,7 @@ members = [
     "crates/reghidra-core",
     "crates/reghidra-ir",
     "crates/reghidra-decompile",
+    "crates/reghidra-detect",
     "crates/reghidra-gui",
     "crates/reghidra-cli",
 ]

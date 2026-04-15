@@ -10,12 +10,14 @@ path = "src/main.rs"
 [dependencies]
 reghidra-core = { workspace = true }
 reghidra-decompile = { workspace = true }
+reghidra-detect = { path = "../reghidra-detect" }
 anyhow = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+regex = "1"
 
 [[test]]
 name = "cli"

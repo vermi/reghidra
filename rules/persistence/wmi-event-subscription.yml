@@ -1,0 +1,19 @@
+rule:
+  name: persistence.wmi-event-subscription
+  severity: malicious
+  scope: file
+  description: |
+    References both WMI __EventFilter and CommandLineEventConsumer class names, indicating
+    a WMI event subscription being established for persistence. This technique survives
+    reboots and runs arbitrary commands when filter conditions are met.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1546/003/
+    - https://learn.microsoft.com/en-us/windows/win32/wmisdk/commandlineeventconsumer
+    - https://www.fireeye.com/blog/threat-research/2019/01/bypassing-network-restrictions-through-rdp-tunneling.html
+  attack:
+    - T1546.003
+  features:
+    and:
+      - string: __EventFilter
+      - string: CommandLineEventConsumer

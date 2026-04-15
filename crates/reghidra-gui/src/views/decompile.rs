@@ -86,6 +86,38 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
 
     let theme = app.theme.clone();
 
+    // Detection banner: if any hits exist for this function, show a
+    // one-line summary with each rule name painted in its severity color.
+    if let Some(hits) = project.detection_results.function_hits.get(&func_entry) {
+        if !hits.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("⚠ {}  detection(s): ", hits.len()))
+                        .color(theme.detection_suspicious)
+                        .strong(),
+                );
+                for (i, hit) in hits.iter().enumerate() {
+                    let color = match hit.severity {
+                        reghidra_core::DetectionSeverity::Malicious => theme.detection_malicious,
+                        reghidra_core::DetectionSeverity::Suspicious => theme.detection_suspicious,
+                        reghidra_core::DetectionSeverity::Info => theme.detection_info,
+                    };
+                    let sep = if i + 1 < hits.len() { " · " } else { "" };
+                    let label_resp = ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("{}{sep}", hit.rule_name)).color(color),
+                        )
+                        .sense(egui::Sense::hover()),
+                    );
+                    if !hit.description.is_empty() {
+                        label_resp.on_hover_text(&hit.description);
+                    }
+                }
+            });
+            ui.separator();
+        }
+    }
+
     // Reverse map: displayed function name → entry address. Cached
     // on the App because building it requires demangling every
     // function name in the binary, which on a real PE fixture is

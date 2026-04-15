@@ -1,0 +1,22 @@
+rule:
+  name: crypto.bcrypt-aes
+  severity: suspicious
+  scope: function
+  description: |
+    Opens the BCrypt AES algorithm provider using BCryptOpenAlgorithmProvider with a
+    string identifier of "AES" or the BCRYPT_AES_ALGORITHM constant. This is the
+    modern Windows CNG path for AES encryption, used by both legitimate software and
+    ransomware/data-theft tools.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1486/
+    - https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptopenalgorithmprovider
+    - https://learn.microsoft.com/en-us/windows/win32/seccng/cng-algorithm-identifiers
+  attack:
+    - T1486
+  features:
+    and:
+      - api: /BCryptOpenAlgorithmProvider/
+      - or:
+          - string: AES
+          - string: /BCRYPT_AES/

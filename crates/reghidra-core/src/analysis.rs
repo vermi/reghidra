@@ -1,5 +1,6 @@
 pub mod bundled_sigs;
 pub mod cfg;
+pub mod detect_features;
 pub mod flirt;
 pub mod functions;
 pub mod lifting;

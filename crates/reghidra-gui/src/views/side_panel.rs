@@ -13,6 +13,12 @@ use egui::Ui;
 const SIDE_PANEL_ROW_HEIGHT: f32 = 18.0;
 
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
+    // The Detections tab manages its own borrows internally.
+    if app.side_panel == SidePanel::Detections {
+        crate::views::detections::render(app, ui);
+        return;
+    }
+
     let Some(ref project) = app.project else {
         return;
     };
@@ -42,6 +48,7 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
             ui.label(format!("{} functions", filtered.len()));
             ui.separator();
 
+            let theme = app.theme.clone();
             egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
                 ui,
                 SIDE_PANEL_ROW_HEIGHT,
@@ -51,7 +58,62 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                         let (addr, name) = filtered[idx];
                         let label = format!("0x{addr:08x}  {name}");
                         let selected = selected_addr == Some(*addr);
-                        let resp = ui.selectable_label(selected, &label);
+
+                        // Check for detection hits on this function.
+                        let det_hits = project.detection_results.function_hits.get(addr);
+                        let badge_color = det_hits.and_then(|hits| {
+                            let has_malicious = hits.iter().any(|h| {
+                                matches!(h.severity, reghidra_core::DetectionSeverity::Malicious)
+                            });
+                            let has_suspicious = hits.iter().any(|h| {
+                                matches!(h.severity, reghidra_core::DetectionSeverity::Suspicious)
+                            });
+                            if has_malicious {
+                                Some(theme.detection_malicious)
+                            } else if has_suspicious {
+                                Some(theme.detection_suspicious)
+                            } else if !hits.is_empty() {
+                                Some(theme.detection_info)
+                            } else {
+                                None
+                            }
+                        });
+                        let badge_tooltip = det_hits.map(|hits| {
+                            hits.iter()
+                                .map(|h| h.rule_name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        });
+
+                        let resp = if badge_color.is_some() {
+                            // Render label + badge circle in a horizontal row.
+                            let row_resp = ui.horizontal(|ui| {
+                                let r = ui.selectable_label(selected, &label);
+                                // Right-align badge.
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(8.0, 8.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().circle_filled(
+                                            rect.center(),
+                                            4.0,
+                                            badge_color.unwrap(),
+                                        );
+                                    },
+                                );
+                                r
+                            });
+                            row_resp.inner
+                        } else {
+                            ui.selectable_label(selected, &label)
+                        };
+
+                        if let Some(tooltip) = badge_tooltip {
+                            resp.clone().on_hover_text(tooltip);
+                        }
                         if resp.clicked() {
                             navigate_to = Some(*addr);
                         }
@@ -330,6 +392,9 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                 },
             );
         }
+
+        // Handled by early-return at the top of this function.
+        SidePanel::Detections => {}
     }
 
     if let Some(addr) = navigate_to {

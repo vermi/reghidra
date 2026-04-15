@@ -1,0 +1,21 @@
+rule:
+  name: network.winsock-connect
+  severity: suspicious
+  scope: function
+  description: |
+    Initializes Winsock and establishes an outbound TCP/UDP connection. The combination
+    of WSAStartup for initialization and connect for the actual connection attempt is
+    the baseline pattern for C2 beacon code and reverse shells.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1071/
+    - https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-connect
+    - https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsastartup
+  attack:
+    - T1071
+  features:
+    and:
+      - api: /^connect$/
+      - or:
+          - api: /WSAStartup/
+          - api: /socket/

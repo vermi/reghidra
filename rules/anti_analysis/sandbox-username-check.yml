@@ -1,0 +1,24 @@
+rule:
+  name: anti-analysis.sandbox-username-check
+  severity: suspicious
+  scope: function
+  description: |
+    Calls GetUserName and compares against known sandbox/analyst usernames. Common automated
+    analysis environments use predictable usernames such as "sandbox", "malware", "virus",
+    or "test". Matching on these strings is a low-fidelity environment check.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/username-check/
+    - https://attack.mitre.org/techniques/T1497/001/
+  attack:
+    - T1497.001
+  features:
+    and:
+      - api: /GetUserName/
+      - or:
+          - string: /sandbox/i
+          - string: /malware/i
+          - string: /virus/i
+          - string: /test/i
+          - string: SANDBOX
+          - string: MALWARE

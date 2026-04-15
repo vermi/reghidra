@@ -1,0 +1,19 @@
+rule:
+  name: crypto.custom-xor-loop
+  severity: suspicious
+  scope: function
+  description: |
+    Detects mnemonic patterns consistent with a hand-rolled XOR encryption loop:
+    xor+inc+cmp+jne (classic byte loop) or xor+add+cmp (offset-based variant). High
+    false-positive rate on general arithmetic code — combine with absence of standard
+    crypto API calls or entropy analysis to reduce noise.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/
+    - https://unprotect.it/technique/xor-encoding/
+  attack:
+    - T1027
+  features:
+    or:
+      - mnemonic_sequence: [xor, inc, cmp, jne]
+      - mnemonic_sequence: [xor, add, cmp]

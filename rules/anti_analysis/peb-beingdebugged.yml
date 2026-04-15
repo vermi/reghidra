@@ -1,0 +1,19 @@
+rule:
+  name: anti-analysis.peb-beingdebugged
+  severity: info
+  scope: function
+  description: |
+    Likely checks the PEB BeingDebugged flag to detect a debugger. Malware commonly reads
+    fs:[30h] (x86) or gs:[60h] (x64) to walk the PEB and check the BeingDebugged byte
+    without calling any Win32 API. This rule approximates with API usage or string evidence
+    since addressing-mode features are not yet available.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/peb-beingdebugged/
+    - https://attack.mitre.org/techniques/T1622/
+  attack:
+    - T1622
+  features:
+    or:
+      - api: /IsDebuggerPresent/
+      - string: BeingDebugged

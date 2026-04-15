@@ -1,0 +1,22 @@
+rule:
+  name: persistence.schtasks-shell
+  severity: suspicious
+  scope: function
+  description: |
+    Schedules a task using the schtasks command by spawning a shell or process. Malware
+    commonly uses scheduled tasks for persistence or lateral movement by passing a schtasks
+    command string to CreateProcess, ShellExecute, or WinExec.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1053/005/
+    - https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks
+    - https://unprotect.it/technique/scheduled-task/
+  attack:
+    - T1053.005
+  features:
+    and:
+      - string: /schtasks/i
+      - or:
+          - api: /CreateProcess/
+          - api: /ShellExecute/
+          - api: /WinExec/

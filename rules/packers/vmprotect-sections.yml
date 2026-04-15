@@ -1,0 +1,18 @@
+rule:
+  name: packers.vmprotect-sections
+  severity: malicious
+  scope: file
+  description: |
+    Detects VMProtect-protected binaries via characteristic section names (.vmp0, .vmp1).
+    VMProtect uses code virtualization and mutation to make reverse engineering extremely
+    difficult. It is used by both commercial software and malware authors to protect code.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/002/
+    - https://vmpsoft.com/
+    - https://unprotect.it/technique/vmprotect/
+  attack:
+    - T1027.002
+  features:
+    section:
+      name: /^\.vmp[01]$/

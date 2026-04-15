@@ -1,0 +1,20 @@
+rule:
+  name: crypto.aes-sbox-textual
+  severity: suspicious
+  scope: function
+  description: |
+    Combines a Windows CNG/CryptoAPI function call with a string reference to AES or
+    Rijndael. This is a textual approximation of AES use — a stricter byte-pattern
+    approach is not supported by the string: matcher. Use alongside other indicators
+    to reduce false positives.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/
+    - https://learn.microsoft.com/en-us/windows/win32/api/wincrypt/nf-wincrypt-cryptacquirecontexta
+    - https://learn.microsoft.com/en-us/windows/win32/seccng/cng-algorithm-identifiers
+  attack:
+    - T1027
+  features:
+    and:
+      - api: /Bcrypt|Crypt32|CryptAcquire/
+      - string: /AES|Rijndael/i

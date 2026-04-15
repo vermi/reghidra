@@ -1,6 +1,7 @@
 use crate::arch::Architecture;
 use crate::error::CoreError;
 use goblin::Object;
+use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,15 @@ pub struct BinaryInfo {
     pub pdb_info: Option<PdbInfo>,
     /// PE only: MSVC toolchain fingerprint parsed from the Rich Header.
     pub rich_header: Option<RichHeader>,
+    /// PE only: lowercased hex MD5 of imports-formula string (pefile-compatible).
+    #[serde(default)]
+    pub imphash: Option<String>,
+    /// PE only: TLS directory has at least one callback.
+    #[serde(default)]
+    pub tls_callbacks_present: bool,
+    /// PE only: file has trailing bytes after the last section.
+    #[serde(default)]
+    pub overlay_present: bool,
 }
 
 /// PE CodeView RSDS record — identifies the matching PDB file for this binary.
@@ -99,6 +109,9 @@ pub struct Section {
     pub is_executable: bool,
     pub is_writable: bool,
     pub is_readable: bool,
+    /// Shannon entropy (bits/byte) over the section's raw bytes.
+    /// 0.0 for empty or uninitialized sections.
+    pub entropy: f64,
 }
 
 /// A symbol extracted from the binary.
@@ -295,6 +308,9 @@ impl LoadedBinary {
             is_big_endian,
             pdb_info: None,
             rich_header: None,
+            imphash: None,
+            tls_callbacks_present: false,
+            overlay_present: false,
         };
 
         let sections: Vec<Section> = elf
@@ -305,6 +321,15 @@ impl LoadedBinary {
                 if name.is_empty() || sh.sh_size == 0 {
                     return None;
                 }
+                let raw_bytes = {
+                    let start = sh.sh_offset as usize;
+                    let end = start + sh.sh_size as usize;
+                    if sh.sh_type == goblin::elf::section_header::SHT_NOBITS || end > data.len() {
+                        &[][..]
+                    } else {
+                        &data[start..end]
+                    }
+                };
                 Some(Section {
                     name,
                     virtual_address: sh.sh_addr,
@@ -314,6 +339,7 @@ impl LoadedBinary {
                     is_executable: sh.is_executable(),
                     is_writable: sh.is_writable(),
                     is_readable: sh.sh_flags & u64::from(goblin::elf::section_header::SHF_ALLOC) != 0,
+                    entropy: reghidra_detect::entropy::shannon(raw_bytes),
                 })
             })
             .collect();
@@ -459,6 +485,18 @@ impl LoadedBinary {
         // Parse the MS-undocumented Rich Header for MSVC toolchain fingerprint.
         let rich_header = parse_rich_header(data);
 
+        // Compute pefile-compatible import hash.
+        let imphash = Some(compute_imphash(&pe.imports));
+
+        // Check for TLS callbacks.
+        let tls_callbacks_present = pe
+            .tls_data
+            .as_ref()
+            .is_some_and(|t| !t.callbacks.is_empty());
+
+        // Detect trailing overlay bytes after the last section.
+        let overlay_present = detect_overlay(pe, data.len());
+
         let info = BinaryInfo {
             path: path.to_path_buf(),
             format: BinaryFormat::Pe,
@@ -468,6 +506,9 @@ impl LoadedBinary {
             is_big_endian: false,
             pdb_info,
             rich_header,
+            imphash,
+            tls_callbacks_present,
+            overlay_present,
         };
 
         let sections: Vec<Section> = pe
@@ -479,6 +520,13 @@ impl LoadedBinary {
                 )
                 .to_string();
                 let chars = s.characteristics;
+                let raw_start = s.pointer_to_raw_data as usize;
+                let raw_end = raw_start + s.size_of_raw_data as usize;
+                let raw_bytes = if s.size_of_raw_data == 0 || raw_end > data.len() {
+                    &[][..]
+                } else {
+                    &data[raw_start..raw_end]
+                };
                 Section {
                     name,
                     virtual_address: image_base + u64::from(s.virtual_address),
@@ -488,6 +536,7 @@ impl LoadedBinary {
                     is_executable: chars & 0x2000_0000 != 0,
                     is_writable: chars & 0x8000_0000 != 0,
                     is_readable: chars & 0x4000_0000 != 0,
+                    entropy: reghidra_detect::entropy::shannon(raw_bytes),
                 }
             })
             .collect();
@@ -645,6 +694,9 @@ impl LoadedBinary {
             is_big_endian,
             pdb_info: None,
             rich_header: None,
+            imphash: None,
+            tls_callbacks_present: false,
+            overlay_present: false,
         };
 
         let mut sections = Vec::new();
@@ -653,13 +705,20 @@ impl LoadedBinary {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            for (sec, _data) in &seg_sections {
+            for (sec, sec_data) in &seg_sections {
                 let name = format!(
                     "{},{}",
                     String::from_utf8_lossy(&sec.segname).trim_end_matches('\0'),
                     String::from_utf8_lossy(&sec.sectname).trim_end_matches('\0')
                 );
                 let initprot = segment.initprot;
+                let raw_start = sec.offset as usize;
+                let raw_end = raw_start + sec_data.len();
+                let raw_bytes = if sec_data.is_empty() || raw_end > data.len() {
+                    &[][..]
+                } else {
+                    &data[raw_start..raw_end]
+                };
                 sections.push(Section {
                     name,
                     virtual_address: sec.addr,
@@ -669,6 +728,7 @@ impl LoadedBinary {
                     is_executable: initprot & 0x4 != 0,
                     is_writable: initprot & 0x2 != 0,
                     is_readable: initprot & 0x1 != 0,
+                    entropy: reghidra_detect::entropy::shannon(raw_bytes),
                 });
             }
         }
@@ -871,6 +931,47 @@ impl LoadedBinary {
 // PE-specific metadata mining
 // ---------------------------------------------------------------------------
 
+/// Compute a pefile-compatible import hash (MD5 of the normalized import list).
+///
+/// Formula (mirrors pefile):
+///  1. For each import in insertion order: lowercase the DLL name, strip
+///     `.dll`/`.sys`/`.ocx` extension, lowercase the symbol name, join with `.`.
+///  2. Join all entries with `,` (no spaces).
+///  3. Return the lowercase MD5 hex digest.
+fn compute_imphash(imports: &[goblin::pe::import::Import]) -> String {
+    let parts: Vec<String> = imports
+        .iter()
+        .map(|i| {
+            let dll = i.dll.to_lowercase();
+            let lib = match dll.rfind('.') {
+                Some(pos) => {
+                    let ext = &dll[pos..];
+                    if matches!(ext, ".dll" | ".sys" | ".ocx") {
+                        dll[..pos].to_string()
+                    } else {
+                        dll.clone()
+                    }
+                }
+                None => dll,
+            };
+            format!("{lib}.{}", i.name.to_lowercase())
+        })
+        .collect();
+    let joined = parts.join(",");
+    hex::encode(Md5::digest(joined.as_bytes()))
+}
+
+/// Return true if the file has bytes past the end of the last raw section.
+fn detect_overlay(pe: &goblin::pe::PE, file_len: usize) -> bool {
+    let max_end = pe
+        .sections
+        .iter()
+        .map(|s| s.pointer_to_raw_data as usize + s.size_of_raw_data as usize)
+        .max()
+        .unwrap_or(0);
+    file_len > max_end
+}
+
 /// Extract CodeView PDB info (GUID/age/path) from a PE's debug directory.
 fn extract_pdb_info(pe: &goblin::pe::PE) -> Option<PdbInfo> {
     let debug = pe.debug_data.as_ref()?;
@@ -982,4 +1083,50 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod pe_features_tests {
+    use super::*;
+
+    #[test]
+    fn pe_imphash_and_overlay_present() {
+        let fixture =
+            std::path::Path::new("../../tests/fixtures/wildfire-test-pe-file.exe");
+        let binary = LoadedBinary::load(fixture).unwrap();
+        assert!(
+            binary.info.imphash.as_ref().is_some_and(|h| {
+                h.len() == 32 && h.chars().all(|c| c.is_ascii_hexdigit())
+            }),
+            "imphash should be 32-char lowercase hex, got {:?}",
+            binary.info.imphash
+        );
+        // tls_callbacks_present and overlay_present: assert fields are accessible.
+        let _ = binary.info.tls_callbacks_present;
+        let _ = binary.info.overlay_present;
+    }
+}
+
+#[cfg(test)]
+mod entropy_tests {
+    use super::*;
+
+    #[test]
+    fn loaded_section_has_entropy() {
+        let fixture = std::path::Path::new(
+            "../../tests/fixtures/wildfire-test-pe-file.exe",
+        );
+        let binary = LoadedBinary::load(fixture)
+            .expect("fixture must load");
+        let text = binary
+            .sections
+            .iter()
+            .find(|s| s.name == ".text")
+            .expect(".text section present");
+        assert!(
+            text.entropy > 4.0 && text.entropy < 7.5,
+            ".text entropy out of expected code-section range: {}",
+            text.entropy
+        );
+    }
 }

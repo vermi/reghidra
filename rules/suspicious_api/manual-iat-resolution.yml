@@ -1,0 +1,20 @@
+rule:
+  name: suspicious_api.manual-iat-resolution
+  severity: suspicious
+  scope: function
+  description: |
+    Detects functions that call both LoadLibrary and GetProcAddress, indicating manual
+    Import Address Table resolution. This pattern is commonly used by malware to resolve
+    API calls at runtime, bypassing static import analysis and AV heuristics.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1106/
+    - https://attack.mitre.org/techniques/T1027/
+    - https://unprotect.it/technique/getprocaddress/
+  attack:
+    - T1106
+    - T1027
+  features:
+    and:
+      - api: /LoadLibrary[AW]?/
+      - api: /GetProcAddress/

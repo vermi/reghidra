@@ -1,0 +1,19 @@
+rule:
+  name: persistence.run-key-write
+  severity: malicious
+  scope: function
+  description: |
+    Writes a value under the Windows Run or RunOnce registry keys, establishing persistence
+    that survives reboots. Malware uses this to re-execute itself after system restart without
+    requiring privilege escalation.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1547/001/
+    - https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regsetvalueexa
+    - https://unprotect.it/technique/registry-run-keys-startup-folder/
+  attack:
+    - T1547.001
+  features:
+    and:
+      - string: /Software\\Microsoft\\Windows\\CurrentVersion\\Run/
+      - api: /RegSetValue/

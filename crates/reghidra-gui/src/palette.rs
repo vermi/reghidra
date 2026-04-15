@@ -22,6 +22,9 @@ pub enum PaletteAction {
     OpenSession,
     #[allow(dead_code)]
     GoToAddress,
+    ToggleDetectionsPanel,
+    ReloadDetectionRules,
+    LoadDetectionRules,
 }
 
 /// State for the command palette.
@@ -117,6 +120,21 @@ impl CommandPalette {
                 label: "Open Session".into(),
                 detail: "Load a saved session file".into(),
                 action: PaletteAction::OpenSession,
+            },
+            PaletteEntry {
+                label: "Toggle Detections Panel".into(),
+                detail: "Switch side panel to Detections tab".into(),
+                action: PaletteAction::ToggleDetectionsPanel,
+            },
+            PaletteEntry {
+                label: "Reload Detection Rules".into(),
+                detail: "Re-evaluate all loaded detection rules".into(),
+                action: PaletteAction::ReloadDetectionRules,
+            },
+            PaletteEntry {
+                label: "Load Detection Rules…".into(),
+                detail: "Load a YAML detection rule file".into(),
+                action: PaletteAction::LoadDetectionRules,
             },
         ];
 

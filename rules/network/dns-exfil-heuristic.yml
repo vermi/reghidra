@@ -1,0 +1,20 @@
+rule:
+  name: network.dns-exfil-heuristic
+  severity: malicious
+  scope: function
+  description: |
+    Combines a DNS query API call with a string matching the base64 character set at
+    32+ characters, consistent with data encoded for DNS tunnel exfiltration. This is
+    a heuristic — legitimate DNS-over-HTTPS or ACME implementations may also match.
+    Confirm by examining the query strings and subdomain targets.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1048/003/
+    - https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsquery_a
+    - https://unit42.paloaltonetworks.com/dns-tunneling-how-dns-can-be-abused-by-malicious-actors/
+  attack:
+    - T1048.003
+  features:
+    and:
+      - api: /DnsQuery_?[AW]?/
+      - string: /[A-Za-z0-9+\/]{32,}={0,2}/

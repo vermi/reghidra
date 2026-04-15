@@ -11,6 +11,11 @@ pub use analysis::functions::{Function, FunctionSource};
 pub use analysis::xrefs::{XRef, XRefDatabase, XRefKind};
 pub use analysis::flirt::FlirtDatabase;
 pub use analysis::AnalysisResults;
+pub use reghidra_detect::{
+    DetectionHit, DetectionResults, Rule as DetectionRule,
+    Severity as DetectionSeverity, Scope as DetectionScope,
+};
+pub use project::LoadedRuleFile;
 pub use arch::Architecture;
 pub use binary::{sanitize_to_name, BinaryInfo, DetectedString, LoadedBinary, Section, Symbol, SymbolKind};
 pub use disasm::{DisassembledInstruction, Disassembler};

@@ -1,0 +1,22 @@
+rule:
+  name: crypto.crypt32-full-api-chain
+  severity: suspicious
+  scope: function
+  description: |
+    Uses the complete CryptoAPI sequence: CryptAcquireContext to obtain a provider
+    handle, CryptCreateHash to set up the algorithm, and CryptEncrypt or CryptDecrypt
+    to perform the operation. This full chain indicates intentional symmetric encryption
+    rather than incidental crypto API use.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/
+    - https://learn.microsoft.com/en-us/windows/win32/seccrypto/example-c-program-encrypting-a-file
+  attack:
+    - T1027
+  features:
+    and:
+      - api: /CryptAcquireContext/
+      - api: /CryptCreateHash/
+      - or:
+          - api: /CryptEncrypt/
+          - api: /CryptDecrypt/

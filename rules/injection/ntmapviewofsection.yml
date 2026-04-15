@@ -1,0 +1,16 @@
+rule:
+  name: injection.ntmapviewofsection
+  severity: suspicious
+  scope: function
+  description: |
+    Calls NtMapViewOfSection or ZwMapViewOfSection to map a shared memory section into
+    a remote process. This is used in section-based injection to share executable memory
+    between processes without WriteProcessMemory, making the injection harder to detect.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-zwmapviewofsection
+    - https://attack.mitre.org/techniques/T1055/
+  attack:
+    - T1055
+  features:
+    api: /(Nt|Zw)MapViewOfSection/

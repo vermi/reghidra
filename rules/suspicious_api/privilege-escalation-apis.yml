@@ -1,0 +1,21 @@
+rule:
+  name: suspicious_api.privilege-escalation-apis
+  severity: malicious
+  scope: function
+  description: |
+    Detects privilege escalation via SeDebugPrivilege combined with AdjustTokenPrivileges.
+    SeDebugPrivilege grants the ability to debug and interact with any process regardless
+    of security descriptor, including SYSTEM processes. Malware uses this combination to
+    gain elevated access for credential dumping and process injection.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1134/001/
+    - https://attack.mitre.org/techniques/T1548/
+    - https://learn.microsoft.com/en-us/windows/win32/secauthz/privilege-constants
+  attack:
+    - T1134.001
+    - T1548
+  features:
+    and:
+      - string: SeDebugPrivilege
+      - api: /AdjustTokenPrivileges/

@@ -1,0 +1,19 @@
+rule:
+  name: injection.virtualallocex-writeprocessmemory
+  severity: malicious
+  scope: function
+  description: |
+    Combines VirtualAllocEx and WriteProcessMemory, the core primitive for remote memory
+    injection. The typical injection sequence allocates executable memory in a target process
+    with VirtualAllocEx, writes shellcode or a DLL path with WriteProcessMemory, then
+    triggers execution via CreateRemoteThread or similar.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualallocex
+    - https://attack.mitre.org/techniques/T1055/001/
+  attack:
+    - T1055.001
+  features:
+    and:
+      - api: /VirtualAllocEx/
+      - api: /WriteProcessMemory/

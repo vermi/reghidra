@@ -1,0 +1,21 @@
+rule:
+  name: packers.upx-sections
+  severity: suspicious
+  scope: file
+  description: |
+    Detects UPX-packed binaries by looking for characteristic section names (.UPX0, .UPX1, etc.).
+    UPX is the most common open-source packer and is frequently used to compress legitimate
+    software but also to obscure malware. High-entropy UPX sections are common.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/002/
+    - https://upx.github.io/
+    - https://unprotect.it/technique/upx/
+  attack:
+    - T1027.002
+  features:
+    or:
+      - section:
+          name: /^\.UPX[0-9]$/
+      - section:
+          name: /^UPX[0-9]$/

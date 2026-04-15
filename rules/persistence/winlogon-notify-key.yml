@@ -1,0 +1,16 @@
+rule:
+  name: persistence.winlogon-notify-key
+  severity: malicious
+  scope: function
+  description: |
+    References the Winlogon Notify registry key, which allows DLLs to receive notification
+    events from Winlogon. This is an older but still-used persistence mechanism that loads
+    attacker-controlled DLLs into the Winlogon process on logon/logoff events.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1547/004/
+    - https://www.hexacorn.com/blog/2013/09/19/beyond-good-ol-run-key-part-3/
+  attack:
+    - T1547.004
+  features:
+    string: /Winlogon\\Notify/

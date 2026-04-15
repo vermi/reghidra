@@ -1,0 +1,19 @@
+rule:
+  name: crypto.rc4-ksa-pattern
+  severity: suspicious
+  scope: function
+  description: |
+    Mnemonic pattern consistent with an RC4 key-scheduling algorithm (KSA) inner loop:
+    xor + mov + add appearing contiguously. High false-positive rate — combine with other
+    indicators such as a known RC4 key length or WinCrypt absence. The xrefs_from >= 2
+    requirement filters single-call utility functions slightly.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/
+    - https://en.wikipedia.org/wiki/RC4#Key-scheduling_algorithm_(KSA)
+  attack:
+    - T1027
+  features:
+    and:
+      - mnemonic_sequence: [xor, mov, add]
+      - xrefs_from: { min: 2 }

@@ -1,0 +1,20 @@
+rule:
+  name: network.winhttp
+  severity: suspicious
+  scope: function
+  description: |
+    Uses the WinHTTP stack for HTTP communication: WinHttpOpen to create a session
+    handle and WinHttpSendRequest to transmit data. WinHTTP is preferred over WinINet
+    by many modern implants because it supports system proxy settings and is less
+    commonly monitored.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpopen
+    - https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpsendrequest
+  attack:
+    - T1071.001
+  features:
+    and:
+      - api: /WinHttpOpen/
+      - api: /WinHttpSendRequest/

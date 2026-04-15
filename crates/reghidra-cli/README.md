@@ -138,6 +138,86 @@ high-level groupings:
 | `ir ADDR` | Intermediate representation for the function at `ADDR`. |
 | `cfg ADDR` | Control-flow graph blocks + edges. |
 
+### Detections
+
+The `detect` group runs the YAML rule engine against the binary and
+returns hits. Every invocation re-runs the full detection pass — there
+is no separate "scan" step.
+
+| Command | Description |
+| --- | --- |
+| `detect list` | List all detection hits. Filter with `--severity`, `--rule`, `--function`. |
+
+Flags for `detect list`:
+
+| Flag | Description |
+| --- | --- |
+| `--severity info\|suspicious\|malicious` | Show only hits at or above this severity. |
+| `--rule REGEX` | Regex filter against rule names. |
+| `--function ADDR_OR_NAME` | Restrict to a specific function by hex/decimal address or name substring. |
+
+#### JSON shape
+
+```json
+[
+  {
+    "address": 4198400,
+    "rule": "injection.createremotethread",
+    "severity": "suspicious",
+    "description": "Calls CreateRemoteThread or CreateRemoteThreadEx ...",
+    "source_path": "bundled:injection/createremotethread.yml",
+    "match_count": 1
+  },
+  {
+    "address": null,
+    "rule": "packers.upx-sections",
+    "severity": "suspicious",
+    "description": "Detects UPX-packed binaries ...",
+    "source_path": "bundled:packers/upx-sections.yml",
+    "match_count": 1
+  }
+]
+```
+
+`address` is `null` for file-scope hits (section names, PE metadata, etc.)
+and an integer VA for function-scope hits. `match_count` is how many
+individual feature matches contributed (e.g. 3 for a rule that matched
+3 RDTSC instructions).
+
+#### Example: run detections on a PE binary
+
+```sh
+# All hits, human-readable (grouped by severity)
+reghidra-cli detect list --binary malware.exe
+
+# All hits, JSON
+reghidra-cli detect list --binary malware.exe --json
+
+# Only malicious hits
+reghidra-cli detect list --binary malware.exe --severity malicious --json
+
+# Hits for a specific rule
+reghidra-cli detect list --binary malware.exe --rule injection.createremotethread --json
+
+# Hits for a specific function
+reghidra-cli detect list --binary malware.exe --function 0x401000 --json
+
+# Hits for functions matching a name substring
+reghidra-cli detect list --binary malware.exe --function decrypt --json
+```
+
+#### Example: detect with a session (replays data-source overrides)
+
+```sh
+reghidra-cli session init --binary malware.exe --output malware.session.json
+
+# Load a specific rule file
+reghidra-cli sources rules load --session malware.session.json anti_analysis/rdtsc-timing
+
+# Run detections — picks up the newly loaded rule
+reghidra-cli detect list --session malware.session.json --json
+```
+
 ### Data sources
 
 The `sources` group exposes everything the GUI's "Loaded Data Sources"
@@ -154,6 +234,13 @@ panel shows, plus the underlying enable/disable/load operations.
 | `sources load-archive STEM` | Lazy-load an embedded type archive (e.g. `windows-arm64`). Requires `--session`. |
 | `sources load-sig --subdir SUBDIR --stem STEM` | Lazy-load a bundled FLIRT sig. Requires `--session`. |
 | `sources load-user-sig PATH` | Load a `.sig` file from disk. Requires `--session`. |
+| `sources rules list` | List all loaded YAML rule files with enabled state and hit counts. |
+| `sources rules available` | List all embedded rule files (loaded and unloaded). |
+| `sources rules load STEM` | Lazy-load a bundled rule file. Stem: `subdir/stem`. Requires `--session`. |
+| `sources rules load-user-file PATH` | Load a user-supplied YAML rule file. Requires `--session`. |
+| `sources rules enable SOURCE_PATH` | Enable a rule file by source_path. Requires `--session`. |
+| `sources rules disable SOURCE_PATH` | Disable a rule file by source_path. Requires `--session`. |
+| `sources rules resolve FUNCTION` | List detections that fired on a given function (by address or name). |
 
 `--kind` is one of `bundled` / `user` / `archive`. The `KEY` is:
 
@@ -201,6 +288,75 @@ reghidra-cli sources disable --session app.session.json \
 # To opt INTO a sig that wasn't auto-loaded (e.g. Watcom OS/2 sigs):
 reghidra-cli sources load-sig --session app.session.json \
     --subdir pe/x86/32 --stem watcom_os2_sysl
+```
+
+#### sources rules — YAML detection rule files
+
+Rule files are YAML documents in `rules/<category>/` that the detection engine
+evaluates against every binary. Bundled rules are loaded automatically at open
+time; additional files can be lazy-loaded from the embedded set or from disk.
+
+**Stem format:** `subdir/stem` — the `subdir` is the category directory under
+`rules/` and the `stem` is the filename without `.yml`. Example:
+`anti_analysis/rdtsc-timing`.
+
+**source_path format:** `bundled:<subdir>/<stem>.yml` for embedded rules, or
+an absolute filesystem path for user-loaded files.
+
+```sh
+# List all currently loaded rule files (with hit counts)
+reghidra-cli sources rules list --binary malware.exe
+reghidra-cli sources rules list --binary malware.exe --json
+
+# List all embedded rule files (loaded marker in last column)
+reghidra-cli sources rules available
+reghidra-cli sources rules available --json
+
+# Load a bundled rule file not in the auto-load set
+reghidra-cli session init --binary malware.exe --output malware.session.json
+reghidra-cli sources rules load --session malware.session.json anti_analysis/rdtsc-timing
+
+# Load a custom rule file from disk
+reghidra-cli sources rules load-user-file --session malware.session.json /path/to/my-rule.yml
+
+# Disable a rule file (by source_path from `sources rules list`)
+reghidra-cli sources rules disable --session malware.session.json \
+    "bundled:anti_analysis/rdtsc-timing.yml"
+
+# Re-enable it
+reghidra-cli sources rules enable --session malware.session.json \
+    "bundled:anti_analysis/rdtsc-timing.yml"
+
+# See what fired for a specific function
+reghidra-cli sources rules resolve --binary malware.exe 0x401000
+reghidra-cli sources rules resolve --binary malware.exe decrypt --json
+```
+
+JSON shape for `sources rules list`:
+
+```json
+[
+  {
+    "source_path": "bundled:anti_analysis/rdtsc-timing.yml",
+    "enabled": true,
+    "rule_count": 1,
+    "hits": 3,
+    "parse_errors": []
+  }
+]
+```
+
+JSON shape for `sources rules available`:
+
+```json
+[
+  {
+    "subdir": "anti_analysis",
+    "stem": "rdtsc-timing",
+    "path": "anti_analysis/rdtsc-timing.yml",
+    "loaded": false
+  }
+]
 ```
 
 ### Annotations

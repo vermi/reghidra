@@ -1,0 +1,18 @@
+rule:
+  name: anti-analysis.cpuid-brand-string
+  severity: info
+  scope: function
+  description: |
+    Executes CPUID and checks the resulting brand string for known hypervisor or
+    virtualization platform names. Virtual machines typically report a vendor string
+    such as "VMwareVMware", "KVMKVMKVM", "Microsoft Hv", or "VBoxVBoxVBox".
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/cpuid-brand-string/
+    - https://attack.mitre.org/techniques/T1497/001/
+  attack:
+    - T1497.001
+  features:
+    and:
+      - mnemonic: cpuid
+      - string: /VMware|VirtualBox|QEMU|Xen|Hyper.?V|KVM/

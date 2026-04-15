@@ -1,0 +1,21 @@
+rule:
+  name: packers.aspack-section
+  severity: suspicious
+  scope: file
+  description: |
+    Detects ASPack-compressed binaries via characteristic section names (.aspack, .adata).
+    ASPack is a commercial executable packer for Win32 applications. Its presence may indicate
+    deliberate obfuscation or anti-analysis packing.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/002/
+    - http://www.aspack.com/
+    - https://unprotect.it/technique/aspack/
+  attack:
+    - T1027.002
+  features:
+    or:
+      - section:
+          name: /^\.aspack$/
+      - section:
+          name: /^\.adata$/
