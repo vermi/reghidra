@@ -1038,3 +1038,253 @@ fn tempdir() -> PathBuf {
     std::fs::create_dir_all(&path).expect("create tempdir");
     path
 }
+
+// ---------------------------------------------------------------------------
+// detect list tests (Task 18)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn detect_list_json_has_expected_shape() {
+    let pe = pe();
+    let v = run_json(&[
+        "detect",
+        "list",
+        "--binary",
+        pe.to_str().unwrap(),
+        "--json",
+    ]);
+    let arr = v.as_array().expect("detect list --json must return an array");
+    // The PE fixture should fire at least some detection rules.
+    // Whether the array is empty or not, every element must have the documented keys.
+    for item in arr {
+        for key in ["rule", "severity", "description", "source_path", "match_count"] {
+            assert!(
+                item.get(key).is_some(),
+                "detect list item missing key '{key}': {item:#}"
+            );
+        }
+        // `address` may be null (file-scope) or a number — just assert it exists.
+        assert!(
+            item.get("address").is_some(),
+            "detect list item missing key 'address': {item:#}"
+        );
+    }
+}
+
+#[test]
+fn detect_list_severity_filter() {
+    let pe = pe();
+    // Fetch all hits first.
+    let all: Vec<serde_json::Value> = run_json(&[
+        "detect",
+        "list",
+        "--binary",
+        pe.to_str().unwrap(),
+        "--json",
+    ])
+    .as_array()
+    .expect("array")
+    .to_vec();
+
+    // Fetch with --severity malicious filter.
+    let malicious_only: Vec<serde_json::Value> = run_json(&[
+        "detect",
+        "list",
+        "--binary",
+        pe.to_str().unwrap(),
+        "--severity",
+        "malicious",
+        "--json",
+    ])
+    .as_array()
+    .expect("array")
+    .to_vec();
+
+    // Every returned item must have severity == "malicious".
+    for item in &malicious_only {
+        assert_eq!(
+            item["severity"],
+            "malicious",
+            "severity filter returned non-malicious hit: {item:#}"
+        );
+    }
+
+    // The filtered set must be a subset of (or equal to) the unfiltered set.
+    assert!(
+        malicious_only.len() <= all.len(),
+        "severity filter returned more items than the unfiltered result"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sources rules tests (Task 19)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sources_rules_load_then_list_shows_loaded() {
+    let s = fresh_session("rules_load");
+
+    // Load a known bundled rule file.
+    run_ok(&[
+        "sources",
+        "rules",
+        "load",
+        "--session",
+        s.to_str().unwrap(),
+        "anti_analysis/rdtsc-timing",
+    ]);
+
+    // List rule files and assert the loaded one appears.
+    let v = run_json(&[
+        "sources",
+        "rules",
+        "list",
+        "--session",
+        s.to_str().unwrap(),
+        "--json",
+    ]);
+    let arr = v.as_array().expect("array");
+    let found = arr.iter().any(|item| {
+        item["source_path"]
+            .as_str()
+            .unwrap_or("")
+            .contains("rdtsc-timing")
+    });
+    assert!(found, "loaded rule file not visible in sources rules list: {v:#}");
+}
+
+#[test]
+fn sources_rules_disable_and_enable_round_trip() {
+    let s = fresh_session("rules_toggle");
+
+    // Load a bundled rule file.
+    run_ok(&[
+        "sources",
+        "rules",
+        "load",
+        "--session",
+        s.to_str().unwrap(),
+        "anti_analysis/rdtsc-timing",
+    ]);
+
+    // Find the source_path that was just loaded.
+    let list = run_json(&[
+        "sources",
+        "rules",
+        "list",
+        "--session",
+        s.to_str().unwrap(),
+        "--json",
+    ]);
+    let arr = list.as_array().expect("array");
+    let entry = arr
+        .iter()
+        .find(|item| {
+            item["source_path"]
+                .as_str()
+                .unwrap_or("")
+                .contains("rdtsc-timing")
+        })
+        .expect("rdtsc-timing entry in list");
+    let source_path = entry["source_path"].as_str().unwrap().to_string();
+
+    // Disable it.
+    run_ok(&[
+        "sources",
+        "rules",
+        "disable",
+        "--session",
+        s.to_str().unwrap(),
+        &source_path,
+    ]);
+
+    // Re-list and confirm enabled == false.
+    let list2 = run_json(&[
+        "sources",
+        "rules",
+        "list",
+        "--session",
+        s.to_str().unwrap(),
+        "--json",
+    ]);
+    let arr2 = list2.as_array().expect("array");
+    let entry2 = arr2
+        .iter()
+        .find(|item| item["source_path"].as_str().unwrap_or("") == source_path)
+        .expect("entry still present after disable");
+    assert_eq!(
+        entry2["enabled"], false,
+        "rule file should be disabled after sources rules disable: {entry2:#}"
+    );
+
+    // Re-enable and confirm enabled == true.
+    run_ok(&[
+        "sources",
+        "rules",
+        "enable",
+        "--session",
+        s.to_str().unwrap(),
+        &source_path,
+    ]);
+    let list3 = run_json(&[
+        "sources",
+        "rules",
+        "list",
+        "--session",
+        s.to_str().unwrap(),
+        "--json",
+    ]);
+    let arr3 = list3.as_array().expect("array");
+    let entry3 = arr3
+        .iter()
+        .find(|item| item["source_path"].as_str().unwrap_or("") == source_path)
+        .expect("entry still present after re-enable");
+    assert_eq!(
+        entry3["enabled"], true,
+        "rule file should be enabled after sources rules enable: {entry3:#}"
+    );
+}
+
+#[test]
+fn sources_rules_mutations_require_session() {
+    let pe = pe();
+
+    // Load without --session must fail.
+    let out = cli()
+        .args([
+            "sources",
+            "rules",
+            "load",
+            "--binary",
+            pe.to_str().unwrap(),
+            "anti_analysis/rdtsc-timing",
+        ])
+        .output()
+        .expect("cli ran");
+    assert!(
+        !out.status.success(),
+        "sources rules load without --session must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--session") || stderr.contains("session"),
+        "error should mention --session, got: {stderr}"
+    );
+
+    // Disable without --session must fail.
+    let out2 = cli()
+        .args([
+            "sources",
+            "rules",
+            "disable",
+            "--binary",
+            pe.to_str().unwrap(),
+            "bundled:anti_analysis/rdtsc-timing.yml",
+        ])
+        .output()
+        .expect("cli ran");
+    assert!(
+        !out2.status.success(),
+        "sources rules disable without --session must exit non-zero"
+    );
+}

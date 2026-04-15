@@ -39,6 +39,9 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// Used for detect list severity ordering.
+use reghidra_detect::Severity;
+
 #[derive(Parser)]
 #[command(
     name = "reghidra-cli",
@@ -89,6 +92,9 @@ enum Command {
     /// Session management: create, dump, or rewrite a session file.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// YAML detection rule results: list hits, filter by severity, rule, or function.
+    #[command(subcommand)]
+    Detect(DetectCommand),
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +214,9 @@ enum SourcesCommand {
     LoadSig(SourcesLoadSigArgs),
     /// Load a user-supplied .sig file. Requires --session.
     LoadUserSig(SourcesLoadUserSigArgs),
+    /// YAML detection rule files: list, load, enable, disable.
+    #[command(subcommand)]
+    Rules(RulesCommand),
 }
 
 #[derive(clap::Args)]
@@ -289,6 +298,123 @@ struct SourcesLoadUserSigArgs {
     /// Path to a `.sig` file on disk.
     #[arg(value_name = "PATH")]
     path: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// `sources rules` subcommand: YAML detection rule file management
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// List all loaded rule files with enabled state and hit counts.
+    List(BinaryArgs),
+    /// List all embedded rule files (loaded and not-yet-loaded).
+    Available {
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lazy-load a bundled rule file. Stem format: "subdir/stem"
+    /// (e.g. "anti_analysis/rdtsc-timing"). Requires --session.
+    Load(RulesLoadArgs),
+    /// Load a user-supplied YAML rule file from disk. Requires --session.
+    LoadUserFile(RulesLoadUserFileArgs),
+    /// Enable a rule file by source_path. Requires --session.
+    Enable(RulesToggleArgs),
+    /// Disable a rule file by source_path. Requires --session.
+    Disable(RulesToggleArgs),
+    /// List detections that fired on a given function.
+    Resolve(RulesResolveArgs),
+}
+
+#[derive(clap::Args)]
+struct RulesLoadArgs {
+    #[command(flatten)]
+    bin: BinaryArgs,
+    /// Bundled rule stem, format "subdir/stem" (e.g. "anti_analysis/rdtsc-timing").
+    #[arg(value_name = "STEM")]
+    stem: String,
+}
+
+#[derive(clap::Args)]
+struct RulesLoadUserFileArgs {
+    #[command(flatten)]
+    bin: BinaryArgs,
+    /// Path to a YAML rule file on disk.
+    #[arg(value_name = "PATH")]
+    path: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct RulesToggleArgs {
+    #[command(flatten)]
+    bin: BinaryArgs,
+    /// The source_path of the rule file to toggle (e.g. "bundled:anti_analysis/rdtsc-timing.yml").
+    #[arg(value_name = "SOURCE_PATH")]
+    source_path: String,
+}
+
+#[derive(clap::Args)]
+struct RulesResolveArgs {
+    #[command(flatten)]
+    bin: BinaryArgs,
+    /// Address (hex/decimal) or function-name substring.
+    #[arg(value_name = "FUNCTION")]
+    function: String,
+}
+
+#[derive(serde::Serialize)]
+struct RuleFileJson {
+    source_path: String,
+    enabled: bool,
+    rule_count: usize,
+    hits: usize,
+    parse_errors: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct AvailableRuleFileJson {
+    subdir: String,
+    stem: String,
+    path: String,
+    loaded: bool,
+}
+
+// ---------------------------------------------------------------------------
+// `detect` subcommand: YAML detection rule results
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum DetectCommand {
+    /// List all detection hits for a binary. Filter by --severity, --rule (regex),
+    /// or --function (address or name substring). Read-only; no --session required.
+    List(DetectListArgs),
+}
+
+#[derive(clap::Args)]
+struct DetectListArgs {
+    #[command(flatten)]
+    bin: BinaryArgs,
+    /// Only show hits at or above this severity: info | suspicious | malicious.
+    #[arg(long)]
+    severity: Option<String>,
+    /// Regex filter against rule names.
+    #[arg(long)]
+    rule: Option<String>,
+    /// Address (hex/decimal) or function-name substring to restrict hits to.
+    #[arg(long)]
+    function: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DetectHitJson {
+    /// Hex address of the function, or null for file-scope hits.
+    address: Option<u64>,
+    rule: String,
+    severity: String,
+    description: String,
+    source_path: String,
+    match_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -614,6 +740,7 @@ fn main() -> Result<()> {
         Command::Sources(cmd) => cmd_sources(cmd),
         Command::Annotate(cmd) => cmd_annotate(cmd),
         Command::Session(cmd) => cmd_session(cmd),
+        Command::Detect(cmd) => cmd_detect(cmd),
     }
 }
 
@@ -1021,6 +1148,7 @@ fn cmd_sources(cmd: SourcesCommand) -> Result<()> {
         SourcesCommand::LoadArchive(args) => sources_load_archive(args),
         SourcesCommand::LoadSig(args) => sources_load_sig(args),
         SourcesCommand::LoadUserSig(args) => sources_load_user_sig(args),
+        SourcesCommand::Rules(cmd) => cmd_sources_rules(cmd),
     }
 }
 
@@ -1503,6 +1631,391 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// `detect` dispatcher
+// ---------------------------------------------------------------------------
+
+fn cmd_detect(cmd: DetectCommand) -> Result<()> {
+    match cmd {
+        DetectCommand::List(args) => detect_list(args),
+    }
+}
+
+fn severity_rank(s: Severity) -> u8 {
+    match s {
+        Severity::Info => 0,
+        Severity::Suspicious => 1,
+        Severity::Malicious => 2,
+    }
+}
+
+fn detect_list(args: DetectListArgs) -> Result<()> {
+    let project = open_project(&args.bin)?;
+
+    // Compile optional regex filter on rule name.
+    let rule_re = args
+        .rule
+        .as_deref()
+        .map(|r| regex::Regex::new(r).with_context(|| format!("invalid --rule regex '{r}'")))
+        .transpose()?;
+
+    // Resolve --function to a set of addresses.
+    let func_addrs: Option<std::collections::HashSet<u64>> = args.function.as_deref().map(|f| {
+        // Try as hex/decimal address first.
+        if let Ok(addr) = parse_address(f) {
+            let mut set = std::collections::HashSet::new();
+            set.insert(addr);
+            set
+        } else {
+            // Treat as a name substring.
+            let needle = f.to_lowercase();
+            project
+                .analysis
+                .functions
+                .iter()
+                .filter(|func| func.name.to_lowercase().contains(&needle))
+                .map(|func| func.entry_address)
+                .collect()
+        }
+    });
+
+    // Filter severity.
+    let min_severity = args
+        .severity
+        .as_deref()
+        .map(|s| match s.to_lowercase().as_str() {
+            "info" => Ok(Severity::Info),
+            "suspicious" => Ok(Severity::Suspicious),
+            "malicious" => Ok(Severity::Malicious),
+            other => Err(anyhow!("unknown severity '{}'; use info|suspicious|malicious", other)),
+        })
+        .transpose()?;
+
+    let results = &project.detection_results;
+
+    // Build a flat list of hits.
+    let mut rows: Vec<DetectHitJson> = Vec::new();
+
+    // File-scope hits (address = None).
+    for hit in &results.file_hits {
+        if let Some(sev) = min_severity {
+            if severity_rank(hit.severity) < severity_rank(sev) {
+                continue;
+            }
+        }
+        if let Some(re) = &rule_re {
+            if !re.is_match(&hit.rule_name) {
+                continue;
+            }
+        }
+        if func_addrs.is_some() {
+            // File-scope hits don't have an address; skip when function filter is active.
+            continue;
+        }
+        rows.push(DetectHitJson {
+            address: None,
+            rule: hit.rule_name.clone(),
+            severity: format!("{:?}", hit.severity).to_lowercase(),
+            description: hit.description.clone(),
+            source_path: hit.source_path.clone(),
+            match_count: hit.match_count,
+        });
+    }
+
+    // Function-scope hits.
+    let mut fn_addrs: Vec<u64> = results.function_hits.keys().copied().collect();
+    fn_addrs.sort_unstable();
+    for addr in fn_addrs {
+        if let Some(ref set) = func_addrs {
+            if !set.contains(&addr) {
+                continue;
+            }
+        }
+        let hits = &results.function_hits[&addr];
+        for hit in hits {
+            if let Some(sev) = min_severity {
+                if severity_rank(hit.severity) < severity_rank(sev) {
+                    continue;
+                }
+            }
+            if let Some(re) = &rule_re {
+                if !re.is_match(&hit.rule_name) {
+                    continue;
+                }
+            }
+            rows.push(DetectHitJson {
+                address: Some(addr),
+                rule: hit.rule_name.clone(),
+                severity: format!("{:?}", hit.severity).to_lowercase(),
+                description: hit.description.clone(),
+                source_path: hit.source_path.clone(),
+                match_count: hit.match_count,
+            });
+        }
+    }
+
+    emit(args.bin.json, &rows, || {
+        // Group by severity: Malicious first.
+        for sev_label in &["malicious", "suspicious", "info"] {
+            let group: Vec<&DetectHitJson> = rows.iter().filter(|r| r.severity == *sev_label).collect();
+            if group.is_empty() {
+                continue;
+            }
+            let label = match *sev_label {
+                "malicious" => "MALICIOUS",
+                "suspicious" => "SUSPICIOUS",
+                _ => "INFO",
+            };
+            println!("\n[{label}]");
+            for r in group {
+                let addr_str = match r.address {
+                    Some(a) => format!("0x{a:08x}"),
+                    None => "[file]    ".to_string(),
+                };
+                let first_line = r.description.lines().next().unwrap_or("").trim();
+                println!("  {addr_str}  {:<50}  {}", r.rule, truncate(first_line, 72));
+            }
+        }
+        if rows.is_empty() {
+            println!("(no hits)");
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `sources rules` dispatcher
+// ---------------------------------------------------------------------------
+
+fn cmd_sources_rules(cmd: RulesCommand) -> Result<()> {
+    match cmd {
+        RulesCommand::List(args) => rules_list(args),
+        RulesCommand::Available { json } => rules_available(json),
+        RulesCommand::Load(args) => rules_load(args),
+        RulesCommand::LoadUserFile(args) => rules_load_user_file(args),
+        RulesCommand::Enable(args) => rules_set_enabled(args, true),
+        RulesCommand::Disable(args) => rules_set_enabled(args, false),
+        RulesCommand::Resolve(args) => rules_resolve(args),
+    }
+}
+
+fn collect_rule_files(project: &Project) -> Vec<RuleFileJson> {
+    project
+        .loaded_rule_files
+        .iter()
+        .map(|rf| {
+            // Count hits attributed to this source_path.
+            let hits = project
+                .detection_results
+                .per_rule_file_counts
+                .get(&rf.source_path)
+                .copied()
+                .unwrap_or(0);
+            RuleFileJson {
+                source_path: rf.source_path.clone(),
+                enabled: rf.enabled,
+                rule_count: rf.rules.len(),
+                hits,
+                parse_errors: rf.parse_errors.clone(),
+            }
+        })
+        .collect()
+}
+
+fn rules_list(args: BinaryArgs) -> Result<()> {
+    let project = open_project(&args)?;
+    let rows = collect_rule_files(&project);
+    emit(args.json, &rows, || {
+        if rows.is_empty() {
+            println!("(no rule files loaded)");
+            return;
+        }
+        println!(
+            "{:<60} {:>8} {:>8} {:>8}",
+            "SOURCE_PATH", "RULES", "ENABLED", "HITS"
+        );
+        for r in &rows {
+            println!(
+                "{:<60} {:>8} {:>8} {:>8}",
+                truncate(&r.source_path, 60),
+                r.rule_count,
+                r.enabled,
+                r.hits,
+            );
+        }
+    })
+}
+
+fn rules_available(json: bool) -> Result<()> {
+    let available = reghidra_detect::available_bundled_rulefiles();
+    let rows: Vec<AvailableRuleFileJson> = available
+        .iter()
+        .map(|f| AvailableRuleFileJson {
+            subdir: f.subdir.clone(),
+            stem: f.stem.clone(),
+            path: f.path.clone(),
+            loaded: false, // without a project we can't know; always false here
+        })
+        .collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        println!("{:<30} {:<40} {}", "SUBDIR", "STEM", "PATH");
+        for r in &rows {
+            println!("{:<30} {:<40} {}", r.subdir, r.stem, r.path);
+        }
+    }
+    Ok(())
+}
+
+fn rules_load(args: RulesLoadArgs) -> Result<()> {
+    let (mut project, session_path) = open_project_for_mutation(&args.bin)?;
+    let (subdir, stem) = args.stem.split_once('/').ok_or_else(|| {
+        anyhow!("STEM must be 'subdir/stem' (e.g. 'anti_analysis/rdtsc-timing'), got '{}'", args.stem)
+    })?;
+    project
+        .load_bundled_rule_file(subdir, stem)
+        .map_err(|e| anyhow!("{e}"))?;
+    project.save_session(&session_path)?;
+    let source_path = format!("bundled:{subdir}/{stem}.yml");
+    let rule_count = project
+        .loaded_rule_files
+        .iter()
+        .find(|f| f.source_path == source_path)
+        .map(|f| f.rules.len())
+        .unwrap_or(0);
+    if !args.bin.json {
+        println!(
+            "Loaded rule file '{source_path}' ({rule_count} rules; saved to {})",
+            session_path.display()
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "source_path": source_path,
+                "rule_count": rule_count,
+            }))?
+        );
+    }
+    Ok(())
+}
+
+fn rules_load_user_file(args: RulesLoadUserFileArgs) -> Result<()> {
+    let (mut project, session_path) = open_project_for_mutation(&args.bin)?;
+    project
+        .load_user_rule_file(&args.path)
+        .map_err(|e| anyhow!("{e}"))?;
+    project.save_session(&session_path)?;
+    let source_path = args.path.display().to_string();
+    let rule_count = project
+        .loaded_rule_files
+        .iter()
+        .find(|f| f.source_path == source_path)
+        .map(|f| f.rules.len())
+        .unwrap_or(0);
+    if !args.bin.json {
+        println!(
+            "Loaded user rule file '{source_path}' ({rule_count} rules; saved to {})",
+            session_path.display()
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "source_path": source_path,
+                "rule_count": rule_count,
+            }))?
+        );
+    }
+    Ok(())
+}
+
+fn rules_set_enabled(args: RulesToggleArgs, enabled: bool) -> Result<()> {
+    let (mut project, session_path) = open_project_for_mutation(&args.bin)?;
+    // Verify the source_path exists.
+    if project
+        .loaded_rule_files
+        .iter()
+        .all(|f| f.source_path != args.source_path)
+    {
+        bail!(
+            "no loaded rule file with source_path '{}'. Run `sources rules list` to see valid keys.",
+            args.source_path
+        );
+    }
+    project.set_rule_file_enabled(&args.source_path, enabled);
+    project.save_session(&session_path)?;
+    if !args.bin.json {
+        println!(
+            "{}d rule file '{}' (saved to {})",
+            if enabled { "Enable" } else { "Disable" },
+            args.source_path,
+            session_path.display()
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "source_path": args.source_path,
+                "enabled": enabled,
+            }))?
+        );
+    }
+    Ok(())
+}
+
+fn rules_resolve(args: RulesResolveArgs) -> Result<()> {
+    let project = open_project(&args.bin)?;
+
+    // Resolve function argument.
+    let addr_opt = parse_address(&args.function).ok();
+    let addrs: Vec<u64> = if let Some(addr) = addr_opt {
+        vec![addr]
+    } else {
+        let needle = args.function.to_lowercase();
+        project
+            .analysis
+            .functions
+            .iter()
+            .filter(|f| f.name.to_lowercase().contains(&needle))
+            .map(|f| f.entry_address)
+            .collect()
+    };
+
+    let mut rows: Vec<DetectHitJson> = Vec::new();
+    for addr in addrs {
+        if let Some(hits) = project.detection_results.function_hits.get(&addr) {
+            for hit in hits {
+                rows.push(DetectHitJson {
+                    address: Some(addr),
+                    rule: hit.rule_name.clone(),
+                    severity: format!("{:?}", hit.severity).to_lowercase(),
+                    description: hit.description.clone(),
+                    source_path: hit.source_path.clone(),
+                    match_count: hit.match_count,
+                });
+            }
+        }
+    }
+
+    emit(args.bin.json, &rows, || {
+        if rows.is_empty() {
+            println!("(no detections for '{}')", args.function);
+            return;
+        }
+        for r in &rows {
+            let addr_str = r
+                .address
+                .map(|a| format!("0x{a:08x}"))
+                .unwrap_or_else(|| "[file]".to_string());
+            println!("{addr_str}  {}  [{}]", r.rule, r.severity);
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
