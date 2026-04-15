@@ -1,0 +1,16 @@
+rule:
+  name: injection.queueuserapc
+  severity: suspicious
+  scope: function
+  description: |
+    Calls QueueUserAPC to queue an asynchronous procedure call on a remote thread.
+    APC injection schedules shellcode to run in the context of an alertable thread in
+    another process, avoiding the need to create a new thread.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc
+    - https://attack.mitre.org/techniques/T1055/004/
+  attack:
+    - T1055.004
+  features:
+    api: /QueueUserAPC/

@@ -1,0 +1,19 @@
+rule:
+  name: injection.thread-hijack
+  severity: malicious
+  scope: function
+  description: |
+    Hijacks a running thread by saving its context with GetThreadContext, modifying the
+    instruction pointer to point to injected code, and restoring execution with
+    SetThreadContext. This avoids creating new threads and can evade thread-creation
+    monitoring.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1055/003/
+    - https://unprotect.it/technique/thread-context-hijacking/
+  attack:
+    - T1055.003
+  features:
+    and:
+      - api: /GetThreadContext/
+      - api: /SetThreadContext/

@@ -1,0 +1,21 @@
+rule:
+  name: injection.reflective-loader
+  severity: malicious
+  scope: function
+  description: |
+    Detects a reflective DLL loader. Reflective loading resolves kernel32.dll and
+    uses GetProcAddress to locate LoadLibrary/VirtualAlloc without touching the
+    Windows loader, allowing a DLL to load itself from memory. The string "ReflectiveLoader"
+    is the canonical export name used by the reference implementation and many derivatives.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1620/
+    - https://github.com/stephenfewer/ReflectiveDLLInjection
+  attack:
+    - T1620
+  features:
+    or:
+      - string: ReflectiveLoader
+      - and:
+          - string: kernel32.dll
+          - api: /GetProcAddress/

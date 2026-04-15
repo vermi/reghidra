@@ -1,0 +1,24 @@
+rule:
+  name: injection.process-hollowing
+  severity: malicious
+  scope: function
+  description: |
+    Implements process hollowing (process replacement). The technique creates a process
+    in suspended state, unmaps its original executable, writes malicious code into the
+    vacated address space, adjusts the entry point via SetThreadContext, then resumes
+    execution. All four primitive APIs present in one function is a strong indicator.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1055/012/
+    - https://unprotect.it/technique/process-hollowing/
+  attack:
+    - T1055.012
+  features:
+    and:
+      - api: /CreateProcess/
+      - or:
+          - api: /(Nt|Zw)UnmapViewOfSection/
+          - string: UnmapViewOfSection
+      - api: /WriteProcessMemory/
+      - api: /SetThreadContext/
+      - api: /ResumeThread/

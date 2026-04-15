@@ -1,0 +1,16 @@
+rule:
+  name: injection.setwindowshookex
+  severity: suspicious
+  scope: function
+  description: |
+    Calls SetWindowsHookEx to install a global or thread-specific message hook. Malware
+    uses keyboard hooks (WH_KEYBOARD_LL) for keylogging and WH_CBT / WH_SHELL hooks
+    to force-load a DLL into other processes for injection.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw
+    - https://attack.mitre.org/techniques/T1055/011/
+  attack:
+    - T1055.011
+  features:
+    api: /SetWindowsHookEx/
