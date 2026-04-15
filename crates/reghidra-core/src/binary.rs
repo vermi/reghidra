@@ -99,6 +99,9 @@ pub struct Section {
     pub is_executable: bool,
     pub is_writable: bool,
     pub is_readable: bool,
+    /// Shannon entropy (bits/byte) over the section's raw bytes.
+    /// 0.0 for empty or uninitialized sections.
+    pub entropy: f64,
 }
 
 /// A symbol extracted from the binary.
@@ -305,6 +308,15 @@ impl LoadedBinary {
                 if name.is_empty() || sh.sh_size == 0 {
                     return None;
                 }
+                let raw_bytes = {
+                    let start = sh.sh_offset as usize;
+                    let end = start + sh.sh_size as usize;
+                    if sh.sh_type == goblin::elf::section_header::SHT_NOBITS || end > data.len() {
+                        &[][..]
+                    } else {
+                        &data[start..end]
+                    }
+                };
                 Some(Section {
                     name,
                     virtual_address: sh.sh_addr,
@@ -314,6 +326,7 @@ impl LoadedBinary {
                     is_executable: sh.is_executable(),
                     is_writable: sh.is_writable(),
                     is_readable: sh.sh_flags & u64::from(goblin::elf::section_header::SHF_ALLOC) != 0,
+                    entropy: reghidra_detect::entropy::shannon(raw_bytes),
                 })
             })
             .collect();
@@ -479,6 +492,13 @@ impl LoadedBinary {
                 )
                 .to_string();
                 let chars = s.characteristics;
+                let raw_start = s.pointer_to_raw_data as usize;
+                let raw_end = raw_start + s.size_of_raw_data as usize;
+                let raw_bytes = if s.size_of_raw_data == 0 || raw_end > data.len() {
+                    &[][..]
+                } else {
+                    &data[raw_start..raw_end]
+                };
                 Section {
                     name,
                     virtual_address: image_base + u64::from(s.virtual_address),
@@ -488,6 +508,7 @@ impl LoadedBinary {
                     is_executable: chars & 0x2000_0000 != 0,
                     is_writable: chars & 0x8000_0000 != 0,
                     is_readable: chars & 0x4000_0000 != 0,
+                    entropy: reghidra_detect::entropy::shannon(raw_bytes),
                 }
             })
             .collect();
@@ -653,13 +674,20 @@ impl LoadedBinary {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            for (sec, _data) in &seg_sections {
+            for (sec, sec_data) in &seg_sections {
                 let name = format!(
                     "{},{}",
                     String::from_utf8_lossy(&sec.segname).trim_end_matches('\0'),
                     String::from_utf8_lossy(&sec.sectname).trim_end_matches('\0')
                 );
                 let initprot = segment.initprot;
+                let raw_start = sec.offset as usize;
+                let raw_end = raw_start + sec_data.len();
+                let raw_bytes = if sec_data.is_empty() || raw_end > data.len() {
+                    &[][..]
+                } else {
+                    &data[raw_start..raw_end]
+                };
                 sections.push(Section {
                     name,
                     virtual_address: sec.addr,
@@ -669,6 +697,7 @@ impl LoadedBinary {
                     is_executable: initprot & 0x4 != 0,
                     is_writable: initprot & 0x2 != 0,
                     is_readable: initprot & 0x1 != 0,
+                    entropy: reghidra_detect::entropy::shannon(raw_bytes),
                 });
             }
         }
@@ -982,4 +1011,28 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod entropy_tests {
+    use super::*;
+
+    #[test]
+    fn loaded_section_has_entropy() {
+        let fixture = std::path::Path::new(
+            "../../tests/fixtures/wildfire-test-pe-file.exe",
+        );
+        let binary = LoadedBinary::load(fixture)
+            .expect("fixture must load");
+        let text = binary
+            .sections
+            .iter()
+            .find(|s| s.name == ".text")
+            .expect(".text section present");
+        assert!(
+            text.entropy > 4.0 && text.entropy < 7.5,
+            ".text entropy out of expected code-section range: {}",
+            text.entropy
+        );
+    }
 }

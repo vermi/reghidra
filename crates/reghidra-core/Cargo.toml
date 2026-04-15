@@ -8,6 +8,7 @@ goblin = { workspace = true }
 capstone = { workspace = true }
 reghidra-ir = { workspace = true }
 reghidra-decompile = { workspace = true }
+reghidra-detect = { path = "../reghidra-detect" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
