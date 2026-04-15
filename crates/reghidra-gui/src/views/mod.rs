@@ -1,6 +1,7 @@
 pub mod cfg;
 pub mod data_sources;
 pub mod decompile;
+pub mod detections;
 pub mod disasm;
 pub mod hex;
 pub mod ir;

@@ -13,6 +13,12 @@ use egui::Ui;
 const SIDE_PANEL_ROW_HEIGHT: f32 = 18.0;
 
 pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
+    // The Detections tab manages its own borrows internally.
+    if app.side_panel == SidePanel::Detections {
+        crate::views::detections::render(app, ui);
+        return;
+    }
+
     let Some(ref project) = app.project else {
         return;
     };
@@ -330,6 +336,9 @@ pub fn render(app: &mut ReghidraApp, ui: &mut Ui) {
                 },
             );
         }
+
+        // Handled by early-return at the top of this function.
+        SidePanel::Detections => {}
     }
 
     if let Some(addr) = navigate_to {

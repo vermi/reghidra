@@ -117,6 +117,11 @@ pub struct Theme {
     #[allow(dead_code)]
     pub palette_match: Color32,
     pub palette_selected_bg: Color32,
+
+    // Detection severity indicators (badges, banners, panel rows).
+    pub detection_info: Color32,
+    pub detection_suspicious: Color32,
+    pub detection_malicious: Color32,
 }
 
 impl Theme {
@@ -211,6 +216,11 @@ impl Theme {
             palette_border: Color32::from_rgb(100, 100, 140),
             palette_match: Color32::from_rgb(255, 200, 60),
             palette_selected_bg: Color32::from_rgb(60, 60, 90),
+
+            // Dark: Nord Aurora palette. Info=green, suspicious=orange, malicious=red.
+            detection_info:       Color32::from_rgb(163, 190, 140),  // #A3BE8C — Nord Aurora green
+            detection_suspicious: Color32::from_rgb(208, 135, 112),  // #D08770 — Nord Aurora orange
+            detection_malicious:  Color32::from_rgb(191,  97, 106),  // #BF616A — Nord Aurora red
         }
     }
 
@@ -303,6 +313,11 @@ impl Theme {
             palette_border: Color32::from_rgb(150, 150, 180),
             palette_match: Color32::from_rgb(200, 140, 0),
             palette_selected_bg: Color32::from_rgb(230, 230, 245),
+
+            // Light: Solarized equivalents. Info=green, suspicious=orange, malicious=red.
+            detection_info:       Color32::from_rgb(133, 153,   0),  // Solarized green
+            detection_suspicious: Color32::from_rgb(203,  75,  22),  // Solarized orange
+            detection_malicious:  Color32::from_rgb(220,  50,  47),  // Solarized red
         }
     }
 

@@ -16,6 +16,7 @@ pub enum SidePanel {
     Exports,
     Sections,
     Strings,
+    Detections,
 }
 
 /// Which main view is active.
@@ -1258,6 +1259,7 @@ impl eframe::App for ReghidraApp {
                     ui.selectable_value(&mut self.side_panel, SidePanel::Exports, "Exp");
                     ui.selectable_value(&mut self.side_panel, SidePanel::Sections, "Sec");
                     ui.selectable_value(&mut self.side_panel, SidePanel::Strings, "Str");
+                    ui.selectable_value(&mut self.side_panel, SidePanel::Detections, "Det");
                 });
                 ui.separator();
 
