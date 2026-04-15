@@ -121,3 +121,36 @@ fn session_round_trip_preserves_rule_overrides() {
         .expect("rule file reloaded into proj2");
     assert!(!rf.enabled, "disabled override survives round-trip");
 }
+
+#[test]
+fn wildfire_fixture_fires_expected_rules() {
+    let proj = Project::open(&fixture("wildfire-test-pe-file.exe")).unwrap();
+
+    let mut fired: Vec<String> = proj
+        .detection_results
+        .file_hits
+        .iter()
+        .map(|h| h.rule_name.clone())
+        .chain(
+            proj.detection_results
+                .function_hits
+                .values()
+                .flatten()
+                .map(|h| h.rule_name.clone()),
+        )
+        .collect();
+    fired.sort();
+    fired.dedup();
+
+    let expected: &[&str] = &[
+        "anti-analysis.int3-scan",
+    ];
+    let expected_set: std::collections::BTreeSet<_> =
+        expected.iter().map(|s| s.to_string()).collect();
+    let fired_set: std::collections::BTreeSet<_> = fired.into_iter().collect();
+    assert_eq!(
+        fired_set,
+        expected_set,
+        "rule firing set drifted; update test if intentional"
+    );
+}
