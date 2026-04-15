@@ -8,6 +8,7 @@ pub mod rule;
 pub mod parser;
 pub mod features;
 pub mod eval;
+pub mod bundled;
 
 pub use rule::{
     CompileError, Comparison, CountRange, FeatureExpr, Rule, Scope, Severity, StrMatcher,
@@ -18,3 +19,4 @@ pub use features::{
     RichEntry, SectionInfo,
 };
 pub use eval::{evaluate, DetectionHit, DetectionResults};
+pub use bundled::{available_bundled_rulefiles, bundled_rule_contents, AvailableRuleFile};
