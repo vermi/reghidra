@@ -1,0 +1,18 @@
+rule:
+  name: anti-analysis.int3-scan
+  severity: suspicious
+  scope: function
+  description: |
+    Scans memory for INT3 (0xCC) breakpoint instructions, a classic technique to detect
+    software breakpoints set by a debugger. The combination of int3 instructions and
+    comparisons suggests active breakpoint scanning rather than coincidental use.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/int3-breakpoint-scanning/
+    - https://attack.mitre.org/techniques/T1622/
+  attack:
+    - T1622
+  features:
+    and:
+      - mnemonic: int3
+      - mnemonic: cmp

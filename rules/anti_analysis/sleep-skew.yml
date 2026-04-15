@@ -1,0 +1,18 @@
+rule:
+  name: anti-analysis.sleep-skew
+  severity: suspicious
+  scope: function
+  description: |
+    Combines a Sleep call with RDTSC timing to detect sandbox acceleration. Many sandboxes
+    fast-forward Sleep calls; RDTSC is used to measure the actual elapsed time and detect
+    when the sleep duration was shorter than expected.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/sleep-acceleration/
+    - https://attack.mitre.org/techniques/T1497/003/
+  attack:
+    - T1497.003
+  features:
+    and:
+      - api: /^Sleep$/
+      - mnemonic: rdtsc

@@ -1,0 +1,22 @@
+rule:
+  name: anti-analysis.ntqueryinformationprocess-debug
+  severity: suspicious
+  scope: function
+  description: |
+    Calls NtQueryInformationProcess with a debug-related information class to detect debuggers.
+    ProcessDebugPort (0x7), ProcessDebugObjectHandle (0x1e), and ProcessDebugFlags (0x1f)
+    are commonly queried to bypass or detect debugging environments.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryinformationprocess
+    - https://unprotect.it/technique/ntqueryinformationprocess/
+    - https://attack.mitre.org/techniques/T1622/
+  attack:
+    - T1622
+  features:
+    and:
+      - api: /NtQueryInformationProcess/
+      - or:
+          - string: ProcessDebugPort
+          - string: ProcessDebugObjectHandle
+          - string: ProcessDebugFlags

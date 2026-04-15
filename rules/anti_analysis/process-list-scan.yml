@@ -1,0 +1,21 @@
+rule:
+  name: anti-analysis.process-list-scan
+  severity: suspicious
+  scope: function
+  description: |
+    Enumerates running processes using the Toolhelp32 snapshot API. Malware uses this
+    technique to detect analysis tools (e.g., OllyDbg, x64dbg, Wireshark) or to verify
+    its target process is running before injecting.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-createtoolhelp32snapshot
+    - https://unprotect.it/technique/process-enumeration/
+    - https://attack.mitre.org/techniques/T1057/
+  attack:
+    - T1057
+  features:
+    and:
+      - api: /CreateToolhelp32Snapshot/
+      - or:
+          - api: /Process32First/
+          - api: /Process32Next/

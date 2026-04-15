@@ -1,0 +1,17 @@
+rule:
+  name: anti-analysis.checkremotedebuggerpresent
+  severity: suspicious
+  scope: function
+  description: |
+    Calls CheckRemoteDebuggerPresent to detect whether a debugger is attached to the process.
+    Unlike IsDebuggerPresent, this call can check arbitrary processes and is often used
+    to detect remote debugging sessions.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/debugapi/nf-debugapi-checkremotedebuggerpresent
+    - https://unprotect.it/technique/checkremotedebuggerpresent/
+    - https://attack.mitre.org/techniques/T1622/
+  attack:
+    - T1622
+  features:
+    api: /CheckRemoteDebuggerPresent/

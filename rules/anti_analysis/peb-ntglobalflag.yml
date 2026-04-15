@@ -1,0 +1,17 @@
+rule:
+  name: anti-analysis.peb-ntglobalflag
+  severity: suspicious
+  scope: function
+  description: |
+    References NtGlobalFlag, a field in the PEB that is set to 0x70 when a process is
+    started under a debugger. Malware reads this value (offset 0x68 in 32-bit PEB,
+    0xBC in 64-bit PEB) to detect debugger presence without using standard APIs.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/ntglobalflag/
+    - https://anti-reversing.com/Downloads/Anti-Reversing/The_Ultimate_Anti-Reversing_Reference.pdf
+    - https://attack.mitre.org/techniques/T1622/
+  attack:
+    - T1622
+  features:
+    string: NtGlobalFlag

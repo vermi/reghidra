@@ -1,0 +1,16 @@
+rule:
+  name: anti-analysis.isdebuggerpresent
+  severity: suspicious
+  scope: function
+  description: |
+    Calls IsDebuggerPresent to detect whether the process is running under a debugger.
+    Commonly used by malware to alter behavior or terminate when a debugger is detected.
+  author: reghidra
+  references:
+    - https://learn.microsoft.com/en-us/windows/win32/api/debugapi/nf-debugapi-isdebuggerpresent
+    - https://unprotect.it/technique/isdebuggerpresent/
+    - https://attack.mitre.org/techniques/T1622/
+  attack:
+    - T1622
+  features:
+    api: /IsDebuggerPresent/
