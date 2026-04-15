@@ -480,6 +480,12 @@ struct InfoJson {
     user_dbs_loaded: usize,
     type_archives_loaded: usize,
     sig_status: Option<String>,
+    /// PE only: pefile-compatible import hash (32-char lowercase hex MD5).
+    imphash: Option<String>,
+    /// PE only: TLS directory contains at least one callback.
+    tls_callbacks_present: bool,
+    /// PE only: file has bytes past the last section (overlay).
+    overlay_present: bool,
 }
 
 #[derive(Serialize)]
@@ -635,6 +641,9 @@ fn cmd_info(args: BinaryArgs) -> Result<()> {
         user_dbs_loaded: project.user_dbs.len(),
         type_archives_loaded: project.type_archives.len(),
         sig_status: project.sig_status.clone(),
+        imphash: info.imphash.clone(),
+        tls_callbacks_present: info.tls_callbacks_present,
+        overlay_present: info.overlay_present,
     };
     emit(args.json, &payload, || {
         println!("Path:                {}", payload.path);
@@ -654,6 +663,15 @@ fn cmd_info(args: BinaryArgs) -> Result<()> {
         println!("Type archives:       {}", payload.type_archives_loaded);
         if let Some(s) = &payload.sig_status {
             println!("Signature status:    {s}");
+        }
+        if let Some(h) = &payload.imphash {
+            println!("Imphash:             {h}");
+        }
+        if payload.tls_callbacks_present {
+            println!("TLS callbacks:       present");
+        }
+        if payload.overlay_present {
+            println!("Overlay:             present");
         }
     })
 }
