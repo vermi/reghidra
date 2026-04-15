@@ -1,0 +1,17 @@
+rule:
+  name: anti-analysis.rdtsc-timing
+  severity: suspicious
+  scope: function
+  description: |
+    RDTSC-based timing check commonly used by malware to detect debuggers
+    or sandboxes by measuring instruction latency.
+  author: reghidra
+  references:
+    - https://unprotect.it/technique/rdtsc/
+  attack:
+    - T1497.003
+  features:
+    count:
+      feature:
+        mnemonic: rdtsc
+      min: 2
