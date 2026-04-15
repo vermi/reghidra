@@ -41,6 +41,15 @@ pub struct XRefDatabase {
     refs_from: HashMap<u64, Vec<XRef>>,
 }
 
+impl Default for XRefDatabase {
+    fn default() -> Self {
+        Self {
+            refs_to: HashMap::new(),
+            refs_from: HashMap::new(),
+        }
+    }
+}
+
 impl XRefDatabase {
     /// Get all references TO a given address.
     pub fn xrefs_to(&self, addr: u64) -> &[XRef] {

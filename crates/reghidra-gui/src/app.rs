@@ -214,6 +214,72 @@ impl ReghidraApp {
         }
     }
 
+    /// Construct a `ReghidraApp` pre-loaded with a synthetic test `Project`.
+    ///
+    /// Suitable for headless egui_kittest integration tests.  Requires the
+    /// `test-harness` feature on `reghidra-core` (and the matching feature on
+    /// this crate).
+    #[cfg(feature = "test-harness")]
+    pub fn for_test() -> Self {
+        let mut app = Self {
+            logo: None,
+            project: Some(reghidra_core::Project::for_test()),
+            loading_error: None,
+            side_panel: SidePanel::Functions,
+            main_view: MainView::Disassembly,
+            selected_address: Some(0x1000),
+            code_address: Some(0x1000),
+            search_query: String::new(),
+            show_bytes_in_disasm: true,
+            hex_bytes_per_row: 16,
+            nav_history: vec![0x1000],
+            nav_position: 0,
+            theme: Theme::dark(),
+            undo: UndoHistory::new(),
+            palette: CommandPalette::new(),
+            annotation_popup: AnnotationPopup::new(),
+            input_mode: InputMode::Normal,
+            g_pending: false,
+            layout: ViewLayout::Single,
+            secondary_view: MainView::Decompile,
+            focused_pane: 0,
+            context_menu_addr: None,
+            help: HelpOverlay::new(),
+            highlighted_mnemonic: None,
+            hovered_address: None,
+            hovered_address_next: None,
+            nav_generation: 0,
+            theme_applied: false,
+            decompile_cache: None,
+            rename_generation: 0,
+            disasm_display_generation: 0,
+            disasm_lines_cache: None,
+            func_name_to_addr_cache: None,
+            decompile_aux_cache: None,
+            session_path: None,
+            status_message: None,
+            data_sources_open: false,
+        };
+        // Switch to the Detections panel so tests that check it don't have to.
+        app.side_panel = SidePanel::Detections;
+
+        // Pre-seed the decompile cache for 0x1000 with synthetic output so
+        // the decompile view renders the detection banner without needing
+        // real IR. The banner check (detection_results.function_hits.get)
+        // happens after the cache check, so a non-empty cache is all that's
+        // required.
+        app.decompile_cache = Some((
+            0x1000,
+            0,
+            vec![reghidra_core::AnnotatedLine {
+                text: "void test_malicious_fn(void) { /* synthetic */ }".into(),
+                addr: Some(0x1000),
+            }],
+            vec![],
+        ));
+        app
+    }
+
     pub fn open_file(&mut self, path: PathBuf) {
         match Project::open(&path) {
             Ok(project) => {
