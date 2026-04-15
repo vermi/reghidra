@@ -1,16 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod annotations;
-mod app;
-mod context_menu;
-mod help;
-mod palette;
-mod syntax;
-mod theme;
-mod undo;
-mod views;
-
-use app::ReghidraApp;
+use reghidra_gui::ReghidraApp;
 
 fn load_icon() -> egui::IconData {
     let png_bytes = include_bytes!("../../../assets/reghidra.png");

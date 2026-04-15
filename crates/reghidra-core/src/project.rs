@@ -271,6 +271,143 @@ impl Project {
         Ok(project)
     }
 
+    /// Construct a minimal, hermetic `Project` for use in GUI tests.
+    ///
+    /// Produces a project with two synthetic functions at `0x1000` and `0x2000`,
+    /// pre-populated `DetectionResults` containing one malicious hit on `0x1000`
+    /// and one suspicious hit on `0x2000`, and otherwise empty analysis state.
+    /// No binary is loaded from disk; no real instructions or CFGs are present.
+    ///
+    /// Only available when the `test-harness` feature is enabled.
+    #[cfg(feature = "test-harness")]
+    pub fn for_test() -> Self {
+        use crate::analysis::functions::{Function, FunctionSource};
+        use crate::analysis::xrefs::XRefDatabase;
+        use crate::binary::Section;
+        use reghidra_detect::{DetectionHit, DetectionResults, Severity};
+
+        let info = BinaryInfo {
+            path: PathBuf::from("test-binary"),
+            format: BinaryFormat::Elf,
+            architecture: Architecture::X86_64,
+            entry_point: 0x1000,
+            is_64bit: true,
+            is_big_endian: false,
+            pdb_info: None,
+            rich_header: None,
+            imphash: None,
+            tls_callbacks_present: false,
+            overlay_present: false,
+        };
+
+        let binary = LoadedBinary {
+            info,
+            data: vec![0u8; 64],
+            sections: vec![Section {
+                name: ".text".into(),
+                virtual_address: 0x1000,
+                virtual_size: 0x1000,
+                file_offset: 0,
+                file_size: 0x1000,
+                is_executable: true,
+                is_writable: false,
+                is_readable: true,
+                entropy: 0.0,
+            }],
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            strings: Vec::new(),
+            import_addr_map: HashMap::new(),
+            pdata_function_starts: Vec::new(),
+            guard_cf_function_starts: Vec::new(),
+        };
+
+        let functions = vec![
+            Function {
+                entry_address: 0x1000,
+                size: 32,
+                name: "test_malicious_fn".into(),
+                source: FunctionSource::Prologue,
+                instruction_count: 8,
+                matched_signature_db: None,
+                matched_signature_length: None,
+            },
+            Function {
+                entry_address: 0x2000,
+                size: 16,
+                name: "test_suspicious_fn".into(),
+                source: FunctionSource::Prologue,
+                instruction_count: 4,
+                matched_signature_db: None,
+                matched_signature_length: None,
+            },
+        ];
+
+        let analysis = AnalysisResults {
+            functions,
+            xrefs: XRefDatabase::default(),
+            cfgs: HashMap::new(),
+            ir_functions: HashMap::new(),
+        };
+
+        let mut fn_hits: std::collections::HashMap<u64, Vec<DetectionHit>> = HashMap::new();
+        fn_hits.insert(
+            0x1000,
+            vec![DetectionHit {
+                rule_name: "test_malware_rule".into(),
+                severity: Severity::Malicious,
+                source_path: "bundled:test/malware.yml".into(),
+                description: "Synthetic malware detection for testing".into(),
+                match_count: 1,
+            }],
+        );
+        fn_hits.insert(
+            0x2000,
+            vec![DetectionHit {
+                rule_name: "test_suspicious_rule".into(),
+                severity: Severity::Suspicious,
+                source_path: "bundled:test/suspicious.yml".into(),
+                description: "Synthetic suspicious detection for testing".into(),
+                match_count: 1,
+            }],
+        );
+
+        let detection_results = DetectionResults {
+            file_hits: Vec::new(),
+            function_hits: fn_hits,
+            per_rule_file_counts: HashMap::new(),
+        };
+
+        Self {
+            binary,
+            instructions: Vec::new(),
+            analysis,
+            comments: HashMap::new(),
+            renamed_functions: HashMap::new(),
+            label_names: HashMap::new(),
+            variable_names: HashMap::new(),
+            variable_types: HashMap::new(),
+            bookmarks: Vec::new(),
+            bundled_dbs: Vec::new(),
+            user_dbs: Vec::new(),
+            sig_status: None,
+            type_archives: Vec::new(),
+            bundled_db_enabled: Vec::new(),
+            user_db_enabled: Vec::new(),
+            type_archive_enabled: Vec::new(),
+            bundled_db_hits: Vec::new(),
+            user_db_hits: Vec::new(),
+            type_archive_hits: Vec::new(),
+            available_archive_stems: Vec::new(),
+            available_bundled_sigs: Vec::new(),
+            detection_results,
+            loaded_rule_files: Vec::new(),
+            detections_generation: 1,
+            available_bundled_rulefiles: Vec::new(),
+        }
+    }
+
     /// Load a user-provided FLIRT .sig file and re-run analysis with all signatures.
     /// Returns the number of functions matched by this new database.
     pub fn load_signatures(&mut self, path: &Path) -> Result<usize, CoreError> {
