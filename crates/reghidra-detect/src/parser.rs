@@ -124,6 +124,7 @@ fn compile_list<F: Fn(Vec<FeatureExpr>) -> FeatureExpr>(
     Ok(wrap(items))
 }
 
+/// Dispatches a single leaf feature key to its `FeatureExpr` variant.
 fn compile_single(rule_name: &str, key: &str, val: &serde_yaml::Value)
     -> Result<FeatureExpr, CompileError>
 {
