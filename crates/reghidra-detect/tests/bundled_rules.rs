@@ -6,6 +6,16 @@ use std::collections::HashMap;
 
 fn empty_feats() -> Features { Features::default() }
 
+fn file_feats(strings: Vec<&str>) -> Features {
+    Features {
+        file: FileFeatures {
+            strings: strings.into_iter().map(String::from).collect(),
+            ..FileFeatures::default()
+        },
+        ..Features::default()
+    }
+}
+
 fn one_fn(mnemonics: Vec<&str>, apis: Vec<&str>, strings: Vec<&str>) -> Features {
     let mut bf = HashMap::new();
     bf.insert(0x1000, FunctionFeatures {
@@ -340,5 +350,283 @@ fn injection_thread_hijack_no_fire() {
     // only GetThreadContext — read-only, no hijack
     let rules = load("injection", "thread-hijack");
     let feats = one_fn(vec![], vec!["GetThreadContext"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+// ─── 16C: persistence ────────────────────────────────────────────────────────
+
+#[test]
+fn persistence_run_key_write_fires() {
+    let rules = load("persistence", "run-key-write");
+    let feats = one_fn(vec![], vec!["RegSetValueExA"],
+        vec!["Software\\Microsoft\\Windows\\CurrentVersion\\Run"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn persistence_run_key_write_no_fire() {
+    // has the API but not the key string
+    let rules = load("persistence", "run-key-write");
+    let feats = one_fn(vec![], vec!["RegSetValueExA"], vec!["HKEY_LOCAL_MACHINE"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn persistence_schtasks_shell_fires() {
+    let rules = load("persistence", "schtasks-shell");
+    let feats = one_fn(vec![], vec!["CreateProcessA"], vec!["schtasks /create /tn malware"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn persistence_schtasks_shell_no_fire() {
+    // has CreateProcess but no schtasks string
+    let rules = load("persistence", "schtasks-shell");
+    let feats = one_fn(vec![], vec!["CreateProcessA"], vec!["cmd.exe"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn persistence_service_install_fires() {
+    let rules = load("persistence", "service-install");
+    let feats = one_fn(vec![], vec!["CreateServiceA"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn persistence_service_install_no_fire() {
+    let rules = load("persistence", "service-install");
+    let feats = one_fn(vec![], vec!["OpenServiceA"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn persistence_winlogon_notify_key_fires() {
+    let rules = load("persistence", "winlogon-notify-key");
+    let feats = one_fn(vec![], vec![], vec!["Winlogon\\Notify"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn persistence_winlogon_notify_key_no_fire() {
+    let rules = load("persistence", "winlogon-notify-key");
+    let feats = one_fn(vec![], vec![], vec!["Winlogon"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn persistence_ifeo_debugger_fires() {
+    let rules = load("persistence", "ifeo-debugger");
+    let feats = one_fn(vec![], vec![],
+        vec!["Image File Execution Options"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn persistence_ifeo_debugger_no_fire() {
+    let rules = load("persistence", "ifeo-debugger");
+    let feats = one_fn(vec![], vec![], vec!["HKEY_LOCAL_MACHINE\\SOFTWARE"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn persistence_appinit_dlls_fires() {
+    let rules = load("persistence", "appinit-dlls");
+    let feats = one_fn(vec![], vec![], vec!["AppInit_DLLs"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn persistence_appinit_dlls_no_fire() {
+    let rules = load("persistence", "appinit-dlls");
+    let feats = one_fn(vec![], vec![], vec!["SYSTEM\\CurrentControlSet\\Services"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn persistence_wmi_event_subscription_fires() {
+    let rules = load("persistence", "wmi-event-subscription");
+    let feats = file_feats(vec!["__EventFilter", "CommandLineEventConsumer"]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 1);
+}
+
+#[test]
+fn persistence_wmi_event_subscription_no_fire() {
+    // only one of the two WMI class names
+    let rules = load("persistence", "wmi-event-subscription");
+    let feats = file_feats(vec!["__EventFilter"]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 0);
+}
+
+// ─── 16D: crypto ─────────────────────────────────────────────────────────────
+
+#[test]
+fn crypto_aes_sbox_textual_fires() {
+    let rules = load("crypto", "aes-sbox-textual");
+    let feats = one_fn(vec![], vec!["CryptAcquireContextA"], vec!["AES"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn crypto_aes_sbox_textual_no_fire() {
+    // crypto API present but no AES/Rijndael string
+    let rules = load("crypto", "aes-sbox-textual");
+    let feats = one_fn(vec![], vec!["CryptAcquireContextA"], vec!["SHA256"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn crypto_rc4_ksa_pattern_fires() {
+    let rules = load("crypto", "rc4-ksa-pattern");
+    let mut bf = HashMap::new();
+    bf.insert(0x1000, FunctionFeatures {
+        name: "t".into(),
+        apis: vec![],
+        string_refs: vec![],
+        mnemonics: vec!["xor".into(), "mov".into(), "add".into()],
+        xref_in_count: 0,
+        xref_out_count: 3,
+    });
+    let feats = Features { by_function: bf, ..Features::default() };
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn crypto_rc4_ksa_pattern_no_fire() {
+    // mnemonic sequence present but xref_out too low
+    let rules = load("crypto", "rc4-ksa-pattern");
+    let mut bf = HashMap::new();
+    bf.insert(0x1000, FunctionFeatures {
+        name: "t".into(),
+        apis: vec![],
+        string_refs: vec![],
+        mnemonics: vec!["xor".into(), "mov".into(), "add".into()],
+        xref_in_count: 0,
+        xref_out_count: 1,
+    });
+    let feats = Features { by_function: bf, ..Features::default() };
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn crypto_crypt32_full_api_chain_fires() {
+    let rules = load("crypto", "crypt32-full-api-chain");
+    let feats = one_fn(vec![],
+        vec!["CryptAcquireContext", "CryptCreateHash", "CryptEncrypt"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn crypto_crypt32_full_api_chain_no_fire() {
+    // missing CryptCreateHash
+    let rules = load("crypto", "crypt32-full-api-chain");
+    let feats = one_fn(vec![], vec!["CryptAcquireContext", "CryptEncrypt"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn crypto_bcrypt_aes_fires() {
+    let rules = load("crypto", "bcrypt-aes");
+    let feats = one_fn(vec![], vec!["BCryptOpenAlgorithmProvider"], vec!["AES"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn crypto_bcrypt_aes_no_fire() {
+    // BCrypt API but no AES identifier string
+    let rules = load("crypto", "bcrypt-aes");
+    let feats = one_fn(vec![], vec!["BCryptOpenAlgorithmProvider"], vec!["ChaCha20"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn crypto_custom_xor_loop_fires() {
+    let rules = load("crypto", "custom-xor-loop");
+    let feats = one_fn(vec!["xor", "inc", "cmp", "jne"], vec![], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn crypto_custom_xor_loop_no_fire() {
+    let rules = load("crypto", "custom-xor-loop");
+    let feats = one_fn(vec!["mov", "add", "ret"], vec![], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+// ─── 16E: network ────────────────────────────────────────────────────────────
+
+#[test]
+fn network_winsock_connect_fires() {
+    let rules = load("network", "winsock-connect");
+    let feats = one_fn(vec![], vec!["WSAStartup", "connect"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn network_winsock_connect_no_fire() {
+    // socket API but no connect
+    let rules = load("network", "winsock-connect");
+    let feats = one_fn(vec![], vec!["WSAStartup", "bind"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn network_wininet_http_fires() {
+    let rules = load("network", "wininet-http");
+    let feats = one_fn(vec![], vec!["InternetOpenA", "InternetConnect"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn network_wininet_http_no_fire() {
+    // InternetOpen but neither InternetConnect nor HttpOpenRequest
+    let rules = load("network", "wininet-http");
+    let feats = one_fn(vec![], vec!["InternetOpenA", "InternetCloseHandle"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn network_winhttp_fires() {
+    let rules = load("network", "winhttp");
+    let feats = one_fn(vec![], vec!["WinHttpOpen", "WinHttpSendRequest"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn network_winhttp_no_fire() {
+    // only WinHttpOpen without send
+    let rules = load("network", "winhttp");
+    let feats = one_fn(vec![], vec!["WinHttpOpen", "WinHttpReceiveResponse"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn network_dns_exfil_heuristic_fires() {
+    let rules = load("network", "dns-exfil-heuristic");
+    let feats = one_fn(vec![], vec!["DnsQuery_A"],
+        vec!["dGhpcyBpcyBhIGxvbmcgYmFzZTY0IGVuY29kZWQgc3RyaW5n"]);  // base64-ish 48 chars
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn network_dns_exfil_heuristic_no_fire() {
+    // DnsQuery but no base64-like string
+    let rules = load("network", "dns-exfil-heuristic");
+    let feats = one_fn(vec![], vec!["DnsQuery_A"], vec!["example.com"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn network_raw_sockets_fires() {
+    let rules = load("network", "raw-sockets");
+    let feats = one_fn(vec![], vec!["socket"], vec!["SOCK_RAW"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn network_raw_sockets_no_fire() {
+    // socket API but no raw socket indicator string
+    let rules = load("network", "raw-sockets");
+    let feats = one_fn(vec![], vec!["socket"], vec!["SOCK_STREAM"]);
     assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
 }

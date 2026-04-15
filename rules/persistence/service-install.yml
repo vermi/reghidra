@@ -1,0 +1,17 @@
+rule:
+  name: persistence.service-install
+  severity: suspicious
+  scope: function
+  description: |
+    Installs a Windows service using the Service Control Manager API. Malware installs
+    services for persistent execution, privilege escalation, and to survive reboots.
+    Services can run as SYSTEM and restart automatically on failure.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1543/003/
+    - https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-createservicea
+    - https://unprotect.it/technique/create-or-modify-system-process-windows-service/
+  attack:
+    - T1543.003
+  features:
+    api: /CreateService[AW]?/

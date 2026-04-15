@@ -1,0 +1,17 @@
+rule:
+  name: persistence.ifeo-debugger
+  severity: malicious
+  scope: function
+  description: |
+    References the Image File Execution Options registry key, which is abused to attach a
+    "debugger" (arbitrary executable) to any process by name. Attackers use this for
+    persistence, privilege escalation, and to intercept process launches.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1546/012/
+    - https://learn.microsoft.com/en-us/previous-versions/visualstudio/visual-studio-2010/a329t4ed(v=vs.100)
+    - https://unprotect.it/technique/image-file-execution-options/
+  attack:
+    - T1546.012
+  features:
+    string: "Image File Execution Options"

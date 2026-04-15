@@ -1,0 +1,17 @@
+rule:
+  name: persistence.appinit-dlls
+  severity: malicious
+  scope: function
+  description: |
+    References the AppInit_DLLs registry value, which causes the listed DLLs to be loaded
+    into every process that loads User32.dll. This is a legacy persistence mechanism that
+    gives broad process injection capability without needing explicit injection code.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1546/010/
+    - https://learn.microsoft.com/en-us/windows/win32/dlls/secure-boot-and-appinit-dlls
+    - https://unprotect.it/technique/appinit-dlls/
+  attack:
+    - T1546.010
+  features:
+    string: AppInit_DLLs
