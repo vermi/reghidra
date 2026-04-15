@@ -59,6 +59,15 @@ fn archive_stems_for(info: &BinaryInfo) -> Vec<&'static str> {
     }
 }
 
+/// Parse YAML rule text, collecting any errors rather than propagating them.
+/// Returns `(rules, errors)` where `rules` is empty on a top-level parse failure.
+fn parse_collect_errors(yaml: &str, source: &str) -> (Vec<reghidra_detect::Rule>, Vec<String>) {
+    match reghidra_detect::parse_rules_from_str(yaml, source) {
+        Ok(rules) => (rules, Vec::new()),
+        Err(e) => (Vec::new(), vec![e.to_string()]),
+    }
+}
+
 /// Load all type archives matching a binary's format and architecture.
 /// Missing archives are silently skipped — expected during early Phase 5c
 /// PRs when the `types/` tree is empty or partial.
@@ -67,6 +76,19 @@ fn load_type_archives(info: &BinaryInfo) -> Vec<Arc<TypeArchive>> {
         .into_iter()
         .filter_map(type_archive::load_embedded)
         .collect()
+}
+
+/// A loaded YAML detection rule file.
+#[derive(Debug, Clone)]
+pub struct LoadedRuleFile {
+    /// `"bundled:<subdir>/<stem>.yml"` or an absolute filesystem path.
+    pub source_path: String,
+    /// Parsed rules from this file. Empty when there are parse errors.
+    pub rules: Vec<reghidra_detect::Rule>,
+    /// Whether this file contributes to the active detection pass.
+    pub enabled: bool,
+    /// Non-fatal parse errors from this file (rules that failed to compile).
+    pub parse_errors: Vec<String>,
 }
 
 /// A reghidra project: a loaded binary with its analysis results.
@@ -134,6 +156,20 @@ pub struct Project {
     /// flow as [`Self::available_archive_stems`]. Grouped by `subdir` in
     /// the panel for the platform/arch tree view.
     pub available_bundled_sigs: Vec<bundled_sigs::AvailableSig>,
+
+    // --- Detection engine ---
+
+    /// Results of the last `evaluate_detections` run.
+    pub detection_results: reghidra_detect::DetectionResults,
+    /// Currently loaded YAML rule files (bundled + user-loaded).
+    pub loaded_rule_files: Vec<LoadedRuleFile>,
+    /// Monotonically increasing counter bumped on every `evaluate_detections` call.
+    /// Consumers can key caches on this.
+    pub detections_generation: u64,
+    /// Every bundled `.yml` rule file embedded in this build, regardless of
+    /// whether it was auto-loaded. Shown in the Loaded Data Sources panel so
+    /// users can opt into additional rule sets.
+    pub available_bundled_rulefiles: Vec<reghidra_detect::AvailableRuleFile>,
 }
 
 impl Project {
@@ -185,6 +221,7 @@ impl Project {
 
         let available_archive_stems = type_archive::available_stems();
         let available_bundled_sigs = bundled_sigs::available_sigs();
+        let available_bundled_rulefiles = reghidra_detect::available_bundled_rulefiles();
 
         let mut project = Self {
             binary,
@@ -208,8 +245,29 @@ impl Project {
             type_archive_hits,
             available_archive_stems,
             available_bundled_sigs,
+            detection_results: reghidra_detect::DetectionResults::default(),
+            loaded_rule_files: Vec::new(),
+            detections_generation: 0,
+            available_bundled_rulefiles,
         };
         project.recompute_hit_counts();
+
+        // Auto-load every bundled rule file. The `rules/` tree is initially
+        // empty (only `.gitkeep`), so this is a no-op in the first ship.
+        // When rule files land (Task 25+), they will be auto-loaded here.
+        let stems: Vec<(String, String)> = project
+            .available_bundled_rulefiles
+            .iter()
+            .map(|r| (r.subdir.clone(), r.stem.clone()))
+            .collect();
+        for (subdir, stem) in stems {
+            let _ = project.load_bundled_rule_file(&subdir, &stem);
+        }
+        // If no rules were loaded, still run evaluate once to stamp generation = 1.
+        if project.loaded_rule_files.is_empty() {
+            project.evaluate_detections();
+        }
+
         Ok(project)
     }
 
@@ -579,6 +637,130 @@ impl Project {
         self.bundled_db_hits = bundled_hits;
         self.user_db_hits = user_hits;
         self.type_archive_hits = archive_hits;
+    }
+
+    // -------------------------------------------------------------------------
+    // Detection engine
+    // -------------------------------------------------------------------------
+
+    /// Rebuild the [`Features`] snapshot and run all enabled rule files through
+    /// the detection evaluator. Stamps results onto `self.detection_results` and
+    /// bumps `self.detections_generation`.
+    pub fn evaluate_detections(&mut self) {
+        // Build the effective function-name map (user renames take precedence).
+        let mut fn_names: HashMap<u64, String> = self
+            .analysis
+            .functions
+            .iter()
+            .map(|f| (f.entry_address, f.name.clone()))
+            .collect();
+        for (addr, name) in &self.renamed_functions {
+            fn_names.insert(*addr, name.clone());
+        }
+
+        let features = crate::analysis::detect_features::build_features(
+            &self.binary,
+            &self.analysis,
+            &fn_names,
+        );
+
+        // Gather all enabled rules with their source paths.
+        let mut all_rules: Vec<reghidra_detect::Rule> = Vec::new();
+        let mut name_to_src: HashMap<String, String> = HashMap::new();
+        for rf in &self.loaded_rule_files {
+            if !rf.enabled {
+                continue;
+            }
+            for rule in &rf.rules {
+                name_to_src.insert(rule.name.clone(), rf.source_path.clone());
+                all_rules.push(rule.clone());
+            }
+        }
+
+        let mut results = reghidra_detect::evaluate(&all_rules, &features);
+
+        // Stamp source_path onto every hit.
+        for hit in &mut results.file_hits {
+            if let Some(src) = name_to_src.get(&hit.rule_name) {
+                hit.source_path = src.clone();
+            }
+        }
+        for hits in results.function_hits.values_mut() {
+            for hit in hits {
+                if let Some(src) = name_to_src.get(&hit.rule_name) {
+                    hit.source_path = src.clone();
+                }
+            }
+        }
+
+        // Compute per-rule-file hit counts.
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for hit in &results.file_hits {
+            *counts.entry(hit.source_path.clone()).or_insert(0) += 1;
+        }
+        for hits in results.function_hits.values() {
+            for hit in hits {
+                *counts.entry(hit.source_path.clone()).or_insert(0) += 1;
+            }
+        }
+        results.per_rule_file_counts = counts;
+
+        self.detection_results = results;
+        self.detections_generation += 1;
+    }
+
+    /// Load a bundled rule file by subdir + stem and re-run detections.
+    /// Idempotent — calling with an already-loaded file is a no-op.
+    pub fn load_bundled_rule_file(&mut self, subdir: &str, stem: &str) -> Result<(), String> {
+        let path = if subdir.is_empty() {
+            format!("{stem}.yml")
+        } else {
+            format!("{subdir}/{stem}.yml")
+        };
+        let source_path = format!("bundled:{path}");
+        if self.loaded_rule_files.iter().any(|f| f.source_path == source_path) {
+            return Ok(());
+        }
+        let yaml = reghidra_detect::bundled_rule_contents(&path)
+            .ok_or_else(|| format!("bundled rule not found: {path}"))?;
+        let (rules, errors) = parse_collect_errors(yaml, &source_path);
+        self.loaded_rule_files.insert(0, LoadedRuleFile {
+            source_path,
+            rules,
+            enabled: true,
+            parse_errors: errors,
+        });
+        self.evaluate_detections();
+        Ok(())
+    }
+
+    /// Load a user-provided YAML rule file and re-run detections.
+    /// Idempotent — calling with a path that is already loaded is a no-op.
+    pub fn load_user_rule_file(&mut self, path: &Path) -> Result<(), String> {
+        let abs = path.canonicalize().map_err(|e| e.to_string())?;
+        let source_path = abs.to_string_lossy().to_string();
+        if self.loaded_rule_files.iter().any(|f| f.source_path == source_path) {
+            return Ok(());
+        }
+        let yaml = std::fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+        let (rules, errors) = parse_collect_errors(&yaml, &source_path);
+        self.loaded_rule_files.insert(0, LoadedRuleFile {
+            source_path,
+            rules,
+            enabled: true,
+            parse_errors: errors,
+        });
+        self.evaluate_detections();
+        Ok(())
+    }
+
+    /// Enable or disable a loaded rule file by its `source_path`.
+    /// Bumps `detections_generation` by re-running detections.
+    pub fn set_rule_file_enabled(&mut self, source_path: &str, enabled: bool) {
+        if let Some(rf) = self.loaded_rule_files.iter_mut().find(|f| f.source_path == source_path) {
+            rf.enabled = enabled;
+        }
+        self.evaluate_detections();
     }
 
     /// Get the display name for a function at the given address.
