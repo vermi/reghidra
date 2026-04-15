@@ -59,6 +59,8 @@ fn compile_rule(raw: RawRule, _source: &str) -> Result<Rule, CompileError> {
     })
 }
 
+/// Compiles a `features:` value into a `FeatureExpr` tree.
+/// Handles bare lists (→ implicit `And`), single-key mappings (leaf or combinator).
 fn compile_expr(rule_name: &str, v: &serde_yaml::Value) -> Result<FeatureExpr, CompileError> {
     use serde_yaml::Value;
     match v {
