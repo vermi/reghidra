@@ -1,0 +1,21 @@
+rule:
+  name: network.raw-sockets
+  severity: suspicious
+  scope: function
+  description: |
+    Creates a raw socket using the socket() API alongside a string reference to
+    SOCK_RAW or AF_PACKET. Raw sockets bypass the OS TCP/UDP stack, enabling packet
+    crafting for port scanning, SYN floods, ICMP tunneling, and network reconnaissance.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1046/
+    - https://learn.microsoft.com/en-us/windows/win32/winsock/tcp-ip-raw-sockets-2
+    - https://unprotect.it/technique/raw-sockets/
+  attack:
+    - T1046
+  features:
+    and:
+      - api: /^socket$/
+      - or:
+          - string: SOCK_RAW
+          - string: AF_PACKET

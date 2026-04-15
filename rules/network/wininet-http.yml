@@ -1,0 +1,22 @@
+rule:
+  name: network.wininet-http
+  severity: suspicious
+  scope: function
+  description: |
+    Uses the WinINet HTTP stack: InternetOpen to initialize a session, then either
+    InternetConnect to establish a server connection or HttpOpenRequest to create a
+    request handle. This sequence is used by C2 frameworks, droppers, and data
+    exfiltration tools that communicate over HTTP/HTTPS.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://learn.microsoft.com/en-us/windows/win32/api/wininet/nf-wininet-internetopena
+    - https://learn.microsoft.com/en-us/windows/win32/wininet/wininet-functions
+  attack:
+    - T1071.001
+  features:
+    and:
+      - api: /InternetOpen[AW]?/
+      - or:
+          - api: /InternetConnect/
+          - api: /HttpOpenRequest/
