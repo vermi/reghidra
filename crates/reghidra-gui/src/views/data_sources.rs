@@ -29,6 +29,7 @@
 use crate::app::ReghidraApp;
 use crate::theme::Theme;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Render a section heading: smaller and less shouty than `ui.heading`,
 /// with a subtle separator beneath. Used for both "FLIRT signature
@@ -135,6 +136,8 @@ pub fn render_window(app: &mut ReghidraApp, ctx: &egui::Context) {
                 if render_type_archive_section(ui, &theme, project) {
                     force_decompile_invalidate = true;
                 }
+                ui.add_space(14.0);
+                render_detection_rules_section(ui, &theme, project);
             });
     });
 
@@ -810,4 +813,209 @@ fn render_type_archive_section(
         }
     }
     touched
+}
+
+// ---------------------------------------------------------------------------
+// Detection Rules section
+// ---------------------------------------------------------------------------
+
+enum RuleAction {
+    SetEnabled { source_path: String, enabled: bool },
+    LoadBundled { subdir: String, stem: String },
+    LoadUser { path: std::path::PathBuf },
+}
+
+fn render_detection_rules_section(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    project: &mut reghidra_core::Project,
+) {
+    section_heading(ui, "Detection Rules");
+
+    // Snapshot loaded rule files to avoid borrow-checker conflicts during Grid.
+    struct RuleRowSnapshot {
+        source_path: String,
+        enabled: bool,
+        rule_count: usize,
+        hit_count: usize,
+        has_errors: bool,
+        error_text: String,
+    }
+
+    let rows: Vec<RuleRowSnapshot> = project
+        .loaded_rule_files
+        .iter()
+        .map(|rf| {
+            let hit_count = project
+                .detection_results
+                .per_rule_file_counts
+                .get(&rf.source_path)
+                .copied()
+                .unwrap_or(0);
+            let error_text = rf.parse_errors.join("\n");
+            RuleRowSnapshot {
+                source_path: rf.source_path.clone(),
+                enabled: rf.enabled,
+                rule_count: rf.rules.len(),
+                hit_count,
+                has_errors: !rf.parse_errors.is_empty(),
+                error_text,
+            }
+        })
+        .collect();
+
+    // Enumerate available but not yet loaded bundled rule files.
+    let loaded_paths: std::collections::HashSet<&str> = project
+        .loaded_rule_files
+        .iter()
+        .map(|rf| rf.source_path.as_str())
+        .collect();
+
+    // Group available by subdir for the nested "Load bundled…" tree.
+    let mut available_by_subdir: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for rf in &project.available_bundled_rulefiles {
+        let bundled_path = format!("bundled:{}/{}", rf.subdir, rf.stem);
+        if !loaded_paths.contains(bundled_path.as_str()) {
+            available_by_subdir
+                .entry(rf.subdir.clone())
+                .or_default()
+                .push(rf.stem.clone());
+        }
+    }
+
+    let mut actions: Vec<RuleAction> = Vec::new();
+
+    if rows.is_empty() {
+        ui.label(egui::RichText::new("No rule files loaded.").color(theme.text_dim));
+    } else {
+        egui::Grid::new("detection_rules_table")
+            .num_columns(5)
+            .striped(true)
+            .spacing([14.0, 6.0])
+            .min_col_width(0.0)
+            .show(ui, |ui| {
+                for row in &rows {
+                    let mut on = row.enabled;
+                    ui.checkbox(&mut on, "");
+
+                    let name_color = if row.enabled {
+                        theme.text_primary
+                    } else {
+                        theme.text_dim
+                    };
+                    // Display just the final path component as the name.
+                    let display_name = row
+                        .source_path
+                        .rsplit_once('/')
+                        .or_else(|| row.source_path.rsplit_once('\\'))
+                        .map(|(_, f)| f)
+                        .unwrap_or(row.source_path.as_str());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(display_name).color(name_color),
+                        )
+                        .selectable(false),
+                    );
+
+                    metric_cell(ui, theme, Some(row.rule_count), true);
+                    metric_cell(
+                        ui,
+                        theme,
+                        Some(row.hit_count),
+                        row.hit_count > 0,
+                    );
+
+                    // Parse-error warning icon.
+                    if row.has_errors {
+                        let warn = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("⚠")
+                                    .color(theme.detection_suspicious),
+                            )
+                            .sense(egui::Sense::hover()),
+                        );
+                        warn.on_hover_text(&row.error_text);
+                    } else {
+                        ui.label("");
+                    }
+
+                    ui.end_row();
+
+                    if on != row.enabled {
+                        actions.push(RuleAction::SetEnabled {
+                            source_path: row.source_path.clone(),
+                            enabled: on,
+                        });
+                    }
+                }
+            });
+    }
+
+    ui.add_space(8.0);
+
+    // "Load bundled…" expandable section.
+    if !available_by_subdir.is_empty() {
+        let available_count: usize = available_by_subdir.values().map(|v| v.len()).sum();
+        egui::CollapsingHeader::new(tree_header(
+            theme,
+            "Load bundled rules",
+            0,
+            available_count,
+        ))
+        .id_salt("det_bundled_header")
+        .default_open(false)
+        .show(ui, |ui| {
+            for (subdir, stems) in &available_by_subdir {
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(subdir).color(theme.text_primary),
+                )
+                .id_salt(format!("det_bundled::{subdir}"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    for stem in stems {
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(stem).color(theme.text_secondary),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .clicked()
+                        {
+                            actions.push(RuleAction::LoadBundled {
+                                subdir: subdir.clone(),
+                                stem: stem.clone(),
+                            });
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // "Load user file…" button.
+    if ui.button("Load user rule file…").clicked() {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Load Detection Rule File")
+            .add_filter("YAML rule files", &["yml", "yaml"])
+            .pick_file()
+        {
+            actions.push(RuleAction::LoadUser { path });
+        }
+    }
+
+    // Drain actions after the immutable Grid/CollapsingHeader borrows.
+    for action in actions {
+        match action {
+            RuleAction::SetEnabled { source_path, enabled } => {
+                project.set_rule_file_enabled(&source_path, enabled);
+            }
+            RuleAction::LoadBundled { subdir, stem } => {
+                let _ = project.load_bundled_rule_file(&subdir, &stem);
+            }
+            RuleAction::LoadUser { path } => {
+                let _ = project.load_user_rule_file(Path::new(&path));
+            }
+        }
+    }
 }
