@@ -7,6 +7,7 @@ pub mod entropy;
 pub mod rule;
 pub mod parser;
 pub mod features;
+pub mod eval;
 
 pub use rule::{
     CompileError, Comparison, CountRange, FeatureExpr, Rule, Scope, Severity, StrMatcher,
@@ -16,3 +17,4 @@ pub use features::{
     BinaryFormat, FileFeatures, Features, FunctionFeatures, Import, PeFeatures,
     RichEntry, SectionInfo,
 };
+pub use eval::{evaluate, DetectionHit, DetectionResults};
