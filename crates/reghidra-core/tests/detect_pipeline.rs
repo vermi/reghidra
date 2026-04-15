@@ -81,3 +81,33 @@ fn disable_rule_file_bumps_generation() {
         .expect("rule file entry must exist");
     assert!(!rf.enabled, "file should be disabled");
 }
+
+#[test]
+fn session_round_trip_preserves_rule_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let rule_path = dir.path().join("mine.yml");
+    write_rule_file(
+        &rule_path,
+        "rule: { name: x, severity: info, scope: file, description: \"\", \
+         features: { overlay: false } }",
+    );
+
+    let mut proj = Project::open(&fixture("wildfire-test-pe-file.exe")).unwrap();
+    proj.load_user_rule_file(&rule_path).unwrap();
+
+    let abs = rule_path.canonicalize().unwrap();
+    let source_path = abs.to_string_lossy().to_string();
+    proj.set_rule_file_enabled(&source_path, false);
+
+    let sess = proj.to_session();
+
+    let mut proj2 = Project::open(&fixture("wildfire-test-pe-file.exe")).unwrap();
+    proj2.apply_session(sess);
+
+    let rf = proj2
+        .loaded_rule_files
+        .iter()
+        .find(|f| f.source_path == source_path)
+        .expect("rule file reloaded into proj2");
+    assert!(!rf.enabled, "disabled override survives round-trip");
+}

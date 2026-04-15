@@ -1117,6 +1117,41 @@ impl Project {
             .map(|db| db.source_path.clone())
             .collect();
 
+        // Collect rule file stems/paths and disabled overrides.
+        let loaded_bundled_rule_stems = self
+            .loaded_rule_files
+            .iter()
+            .filter_map(|f| f.source_path.strip_prefix("bundled:"))
+            .filter_map(|p| {
+                p.rsplit_once('/').map(|(d, f)| {
+                    (
+                        d.to_string(),
+                        f.trim_end_matches(".yml")
+                            .trim_end_matches(".yaml")
+                            .to_string(),
+                    )
+                })
+            })
+            .collect();
+
+        let loaded_user_rule_paths: Vec<PathBuf> = self
+            .loaded_rule_files
+            .iter()
+            .filter(|f| !f.source_path.starts_with("bundled:"))
+            .map(|f| PathBuf::from(&f.source_path))
+            .collect();
+
+        let rule_file_overrides: Vec<DataSourceOverride> = self
+            .loaded_rule_files
+            .iter()
+            .filter(|f| !f.enabled)
+            .map(|f| DataSourceOverride {
+                kind: "rule".to_string(),
+                key: f.source_path.clone(),
+                enabled: false,
+            })
+            .collect();
+
         Session {
             version: 1,
             binary_path: self.binary.info.path.clone(),
@@ -1138,6 +1173,9 @@ impl Project {
             loaded_archive_stems,
             loaded_bundled_sigs,
             loaded_user_sig_paths,
+            loaded_bundled_rule_stems,
+            loaded_user_rule_paths,
+            rule_file_overrides,
         }
     }
 
@@ -1202,6 +1240,20 @@ impl Project {
                         path.display()
                     );
                 }
+            }
+        }
+
+        // Replay rule file lazy-loads: bundled first, then user paths.
+        for (subdir, stem) in &session.loaded_bundled_rule_stems {
+            let _ = self.load_bundled_rule_file(subdir, stem);
+        }
+        for path in &session.loaded_user_rule_paths {
+            let _ = self.load_user_rule_file(path);
+        }
+        // Apply per-rule-file enable overrides (kind = "rule", key = source_path).
+        for ov in &session.rule_file_overrides {
+            if ov.kind == "rule" {
+                self.set_rule_file_enabled(&ov.key, ov.enabled);
             }
         }
 
@@ -1314,6 +1366,22 @@ pub struct Session {
     /// skipped — sessions should be tolerant of moving fixtures.
     #[serde(default)]
     pub loaded_user_sig_paths: Vec<PathBuf>,
+
+    // --- Detection engine ---
+
+    /// Bundled rule files the user opted into. Each entry is a
+    /// `(subdir, stem)` pair, matching the `load_bundled_rule_file` API.
+    #[serde(default)]
+    pub loaded_bundled_rule_stems: Vec<(String, String)>,
+    /// Filesystem paths of user-provided YAML rule files. Replayed on
+    /// reload so user rule files survive session round-trips.
+    #[serde(default)]
+    pub loaded_user_rule_paths: Vec<PathBuf>,
+    /// Per-rule-file enable overrides (kind = `"rule"`, key = source_path).
+    /// Disabled rule files are recorded here so they stay disabled after reload.
+    /// Uses the existing `DataSourceOverride` struct for consistency.
+    #[serde(default)]
+    pub rule_file_overrides: Vec<DataSourceOverride>,
 }
 
 /// One persisted enable/disable override. See [`Session::data_source_overrides`].
