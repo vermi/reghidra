@@ -28,6 +28,30 @@ fn one_fn(mnemonics: Vec<&str>, apis: Vec<&str>, strings: Vec<&str>) -> Features
     Features { by_function: bf, ..Features::default() }
 }
 
+fn file_feats_with_sections(sections: Vec<SectionInfo>) -> Features {
+    Features {
+        file: FileFeatures {
+            sections,
+            ..FileFeatures::default()
+        },
+        ..Features::default()
+    }
+}
+
+fn file_feats_with_pe(sections: Vec<SectionInfo>, tls_callbacks: bool) -> Features {
+    Features {
+        file: FileFeatures {
+            sections,
+            pe: Some(PeFeatures {
+                tls_callbacks,
+                ..PeFeatures::default()
+            }),
+            ..FileFeatures::default()
+        },
+        ..Features::default()
+    }
+}
+
 fn load(stem_subdir: &str, stem: &str) -> Vec<Rule> {
     let path = format!("{stem_subdir}/{stem}.yml");
     let src = bundled_rule_contents(&path).expect("bundled rule exists");
@@ -629,4 +653,205 @@ fn network_raw_sockets_no_fire() {
     let rules = load("network", "raw-sockets");
     let feats = one_fn(vec![], vec!["socket"], vec!["SOCK_STREAM"]);
     assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+// ─── 16F: packers ────────────────────────────────────────────────────────────
+
+#[test]
+fn packers_upx_sections_fires() {
+    let rules = load("packers", "upx-sections");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".UPX0".into(), size: 4096, entropy: 0.1, writable: false, executable: true },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 1);
+}
+
+#[test]
+fn packers_upx_sections_no_fire() {
+    let rules = load("packers", "upx-sections");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".text".into(), size: 4096, entropy: 5.0, writable: false, executable: true },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 0);
+}
+
+#[test]
+fn packers_aspack_section_fires() {
+    let rules = load("packers", "aspack-section");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".aspack".into(), size: 8192, entropy: 7.0, writable: false, executable: false },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 1);
+}
+
+#[test]
+fn packers_aspack_section_no_fire() {
+    let rules = load("packers", "aspack-section");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".data".into(), size: 4096, entropy: 3.5, writable: true, executable: false },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 0);
+}
+
+#[test]
+fn packers_themida_tls_fires() {
+    let rules = load("packers", "themida-tls");
+    let feats = file_feats_with_pe(vec![
+        SectionInfo { name: ".themida".into(), size: 65536, entropy: 7.9, writable: false, executable: true },
+    ], true);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 1);
+}
+
+#[test]
+fn packers_themida_tls_no_fire_missing_tls() {
+    // .themida section but no TLS callbacks
+    let rules = load("packers", "themida-tls");
+    let feats = file_feats_with_pe(vec![
+        SectionInfo { name: ".themida".into(), size: 65536, entropy: 7.9, writable: false, executable: true },
+    ], false);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 0);
+}
+
+#[test]
+fn packers_packed_high_entropy_fires() {
+    let rules = load("packers", "packed-high-entropy");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".data".into(), size: 65536, entropy: 7.9, writable: true, executable: false },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 1);
+}
+
+#[test]
+fn packers_packed_high_entropy_no_fire() {
+    let rules = load("packers", "packed-high-entropy");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".text".into(), size: 32768, entropy: 6.5, writable: false, executable: true },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 0);
+}
+
+#[test]
+fn packers_vmprotect_sections_fires() {
+    let rules = load("packers", "vmprotect-sections");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".vmp0".into(), size: 131072, entropy: 7.8, writable: false, executable: true },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 1);
+}
+
+#[test]
+fn packers_vmprotect_sections_no_fire() {
+    let rules = load("packers", "vmprotect-sections");
+    let feats = file_feats_with_sections(vec![
+        SectionInfo { name: ".text".into(), size: 32768, entropy: 5.5, writable: false, executable: true },
+    ]);
+    assert_eq!(evaluate(&rules, &feats).file_hits.len(), 0);
+}
+
+// ─── 16G: suspicious_api ─────────────────────────────────────────────────────
+
+#[test]
+fn suspicious_api_manual_iat_resolution_fires() {
+    let rules = load("suspicious_api", "manual-iat-resolution");
+    let feats = one_fn(vec![], vec!["LoadLibraryA", "GetProcAddress"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn suspicious_api_manual_iat_resolution_no_fire() {
+    // GetProcAddress alone, no LoadLibrary
+    let rules = load("suspicious_api", "manual-iat-resolution");
+    let feats = one_fn(vec![], vec!["GetProcAddress"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn suspicious_api_dynamic_api_resolution_fires() {
+    let rules = load("suspicious_api", "dynamic-api-resolution");
+    // 5 of the 8 listed API name strings present
+    let feats = one_fn(vec![], vec![], vec![
+        "VirtualAlloc", "VirtualProtect", "CreateThread", "WriteProcessMemory", "LoadLibraryA",
+    ]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn suspicious_api_dynamic_api_resolution_no_fire() {
+    // Only 4 strings — one short of threshold
+    let rules = load("suspicious_api", "dynamic-api-resolution");
+    let feats = one_fn(vec![], vec![], vec![
+        "VirtualAlloc", "VirtualProtect", "CreateThread", "WriteProcessMemory",
+    ]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn suspicious_api_shellcode_allocate_exec_fires() {
+    let rules = load("suspicious_api", "shellcode-allocate-exec");
+    let feats = one_fn(vec![], vec!["VirtualAlloc"], vec!["PAGE_EXECUTE_READWRITE"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn suspicious_api_shellcode_allocate_exec_no_fire() {
+    // VirtualAlloc present but no RWX indicator
+    let rules = load("suspicious_api", "shellcode-allocate-exec");
+    let feats = one_fn(vec![], vec!["VirtualAlloc"], vec!["PAGE_READWRITE"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn suspicious_api_token_manipulation_fires() {
+    let rules = load("suspicious_api", "token-manipulation");
+    let feats = one_fn(vec![], vec!["OpenProcessToken", "AdjustTokenPrivileges"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn suspicious_api_token_manipulation_no_fire() {
+    // OpenProcessToken alone — no adjustment or impersonation
+    let rules = load("suspicious_api", "token-manipulation");
+    let feats = one_fn(vec![], vec!["OpenProcessToken", "CloseHandle"], vec![]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn suspicious_api_privilege_escalation_apis_fires() {
+    let rules = load("suspicious_api", "privilege-escalation-apis");
+    let feats = one_fn(vec![], vec!["AdjustTokenPrivileges"], vec!["SeDebugPrivilege"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn suspicious_api_privilege_escalation_apis_no_fire() {
+    // SeDebugPrivilege string but no AdjustTokenPrivileges call
+    let rules = load("suspicious_api", "privilege-escalation-apis");
+    let feats = one_fn(vec![], vec!["LookupPrivilegeValueA"], vec!["SeDebugPrivilege"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+#[test]
+fn suspicious_api_unhook_ntdll_fires() {
+    let rules = load("suspicious_api", "unhook-ntdll");
+    let feats = one_fn(vec!["syscall"], vec![], vec!["ntdll.dll"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 1);
+}
+
+#[test]
+fn suspicious_api_unhook_ntdll_no_fire() {
+    // ntdll.dll string but no direct syscall instruction
+    let rules = load("suspicious_api", "unhook-ntdll");
+    let feats = one_fn(vec!["call", "ret"], vec!["LoadLibraryA"], vec!["ntdll.dll"]);
+    assert_eq!(evaluate(&rules, &feats).function_hits.len(), 0);
+}
+
+// ─── parse-all sanity ────────────────────────────────────────────────────────
+
+#[test]
+fn every_bundled_rulefile_parses() {
+    for af in available_bundled_rulefiles() {
+        let src = bundled_rule_contents(&af.path).unwrap();
+        parse_rules_from_str(src, &af.path)
+            .unwrap_or_else(|e| panic!("{} failed to parse: {e}", af.path));
+    }
 }

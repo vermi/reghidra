@@ -1,0 +1,25 @@
+rule:
+  name: packers.themida-tls
+  severity: malicious
+  scope: file
+  description: |
+    Detects Themida/WinLicense-protected binaries by combining TLS callback presence with
+    characteristic section names (.themida, .winlice). Themida is a commercial protector used
+    by software vendors but is heavily abused by malware authors for its anti-debug,
+    anti-VM, and code virtualization capabilities.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/002/
+    - https://www.oreans.com/themida.php
+    - https://unprotect.it/technique/themida/
+  attack:
+    - T1027.002
+    - T1055
+  features:
+    and:
+      - tls_callbacks: true
+      - or:
+          - section:
+              name: /\.themida/
+          - section:
+              name: /\.winlice/

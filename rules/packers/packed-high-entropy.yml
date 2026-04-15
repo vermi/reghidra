@@ -1,0 +1,19 @@
+rule:
+  name: packers.packed-high-entropy
+  severity: suspicious
+  scope: file
+  description: |
+    Fires on any section with entropy above 7.5, which is characteristic of packed, encrypted,
+    or compressed content. This rule has a high false-positive rate in isolation — combine with
+    packer-specific section name rules or import table anomalies for higher confidence.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1027/002/
+    - https://unprotect.it/technique/detect-encryption-or-packing/
+  attack:
+    - T1027.002
+  features:
+    section:
+      entropy:
+        op: gt
+        value: 7.5
