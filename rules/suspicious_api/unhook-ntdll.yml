@@ -1,0 +1,23 @@
+rule:
+  name: suspicious_api.unhook-ntdll
+  severity: malicious
+  scope: function
+  description: |
+    Detects ntdll.dll unhooking: referencing ntdll.dll combined with direct syscall
+    or sysenter instructions. Security tools hook ntdll exports to intercept API calls;
+    malware bypasses these hooks by loading a fresh copy of ntdll and invoking syscalls
+    directly, making this combination a strong indicator of evasion intent.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1562/001/
+    - https://attack.mitre.org/techniques/T1055/
+    - https://unprotect.it/technique/direct-syscalls/
+  attack:
+    - T1562.001
+    - T1055
+  features:
+    and:
+      - string: /ntdll\.dll/i
+      - or:
+          - mnemonic: syscall
+          - mnemonic: sysenter

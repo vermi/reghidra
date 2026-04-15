@@ -1,0 +1,22 @@
+rule:
+  name: suspicious_api.token-manipulation
+  severity: suspicious
+  scope: function
+  description: |
+    Detects token manipulation: opening a process token with OpenProcessToken combined
+    with privilege adjustment or impersonation APIs. This pattern is used for privilege
+    escalation and lateral movement via token theft or impersonation.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1134/
+    - https://attack.mitre.org/techniques/T1134/001/
+    - https://learn.microsoft.com/en-us/windows/win32/secauthz/access-tokens
+  attack:
+    - T1134
+    - T1134.001
+  features:
+    and:
+      - api: /OpenProcessToken/
+      - or:
+          - api: /AdjustTokenPrivileges/
+          - api: /ImpersonateLoggedOnUser/

@@ -1,0 +1,23 @@
+rule:
+  name: suspicious_api.shellcode-allocate-exec
+  severity: malicious
+  scope: function
+  description: |
+    Detects shellcode staging: allocating memory with VirtualAlloc combined with
+    PAGE_EXECUTE_READWRITE (0x40) protection flags. This pattern is used by loaders
+    and injectors to allocate writable+executable memory for shellcode placement.
+    The string match for "0x40" is heuristic and may produce false positives.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1055/
+    - https://attack.mitre.org/techniques/T1027/
+    - https://learn.microsoft.com/en-us/windows/win32/memory/memory-protection-constants
+  attack:
+    - T1055
+    - T1027
+  features:
+    and:
+      - api: /VirtualAlloc/
+      - or:
+          - string: PAGE_EXECUTE_READWRITE
+          - string: /0x40/

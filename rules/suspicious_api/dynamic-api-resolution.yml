@@ -1,0 +1,28 @@
+rule:
+  name: suspicious_api.dynamic-api-resolution
+  severity: suspicious
+  scope: function
+  description: |
+    Function contains 5+ WinAPI name strings, suggesting runtime API resolution. Malware
+    frequently stores API names as plaintext or obfuscated strings and resolves them via
+    hashed lookups or GetProcAddress calls rather than static imports, to evade detection.
+  author: reghidra
+  references:
+    - https://attack.mitre.org/techniques/T1106/
+    - https://attack.mitre.org/techniques/T1027/007/
+    - https://unprotect.it/technique/api-hashing/
+  attack:
+    - T1106
+    - T1027.007
+  features:
+    n_or_more:
+      n: 5
+      of:
+        - string: VirtualAlloc
+        - string: VirtualProtect
+        - string: CreateThread
+        - string: WriteProcessMemory
+        - string: LoadLibraryA
+        - string: GetProcAddress
+        - string: OpenProcess
+        - string: RtlMoveMemory
