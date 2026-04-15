@@ -1371,6 +1371,25 @@ impl eframe::App for ReghidraApp {
                     }
                 }
                 PaletteAction::GoToAddress => {}
+                PaletteAction::ToggleDetectionsPanel => {
+                    self.side_panel = SidePanel::Detections;
+                }
+                PaletteAction::ReloadDetectionRules => {
+                    if let Some(ref mut project) = self.project {
+                        project.evaluate_detections();
+                    }
+                }
+                PaletteAction::LoadDetectionRules => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Load Detection Rules")
+                        .add_filter("YAML rule files", &["yml", "yaml"])
+                        .pick_file()
+                    {
+                        if let Some(ref mut project) = self.project {
+                            let _ = project.load_user_rule_file(&path);
+                        }
+                    }
+                }
             }
         }
 
