@@ -95,7 +95,7 @@ fn eval_expr(
         Name(m) => ff.map(|ff| if m.is_match(&ff.name) { 1 } else { 0 }).unwrap_or(0),
         Section { name, entropy_cmp, wx } => {
             f.file.sections.iter().filter(|s| {
-                name.as_ref().map_or(true, |m| m.is_match(&s.name))
+                name.as_ref().is_none_or(|m| m.is_match(&s.name))
                     && entropy_cmp.map_or(true, |(op, v)| cmp(op, s.entropy, v))
                     && wx.map_or(true, |want| (s.writable && s.executable) == want)
             }).count() as u32

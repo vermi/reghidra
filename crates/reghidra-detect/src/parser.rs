@@ -86,10 +86,10 @@ fn compile_expr(rule_name: &str, v: &serde_yaml::Value) -> Result<FeatureExpr, C
                 "n_or_more" => {
                     let m = val.as_mapping()
                         .ok_or_else(|| invalid(rule_name, "n_or_more expects {n, of}"))?;
-                    let n = m.get(&Value::String("n".into()))
+                    let n = m.get(Value::String("n".into()))
                         .and_then(|v| v.as_u64())
                         .ok_or_else(|| invalid(rule_name, "n_or_more.n required"))? as usize;
-                    let of_v = m.get(&Value::String("of".into()))
+                    let of_v = m.get(Value::String("of".into()))
                         .ok_or_else(|| invalid(rule_name, "n_or_more.of required"))?;
                     let of_seq = of_v.as_sequence()
                         .ok_or_else(|| invalid(rule_name, "n_or_more.of must be list"))?;
@@ -100,13 +100,13 @@ fn compile_expr(rule_name: &str, v: &serde_yaml::Value) -> Result<FeatureExpr, C
                 "count" => {
                     let m = val.as_mapping()
                         .ok_or_else(|| invalid(rule_name, "count expects {feature, min[, max]}"))?;
-                    let feature_v = m.get(&Value::String("feature".into()))
+                    let feature_v = m.get(Value::String("feature".into()))
                         .ok_or_else(|| invalid(rule_name, "count.feature required"))?;
                     let inner = compile_expr(rule_name, feature_v)?;
-                    let min = m.get(&Value::String("min".into()))
+                    let min = m.get(Value::String("min".into()))
                         .and_then(|v| v.as_u64())
                         .ok_or_else(|| invalid(rule_name, "count.min required"))? as u32;
-                    let max = m.get(&Value::String("max".into()))
+                    let max = m.get(Value::String("max".into()))
                         .and_then(|v| v.as_u64()).map(|n| n as u32);
                     Ok(FeatureExpr::Count { inner: Box::new(inner), range: CountRange { min, max } })
                 }
@@ -163,11 +163,11 @@ fn compile_single(rule_name: &str, key: &str, val: &serde_yaml::Value)
                 .ok_or_else(|| invalid(rule_name, "section: expects a mapping"))?;
             let name = opt_str(m, "name")
                 .map(|s| str_matcher(rule_name, s)).transpose()?;
-            let entropy_cmp = match m.get(&Value::String("entropy".into())) {
+            let entropy_cmp = match m.get(Value::String("entropy".into())) {
                 Some(v) => Some(parse_entropy_cmp(rule_name, v)?),
                 None => None,
             };
-            let wx = m.get(&Value::String("wx".into())).and_then(|v| v.as_bool());
+            let wx = m.get(Value::String("wx".into())).and_then(|v| v.as_bool());
             Ok(FeatureExpr::Section { name, entropy_cmp, wx })
         }
         "rich_comp_id" => {
@@ -215,19 +215,19 @@ fn compile_single(rule_name: &str, key: &str, val: &serde_yaml::Value)
 }
 
 fn get_str<'a>(rule: &str, m: &'a serde_yaml::Mapping, key: &str) -> Result<&'a str, CompileError> {
-    m.get(&serde_yaml::Value::String(key.into()))
+    m.get(serde_yaml::Value::String(key.into()))
         .and_then(|v| v.as_str())
         .ok_or_else(|| invalid(rule, &format!("missing string field `{key}`")))
 }
 
 fn opt_str<'a>(m: &'a serde_yaml::Mapping, key: &str) -> Option<&'a str> {
-    m.get(&serde_yaml::Value::String(key.into())).and_then(|v| v.as_str())
+    m.get(serde_yaml::Value::String(key.into())).and_then(|v| v.as_str())
 }
 
 fn parse_entropy_cmp(rule: &str, v: &serde_yaml::Value) -> Result<(Comparison, f64), CompileError> {
     let m = v.as_mapping().ok_or_else(|| invalid(rule, "entropy expects {op, value}"))?;
     let op = get_str(rule, m, "op")?;
-    let value = m.get(&serde_yaml::Value::String("value".into()))
+    let value = m.get(serde_yaml::Value::String("value".into()))
         .and_then(|v| v.as_f64())
         .ok_or_else(|| invalid(rule, "entropy.value must be a number"))?;
     let cmp = match op {
@@ -240,10 +240,10 @@ fn parse_entropy_cmp(rule: &str, v: &serde_yaml::Value) -> Result<(Comparison, f
 
 fn parse_count_range(rule: &str, v: &serde_yaml::Value) -> Result<CountRange, CompileError> {
     let m = v.as_mapping().ok_or_else(|| invalid(rule, "expects {min[, max]}"))?;
-    let min = m.get(&serde_yaml::Value::String("min".into()))
+    let min = m.get(serde_yaml::Value::String("min".into()))
         .and_then(|v| v.as_u64())
         .ok_or_else(|| invalid(rule, "missing min"))? as u32;
-    let max = m.get(&serde_yaml::Value::String("max".into()))
+    let max = m.get(serde_yaml::Value::String("max".into()))
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
     Ok(CountRange { min, max })
@@ -251,10 +251,10 @@ fn parse_count_range(rule: &str, v: &serde_yaml::Value) -> Result<CountRange, Co
 
 pub(crate) fn str_matcher(rule_name: &str, s: &str) -> Result<StrMatcher, CompileError> {
     // /regex/flags form; otherwise literal.
-    if s.starts_with('/') {
-        if let Some(end) = s[1..].rfind('/') {
-            let body = &s[1..=end];
-            let flags = &s[end + 2..];
+    if let Some(inner) = s.strip_prefix('/') {
+        if let Some(end) = inner.rfind('/') {
+            let body = &inner[..end];
+            let flags = &inner[end + 1..];
             let mut pat = String::new();
             if flags.contains('i') { pat.push_str("(?i)"); }
             if flags.contains('m') { pat.push_str("(?m)"); }

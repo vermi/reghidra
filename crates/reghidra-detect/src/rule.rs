@@ -30,7 +30,7 @@ impl StrMatcher {
 pub struct CountRange { pub min: u32, pub max: Option<u32> }
 impl CountRange {
     pub fn contains(&self, n: u32) -> bool {
-        n >= self.min && self.max.map_or(true, |m| n <= m)
+        n >= self.min && self.max.is_none_or(|m| n <= m)
     }
 }
 
